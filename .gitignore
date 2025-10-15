@@ -1,0 +1,5 @@
+renv.lock
+renv/
+.lintr
+.Rprofile
+*.so

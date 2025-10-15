@@ -1,0 +1,23 @@
+Package: PDMPSamplersR
+Type: Package
+Title: An R-bridge to PDMPSamplers.jl for Efficient Bayesian Inference with Piecewise Deterministic Markov Processes
+Version: 0.1.0
+Authors@R: c(
+    person(
+      "Don", "van den Bergh",
+      email = "d.vandenbergh@uva.nl",
+      role = c("aut", "cre")
+    )
+  )
+Description: More about what it does (maybe more than one line).
+    Continuation lines should be indented.
+License: MIT + file LICENSE
+Encoding: UTF-8
+LazyData: true
+Imports:
+    cli,
+    fs,
+    JuliaCall,
+    rappdirs,
+    rlang
+RoxygenNote: 7.3.3

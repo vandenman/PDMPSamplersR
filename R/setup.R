@@ -13,11 +13,17 @@ setup_julia_project <- function() {
   project_dir <- get_julia_project_dir()
   if (!fs::dir_exists(project_dir)) fs::dir_create(project_dir, recurse = TRUE)
 
-  pmdpsamplersjl_location <- "/home/don/hdd/surfdrive/Postdoc/PDMPSamplers.jl"
   JuliaCall::julia_command("import Pkg")
   JuliaCall::julia_command(sprintf('Pkg.activate("%s")', project_dir))
-  JuliaCall::julia_command(sprintf('Pkg.develop(path="%s")', pmdpsamplersjl_location))
-  # JuliaCall::julia_command('Pkg.develop(url="https://github.com/username/PDMPSamplers.jl.git")')
+  pmdpsamplersjl_location <- getOption("PDMPSamplersR.pmdpsamplersjl_location", NULL)
+  if (!is.null(pmdpsamplersjl_location)) {
+
+  # pmdpsamplersjl_location <- "/home/don/hdd/surfdrive/Postdoc/PDMPSamplers.jl"
+    JuliaCall::julia_command(sprintf('Pkg.develop(path="%s")', pmdpsamplersjl_location))
+  } else {
+    pmdpsamplersjl_url <- "https://github.com/vandenman/PDMPSamplers.jl"
+    JuliaCall::julia_command(sprintf('Pkg.add(url="%s")', pmdpsamplersjl_url))
+  }
   JuliaCall::julia_command('Pkg.update()')
   JuliaCall::julia_command('Pkg.precompile()')
 

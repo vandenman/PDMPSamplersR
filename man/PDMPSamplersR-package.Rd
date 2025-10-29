@@ -4,12 +4,12 @@
 \name{PDMPSamplersR-package}
 \alias{PDMPSamplersR}
 \alias{PDMPSamplersR-package}
-\title{PDMPSamplersR: What the Package Does (Title Case)}
+\title{PDMPSamplersR: An R-bridge to PDMPSamplers.jl for Efficient Bayesian Inference with Piecewise Deterministic Markov Processes}
 \description{
 More about what it does (maybe more than one line). Continuation lines should be indented.
 }
 \author{
-\strong{Maintainer}: Jane Doe \email{jane@example.com}
+\strong{Maintainer}: Don van den Bergh \email{d.vandenbergh@uva.nl}
 
 }
 \keyword{internal}

@@ -3,7 +3,8 @@ validate_pdmp_params <- function(d, flow, algorithm, T, t0 = 0.0,
                                 flow_mean = NULL, flow_cov = NULL, c0 = 1e-2,
                                 x0 = NULL, theta0 = NULL, show_progress = TRUE,
                                 discretize_dt = NULL,
-                                sticky = FALSE, can_stick = NULL, model_prior = NULL, parameter_prior = NULL) {
+                                sticky = FALSE, can_stick = NULL, model_prior = NULL, parameter_prior = NULL,
+                                grid_n = 30, grid_t_max = 2.0) {
 
   # Validate basic parameters
   d <- cast_integer(d, n = 1)
@@ -78,12 +79,17 @@ validate_pdmp_params <- function(d, flow, algorithm, T, t0 = 0.0,
 
   }
 
+  grid_n <- cast_integer(grid_n, n = 1)
+  validate_type(grid_n, type = "integer", n = 1, positive = TRUE)
+  validate_type(grid_t_max, type = "double", n = 1, positive = TRUE)
+
   return(list(
     d = d, flow = flow, algorithm = algorithm, T = T, t0 = t0,
     flow_mean = flow_mean, flow_cov = flow_cov, c0 = c0,
     x0 = x0, theta0 = theta0, show_progress = show_progress,
     discretize_dt = discretize_dt,
-    sticky = sticky, can_stick = can_stick, model_prior = model_prior, parameter_prior = parameter_prior
+    sticky = sticky, can_stick = can_stick, model_prior = model_prior, parameter_prior = parameter_prior,
+    grid_n = grid_n, grid_t_max = grid_t_max
   ))
 }
 
@@ -122,7 +128,7 @@ validate_pdmp_params <- function(d, flow, algorithm, T, t0 = 0.0,
 #' @export
 pdmp_sample <- function(f, d,
                         flow = c("ZigZag", "BouncyParticle", "Boomerang"),
-                        algorithm = c("ThinningStrategy", "GridThinningStrategy", "RootsPoissonStrategy"),
+                        algorithm = c("ThinningStrategy", "GridThinningStrategy"), #"RootsPoissonStrategy"),
                         T = 50000, t0 = 0.0,
                         flow_mean = NULL, flow_cov = NULL, c0 = 1e-2,
                         x0 = NULL, theta0 = NULL,
@@ -203,8 +209,10 @@ pdmp_sample <- function(f, d,
 #' @param hessian Function that returns the negative Hessian matrix of size d x d (default: NULL).
 #' @param sticky Logical, whether to use sticky sampling (default: FALSE).
 #' @param can_stick Logical vector of length d, which coordinates can stick (default: all FALSE).
-#' @param model_prior Numeric, stickiness parameter (default: NULL).
-#' @param slab_prior Numeric, slab prior parameter (default: NULL).
+#' @param model_prior Prior distribution object for model selection. Should be of class 'bernoulli' or 'beta-bernoulli' (default: NULL).
+#' @param parameter_prior Numeric vector of length d, prior parameters for sticky sampling (default: NULL).
+#' @param grid_n Integer, number of grid points for GridThinningStrategy (default: 30).
+#' @param grid_t_max Numeric, maximum time for grid in GridThinningStrategy (default: 2.0).
 #' @param show_progress Logical, whether to show progress bar (default: TRUE).
 #' @param discretize_dt Numeric, discretization time step. If NULL, uses mean
 #'   inter-event time (default: NULL).
@@ -223,6 +231,7 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, path_to_standata,
                         x0 = NULL, theta0 = NULL,
                         hessian = NULL,
                         sticky = FALSE, can_stick = NULL, model_prior = NULL, parameter_prior = NULL,
+                        grid_n = 30, grid_t_max = 2.0,
                         show_progress = TRUE, discretize_dt = NULL) {
 
   check_for_julia_setup()
@@ -236,12 +245,13 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, path_to_standata,
 
   # Use common validation function
   params <- validate_pdmp_params(d, flow, algorithm, T, t0, flow_mean, flow_cov,
-                                c0, x0, theta0, show_progress, discretize_dt,
-                                sticky, can_stick, model_prior, parameter_prior)
+                                 c0, x0, theta0, show_progress, discretize_dt,
+                                 sticky, can_stick, model_prior, parameter_prior, grid_n, grid_t_max)
 
   # Pass arguments to Julia
-  for (nm in names(params))
+  for (nm in names(params)) {
     JuliaCall::julia_assign(nm, params[[nm]])
+  }
 
   result <- run_r_interface_function()
 
@@ -251,7 +261,8 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, path_to_standata,
 run_r_interface_function <- function() {
   JuliaCall::julia_eval("r_interface_function(
     grad!, d, x0, flow, algorithm, flow_mean, flow_cov, nothing,
-    c0, t0, T, discretize_dt, hessian, hvp!,
+    c0, grid_n, grid_t_max,
+    t0, T, discretize_dt, hessian, hvp!,
     sticky, can_stick, model_prior, parameter_prior,
     show_progress
   )")

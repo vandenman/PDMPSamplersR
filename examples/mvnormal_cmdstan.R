@@ -1,26 +1,23 @@
-renv::install(".", prompt = FALSE)
-# library(cmdstanr)
+# renv::install(".", prompt = FALSE)
 library(PDMPSamplersR)
 library(tibble)
 library(ggplot2)
 library(patchwork)
 library(fs)
 
-ggplot2::theme_set(
-  ggplot2::theme_bw(base_size = 32) +
-  theme(geom = element_geom(pointshape = 21, pointsize = 15, fill = scales::alpha("grey", .5)))
+theme_set(
+  theme_bw(base_size = 32) +
+    theme(geom = element_geom(pointshape = 21, pointsize = 15, fill = scales::alpha("grey", .5)))
 )
+
 stan_model_dir <- path("stan", "models")
 stan_data_dir  <- path("stan", "data")
 
-# mod <- cmdstanr::cmdstan_model("stanmodels/mvnormal.stan", compile_model_methods = FALSE)#, force = TRUE)
-
 set.seed(123)
 d <- 5
-mean_vec <- rnorm(d, 0 , 2)
+mean_vec <- rnorm(d, 0, 2)
 cov_matrix <- stats::rWishart(1, df = d + 2, Sigma = diag(d))[, , 1]
 stan_data <- list(N = 5, mu = mean_vec, sigma = cov_matrix)
-
 
 data_path <- path(stan_data_dir, "mvnormal_data.json")
 write_stan_json(stan_data, data_path)
@@ -155,8 +152,9 @@ beta_binomial_pmf <- function(k, d, a, b, log = FALSE, individual_model = FALSE)
 
   # Combine in log space and exponentiate
   log_prob <- (!individual_model) * log_binomial_coeff + log_beta_numerator - log_beta_denominator
-  if (log)
+  if (log) {
      return(log_prob)
+  }
   exp(log_prob)
 }
 # beta_binomial_pmf(0:d, d, model_prior$a, model_prior$b)
@@ -299,55 +297,49 @@ plt_incl_vs_value <- subset(tib_lr, how == "Bayes" & param == "beta") |>
 plt_recovery / plt_incl_vs_value
 
 
+# t-test
+library(PDMPSamplersR)
+set.seed(123)
+nx <- 30
+ny <- 35
+mux <- 0
+muy <- 0.5
+sigma2 <- 2.1
 
+x1 <- rnorm(nx, mux, sqrt(sigma2))
+x2 <- rnorm(ny, muy, sqrt(sigma2))
 
+rscale <- 1.0
+analytic_results <- BayesFactor::ttestBF(x = x1, y = x2, rscale = rscale)
 
-fit_mcmc <- mod$sample(
-  data = stan_data,
-  seed = 123,
-  chains = 1,
-  # we don't actually need any samples
-  iter_sampling = 0,
-  iter_warmup = 0
+stan_data <- list(nx = nx, ny = ny, x = x1, y = x2, rscale = rscale)
+data_path <- path(stan_data_dir, "ttest_data.json")
+model_path <- path(stan_model_dir, "ttest.stan")
+write_stan_json(stan_data, data_path)
+
+# ignore this for now
+result_ttest <- PDMPSamplersR::pdmp_sample_from_stanmodel(
+  model_path, data_path,
+  flow = "ZigZag", T = 100000,
+  alg = "GridThinningStrategy",
+  grid_n = 30,
+  sticky = TRUE,
+  can_stick = c(FALSE, TRUE, FALSE), # grand mean, delta, sigma
+  model_prior = bernoulli(0.5),
+  parameter_prior = rep(dcauchy(0, 0, rscale), 3)
 )
 
+prior_inclusion_prob <- 0.5
+posterior_inclusion_prob <- mean(result_ttest$samples[, 2] != 0)
+prior_odds <- prior_inclusion_prob / (1 - prior_inclusion_prob)
+posterior_odds <- posterior_inclusion_prob / (1 - posterior_inclusion_prob)
+bayes_factor_10 <- posterior_odds / prior_odds
 
-Gx  <- \(x) -c(fit_mcmc$grad_log_prob(x))
-Hx  <- \(x) -fit_mcmc$hessian(x)$hessian
-
-stopifnot(isTRUE(all.equal(Gx(1:5), solve(cov_matrix, 1:5 - mean_vec))))
-stopifnot(isTRUE(all.equal(Hx(1:5), solve(cov_matrix))))
-
-# renv::install(".", prompt = FALSE)
-# debugonce(PDMPSamplersR::pdmp_sample)
-result <- PDMPSamplersR::pdmp_sample(Gx, 5, "ZigZag", flow_mean = mean_vec, flow_cov = cov_matrix)
-result
-cov(result[[1]]) - cov_matrix
-colMeans(result[[1]]) - mean_vec
-
-test_output <- Hx(rnorm(5))
-Hx(1:5)
-
-result2 <- PDMPSamplersR::pdmp_sample(Gx, 5, "ZigZag", "GridThinningStrategy", hessian = Hx, flow_mean = mean_vec, flow_cov = cov_matrix)
-result2
-cov(result2[[1]]) - cov_matrix
-colMeans(result2[[1]]) - mean_vec
-
-file <- tempfile(fileext = ".json")
-cmdstanr::write_stan_json(stan_data, "data.json")
-
-JuliaCall::julia_eval("begin
-import Pkg; Pkg.add(\"BridgeStan\")
-end")
-
-JuliaCall::julia_eval("begin
-using BridgeStan
-smb = StanModel(\"stanmodels/mvnormal.stan\", \"data.json\")
-end")
-
-
-bench::mark(
-  Gx(1:5),
-  Hx(1:5),
-  check = FALSE
+# TODO: close but not close enough!
+c(
+  pdmp_bf = bayes_factor_10,
+  analytic_bf = BayesFactor::extractBF(analytic_results, onlybf = TRUE)
 )
+
+# TODO: should be automatic with bridgestan!
+# mean(exp(result_ttest$samples[, 3]))

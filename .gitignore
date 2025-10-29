@@ -3,3 +3,5 @@ renv/
 .lintr
 .Rprofile
 *.so
+stan/omrf
+.Rproj.user

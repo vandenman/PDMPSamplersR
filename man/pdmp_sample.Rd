@@ -8,7 +8,7 @@ pdmp_sample(
   f,
   d,
   flow = c("ZigZag", "BouncyParticle", "Boomerang"),
-  algorithm = c("ThinningStrategy", "GridThinningStrategy", "RootsPoissonStrategy"),
+  algorithm = c("ThinningStrategy", "GridThinningStrategy"),
   T = 50000,
   t0 = 0,
   flow_mean = NULL,

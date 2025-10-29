@@ -21,6 +21,8 @@ pdmp_sample_from_stanmodel(
   can_stick = NULL,
   model_prior = NULL,
   parameter_prior = NULL,
+  grid_n = 30,
+  grid_t_max = 2,
   show_progress = TRUE,
   discretize_dt = NULL
 )
@@ -56,14 +58,18 @@ pdmp_sample_from_stanmodel(
 
 \item{can_stick}{Logical vector of length d, which coordinates can stick (default: all FALSE).}
 
-\item{model_prior}{Numeric, stickiness parameter (default: NULL).}
+\item{model_prior}{Prior distribution object for model selection. Should be of class 'bernoulli' or 'beta-bernoulli' (default: NULL).}
+
+\item{parameter_prior}{Numeric vector of length d, prior parameters for sticky sampling (default: NULL).}
+
+\item{grid_n}{Integer, number of grid points for GridThinningStrategy (default: 30).}
+
+\item{grid_t_max}{Numeric, maximum time for grid in GridThinningStrategy (default: 2.0).}
 
 \item{show_progress}{Logical, whether to show progress bar (default: TRUE).}
 
 \item{discretize_dt}{Numeric, discretization time step. If NULL, uses mean
 inter-event time (default: NULL).}
-
-\item{slab_prior}{Numeric, slab prior parameter (default: NULL).}
 }
 \value{
 A list containing:

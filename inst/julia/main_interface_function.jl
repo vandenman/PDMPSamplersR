@@ -9,13 +9,13 @@ function grad_and_hvp_from_stanmodel(path_to_stan_model, path_to_stan_data)
 
     # Create log density function
     grad! = (out, x) -> begin
-        BS.log_density_gradient!(sm, x, out)
+        BS.log_density_gradient!(sm, x, out, propto = false)
         out .*= -one(eltype(out))
         return out
     end
     # Create log density function
     hvp! = (out, x, v) -> begin
-        BS.log_density_hessian_vector_product!(sm, x, v, out)
+        BS.log_density_hessian_vector_product!(sm, x, v, out, propto = false)
         out .*= -one(eltype(out))
         return out
     end
@@ -34,7 +34,12 @@ function r_interface_function(
         flow_mean::AbstractVector{<:Number},
         flow_cov::AbstractMatrix{<:Number},
         θ00::Union{AbstractVector{<:Number}, Nothing} = nothing,
+        # for ThinningStrategy
         c0::Float64 = 1e-2,
+        # for GridThinningStrategy
+        grid_n::Int = 30,
+        grid_t_max::Float64 = 2.0,
+        # end strategies
         t0::AbstractFloat = 0.0,
         T::AbstractFloat = 10000.0,
         discretize_dt::Union{AbstractFloat, Nothing} = nothing,
@@ -75,9 +80,9 @@ function r_interface_function(
                 hess = hessian!(x)
                 mul!(out, hess, v)
             end
-            alg = GridThinningStrategy(; hvp = hess!)
+            alg = GridThinningStrategy(; N = grid_n, t_max = grid_t_max, hvp = hess!)
         else
-            alg = GridThinningStrategy(; hvp = hvp!)
+            alg = GridThinningStrategy(; N = grid_n, t_max = grid_t_max, hvp = hvp!)
         end
 
     else

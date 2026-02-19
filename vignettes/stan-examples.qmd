@@ -16,7 +16,10 @@ library(ggplot2)
 library(patchwork)
 library(fs)
 
-julia_available <- nzchar(Sys.which("julia"))
+julia_available <- tryCatch(
+    { JuliaCall::julia_setup(verbose = FALSE); TRUE },
+    error = function(e) FALSE
+)
 knitr::opts_chunk$set(eval = julia_available)
 
 theme_set(

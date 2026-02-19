@@ -16,6 +16,9 @@ library(ggplot2)
 library(patchwork)
 library(fs)
 
+julia_available <- nzchar(Sys.which("julia"))
+knitr::opts_chunk$set(eval = julia_available)
+
 theme_set(
   theme_bw(base_size = 16) +
     theme(

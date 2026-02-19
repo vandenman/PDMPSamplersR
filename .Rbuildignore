@@ -1,2 +1,12 @@
 ^renv$
 ^renv\.lock$
+^.*\.Rproj$
+^\.Rproj\.user$
+^examples$
+^doc$
+^Meta$
+^\.github$
+^\.git$
+^\.gitignore$
+^.*\.so$
+^.*\.o$

@@ -11,12 +11,12 @@ pdmp_sample_from_stanmodel(
   algorithm = c("ThinningStrategy", "GridThinningStrategy", "RootsPoissonStrategy"),
   T = 50000,
   t0 = 0,
+  t_warmup = 0,
   flow_mean = NULL,
   flow_cov = NULL,
   c0 = 0.01,
   x0 = NULL,
   theta0 = NULL,
-  hessian = NULL,
   sticky = FALSE,
   can_stick = NULL,
   model_prior = NULL,
@@ -24,11 +24,15 @@ pdmp_sample_from_stanmodel(
   grid_n = 30,
   grid_t_max = 2,
   show_progress = TRUE,
-  discretize_dt = NULL
+  discretize_dt = NULL,
+  n_chains = 1L,
+  threaded = FALSE
 )
 }
 \arguments{
-\item{path_to_stanmodel}{Character, path to the compiled Stan model file.}
+\item{path_to_stanmodel}{Character, path to a Stan model file (.stan) or a
+compiled Stan model (.so/.dll/.dylib). If a .stan file is provided,
+BridgeStan will compile it automatically.}
 
 \item{path_to_standata}{Character, path to the Stan data file (JSON format).}
 
@@ -42,6 +46,8 @@ pdmp_sample_from_stanmodel(
 
 \item{t0}{Numeric, initial time (default: 0.0).}
 
+\item{t_warmup}{Numeric, warmup time (default: 0.0). Events during warmup are discarded.}
+
 \item{flow_mean}{Numeric vector of length d, mean vector for the flow (default: zero vector).}
 
 \item{flow_cov}{Numeric matrix of size d x d, covariance matrix for the flow (default: identity matrix).}
@@ -52,13 +58,12 @@ pdmp_sample_from_stanmodel(
 
 \item{theta0}{Numeric vector of length d, initial velocity (default: random based on the flow).}
 
-\item{hessian}{Function that returns the negative Hessian matrix of size d x d (default: NULL).}
-
 \item{sticky}{Logical, whether to use sticky sampling (default: FALSE).}
 
 \item{can_stick}{Logical vector of length d, which coordinates can stick (default: all FALSE).}
 
-\item{model_prior}{Prior distribution object for model selection. Should be of class 'bernoulli' or 'beta-bernoulli' (default: NULL).}
+\item{model_prior}{Prior distribution object for model selection. Should be of class
+'bernoulli' or 'beta-bernoulli' (default: NULL).}
 
 \item{parameter_prior}{Numeric vector of length d, prior parameters for sticky sampling (default: NULL).}
 
@@ -70,14 +75,22 @@ pdmp_sample_from_stanmodel(
 
 \item{discretize_dt}{Numeric, discretization time step. If NULL, uses mean
 inter-event time (default: NULL).}
+
+\item{n_chains}{Integer, number of chains to run (default: 1).}
+
+\item{threaded}{Logical, whether to run chains in parallel (default: FALSE).}
 }
 \value{
 A list containing:
   \item{samples}{Matrix of discretized samples}
-  \item{trace}{The full trace object}
-  \item{stats}{Sampling statistics}
+  \item{stats}{List of sampling statistics}
 }
 \description{
 Performs Piecewise Deterministic Markov Process (PDMP) sampling from a Stan model
-using the PDMPSamplers.jl Julia package.
+using the PDMPSamplers.jl Julia package with BridgeStan integration.
+}
+\details{
+The gradient and Hessian-vector product are automatically derived from the Stan model
+via the BridgeStan extension of PDMPSamplers.jl. This means you do not need to provide
+a separate gradient or Hessian function.
 }

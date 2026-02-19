@@ -1,159 +1,173 @@
-# should have already been done by the calling script
-using PDMPSamplers, LinearAlgebra
-import BridgeStan as BS
+using PDMPSamplers, LinearAlgebra, BridgeStan
 
-function grad_and_hvp_from_stanmodel(path_to_stan_model, path_to_stan_data)
-
-    # Compile Stan model
-    sm = BS.StanModel(path_to_stan_model, path_to_stan_data)
-
-    # Create log density function
-    grad! = (out, x) -> begin
-        BS.log_density_gradient!(sm, x, out, propto = false)
-        out .*= -one(eltype(out))
-        return out
-    end
-    # Create log density function
-    hvp! = (out, x, v) -> begin
-        BS.log_density_hessian_vector_product!(sm, x, v, out, propto = false)
-        out .*= -one(eltype(out))
-        return out
-    end
-
-    d = BS.param_num(sm)
-
-    return grad!, hvp!, d, sm
-end
-
-function r_interface_function(
-        grad!,
-        d::Integer,
-        x0::AbstractVector{<:Number},
-        flow_type::String,
-        algorithm_type::String,
-        flow_mean::AbstractVector{<:Number},
-        flow_cov::AbstractMatrix{<:Number},
-        θ00::Union{AbstractVector{<:Number}, Nothing} = nothing,
-        # for ThinningStrategy
-        c0::Float64 = 1e-2,
-        # for GridThinningStrategy
-        grid_n::Int = 30,
-        grid_t_max::Float64 = 2.0,
-        # end strategies
-        t0::AbstractFloat = 0.0,
-        T::AbstractFloat = 10000.0,
-        discretize_dt::Union{AbstractFloat, Nothing} = nothing,
-        hessian! = nothing,
-        hvp! = nothing,
-        sticky::Bool = false,
-        can_stick::Union{<:AbstractVector{<:Bool}, Nothing} = nothing,
-        # TODO: this needs a type
-        model_prior = nothing,
-        parameter_prior::Union{<:AbstractVector{<:Real}, Nothing} = nothing,
-        show_progress::Bool = true
-    )
-
-    # Create flow object
-    prec = inv(Symmetric(flow_cov))
+function build_flow(flow_type::String, prec::AbstractMatrix{Float64}, flow_mean::AbstractVector{Float64})
     if flow_type == "ZigZag"
-        flow = ZigZag(prec, flow_mean)
+        return ZigZag(prec, flow_mean)
     elseif flow_type == "BouncyParticle"
-        flow = BouncyParticle(prec, flow_mean)
+        return BouncyParticle(prec, flow_mean)
     elseif flow_type == "Boomerang"
-        flow = Boomerang(prec, flow_mean)
+        return Boomerang(prec, flow_mean)
     else
         throw(ArgumentError("Unknown flow type: $flow_type"))
     end
+end
 
-    # Create algorithm object
+function build_algorithm(algorithm_type::String; c0::Float64, d::Integer, grid_n::Int, grid_t_max::Float64)
     if algorithm_type == "ThinningStrategy"
-        alg = ThinningStrategy(GlobalBounds(c0 / d, d))
-    elseif algorithm_type == "RootsPoissonStrategy"
-        alg = RootsPoissonStrategy()
+        return ThinningStrategy(GlobalBounds(c0 / d, d))
     elseif algorithm_type == "GridThinningStrategy"
-
-        if isnothing(hvp!) && isnothing(hessian!)
-            throw(ArgumentError("Either Hessian function or Hessian-vector product function must be provided for algorithm GridThinningStrategy"))
-        end
-        if isnothing(hvp!)
-            hess! = (out, x, v) -> begin
-                hess = hessian!(x)
-                mul!(out, hess, v)
-            end
-            alg = GridThinningStrategy(; N = grid_n, t_max = grid_t_max, hvp = hess!)
-        else
-            alg = GridThinningStrategy(; N = grid_n, t_max = grid_t_max, hvp = hvp!)
-        end
-
+        return GridThinningStrategy(; N = grid_n, t_max = grid_t_max)
+    elseif algorithm_type == "RootsPoissonStrategy"
+        return RootsPoissonTimeStrategy()
     else
         throw(ArgumentError("Unknown algorithm type: $algorithm_type"))
     end
+end
 
-    if sticky
+function wrap_sticky(alg::PDMPSamplers.PoissonTimeStrategy, sticky::Bool, model_prior, parameter_prior, can_stick)
+    !sticky && return alg
 
-        if haskey(model_prior, :prob)
+    if haskey(model_prior, :prob)
+        w = model_prior[:prob] ./ (1 .- model_prior[:prob])
+        κ = w .* parameter_prior
+    else
+        κ = BetaBernoulliKappa(model_prior[:a]::Float64, model_prior[:b]::Float64, parameter_prior)
+    end
 
-            w = model_prior[:prob] ./ (1 .- model_prior[:prob])
-            κ = w .* parameter_prior
+    return Sticky(alg, κ, BitVector(can_stick))
+end
 
-        else # betabernoulli
-
-            # A type stable approach would probably be a lot better here...
-            a = model_prior[:a]::Float64
-            b = model_prior[:b]::Float64
-            marginal_pdfs_at_zero = parameter_prior
-            κ = (i, x, γ, args...) -> begin
-
-                # critical! do not look at sum(!iszero, x)
-                # because that doesn't mean a particle is frozen.
-                # instead, use γ which is state.free
-                # note that this is only called whenever we're computing the time to stay frozen, so at that point
-                # we have γ[i] == false, hence the assert below
-                @assert !γ[i] "κ(...) was called but the coordinate to compute the freezing time for (i=$i) is not frozen!?"
-
-                k_free = sum(γ)
-                n_tot  = length(x)
-
-                # should never happen because this should only be called when we're computing the time to stay frozen
-                k_free == n_tot && throw(error("All parameters are free, cannot compute κ!"))
-
-                # inclusion odds conditional on current sticky state
-                prior_incl_odds = (a + k_free) / (b + n_tot - k_free - 1)
-
-                if n_tot - k_free - 1 + b <= 0
-                    # or error?
-                    # @warn "Inclusion odds are infinite"
-                    return Inf
-                end
-
-                return prior_incl_odds * marginal_pdfs_at_zero[i]
-            end
+function discretize_chains(chains::PDMPChains; discretize_dt::Union{Float64, Nothing} = nothing)
+    function _discretize_single(trace)
+        if isnothing(discretize_dt)
+            ts = [event.time for event in trace.events]
+            dt = mean(diff(ts))
+        else
+            dt = discretize_dt
         end
-
-        alg = Sticky(alg, κ, BitVector(can_stick))
-
+        return Matrix(PDMPDiscretize(trace, dt))
     end
+    return [_discretize_single(trace) for trace in chains.traces]
+end
 
-    # Initial conditions
-    if isnothing(θ00)
-        θ0 = PDMPSamplers.initialize_velocity(flow, d)
+function _pack_result(chains::PDMPChains; discretize_dt::Union{Float64, Nothing} = nothing)
+    sample_matrices = discretize_chains(chains; discretize_dt)
+    stats = extract_stats(chains)
+    n_chains = length(chains.traces)
+
+    if n_chains == 1
+        return Dict{String,Any}("samples" => sample_matrices[1], "stats" => stats)
     else
-        θ0 = θ00
+        chain_dicts = [Dict{String,Any}("samples" => sample_matrices[i], "stats" => stats)
+                       for i in 1:n_chains]
+        return chain_dicts
     end
-    ξ0 = SkeletonPoint(x0, θ0)
+end
 
-    grad = FullGradient(grad!)
+function extract_stats(chains::PDMPChains)
+    s = chains.stats[1]
+    return Dict{String, Any}(
+        "reflections_events"   => s.reflections_events,
+        "reflections_accepted" => s.reflections_accepted,
+        "refreshment_events"   => s.refreshment_events,
+        "sticky_events"        => s.sticky_events,
+        "gradient_calls"       => s.∇f_calls,
+        "hessian_calls"        => s.∇²f_calls,
+        "elapsed_time"         => s.elapsed_time
+    )
+end
 
-    trace, stats = pdmp_sample(ξ0, flow, grad, alg, t0, T, progress=show_progress)
+function r_pdmp_stan(
+        path_to_stan_model::String,
+        path_to_stan_data::String,
+        x0::AbstractVector{Float64},
+        flow_type::String,
+        algorithm_type::String,
+        flow_mean::AbstractVector{Float64},
+        flow_cov::AbstractMatrix{Float64};
+        kwargs...
+    )
 
-    # Discretization
-    if isnothing(discretize_dt)
-        ts = [event.time for event in trace.events]
-        dt = mean(diff(ts))
+    model = PDMPModel(path_to_stan_model, path_to_stan_data)
+    return r_pdmp_stan(model, x0, flow_type, algorithm_type, flow_mean, flow_cov; kwargs...)
+end
+
+function r_pdmp_stan(
+        model::PDMPModel,
+        x0::AbstractVector{Float64},
+        flow_type::String,
+        algorithm_type::String,
+        flow_mean::AbstractVector{Float64},
+        flow_cov::AbstractMatrix{Float64};
+        c0::Float64 = 1e-2,
+        grid_n::Int = 30,
+        grid_t_max::Float64 = 2.0,
+        t0::Float64 = 0.0,
+        T::Float64 = 10000.0,
+        t_warmup::Float64 = 0.0,
+        discretize_dt::Union{Float64, Nothing} = nothing,
+        sticky::Bool = false,
+        can_stick::Union{AbstractVector{Bool}, Nothing} = nothing,
+        model_prior = nothing,
+        parameter_prior::Union{AbstractVector{Float64}, Nothing} = nothing,
+        show_progress::Bool = true,
+        n_chains::Int = 1,
+        threaded::Bool = false
+    )
+
+    d = model.d
+
+    prec = inv(Symmetric(flow_cov))
+    flow = build_flow(flow_type, prec, flow_mean)
+    alg = build_algorithm(algorithm_type; c0, d, grid_n, grid_t_max)
+    alg = wrap_sticky(alg, sticky, model_prior, parameter_prior, can_stick)
+
+    chains = pdmp_sample(x0, flow, model, alg, t0, T, t_warmup;
+                         progress = show_progress, n_chains = n_chains, threaded = threaded)
+    return _pack_result(chains; discretize_dt)
+end
+
+function r_pdmp_custom(
+        grad!,
+        d::Integer,
+        x0::AbstractVector{Float64},
+        flow_type::String,
+        algorithm_type::String,
+        flow_mean::AbstractVector{Float64},
+        flow_cov::AbstractMatrix{Float64};
+        c0::Float64 = 1e-2,
+        grid_n::Int = 30,
+        grid_t_max::Float64 = 2.0,
+        t0::Float64 = 0.0,
+        T::Float64 = 10000.0,
+        t_warmup::Float64 = 0.0,
+        discretize_dt::Union{Float64, Nothing} = nothing,
+        hessian = nothing,
+        sticky::Bool = false,
+        can_stick::Union{AbstractVector{Bool}, Nothing} = nothing,
+        model_prior = nothing,
+        parameter_prior::Union{AbstractVector{Float64}, Nothing} = nothing,
+        show_progress::Bool = true,
+        n_chains::Int = 1,
+        threaded::Bool = false
+    )
+
+    hvp = if !isnothing(hessian)
+        (out, x, v) -> begin
+            hess = hessian(x)
+            mul!(out, hess, v)
+        end
     else
-        dt = discretize_dt
+        nothing
     end
-    samples = Matrix(PDMPDiscretize(trace, dt))
+    model = PDMPModel(d, FullGradient(grad!), hvp)
 
-    return (; samples, trace, stats)
+    prec = inv(Symmetric(flow_cov))
+    flow = build_flow(flow_type, prec, flow_mean)
+    alg = build_algorithm(algorithm_type; c0, d, grid_n, grid_t_max)
+    alg = wrap_sticky(alg, sticky, model_prior, parameter_prior, can_stick)
+
+    chains = pdmp_sample(x0, flow, model, alg, t0, T, t_warmup;
+                         progress = show_progress, n_chains = n_chains, threaded = threaded)
+    return _pack_result(chains; discretize_dt)
 end

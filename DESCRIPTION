@@ -20,4 +20,14 @@ Imports:
     JuliaCall,
     rappdirs,
     rlang
+Suggests:
+    BayesFactor,
+    ggplot2,
+    jsonlite,
+    patchwork,
+    quarto,
+    testthat (>= 3.0.0),
+    tibble
+Config/testthat/edition: 3
+VignetteBuilder: quarto
 RoxygenNote: 7.3.3

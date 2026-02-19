@@ -8,9 +8,10 @@ pdmp_sample(
   f,
   d,
   flow = c("ZigZag", "BouncyParticle", "Boomerang"),
-  algorithm = c("ThinningStrategy", "GridThinningStrategy"),
+  algorithm = c("ThinningStrategy", "GridThinningStrategy", "RootsPoissonStrategy"),
   T = 50000,
   t0 = 0,
+  t_warmup = 0,
   flow_mean = NULL,
   flow_cov = NULL,
   c0 = 0.01,
@@ -21,8 +22,12 @@ pdmp_sample(
   can_stick = NULL,
   model_prior = NULL,
   parameter_prior = NULL,
+  grid_n = 30,
+  grid_t_max = 2,
   show_progress = TRUE,
-  discretize_dt = NULL
+  discretize_dt = NULL,
+  n_chains = 1L,
+  threaded = FALSE
 )
 }
 \arguments{
@@ -41,6 +46,8 @@ and return a numeric vector of the same length.}
 
 \item{t0}{Numeric, initial time (default: 0.0).}
 
+\item{t_warmup}{Numeric, warmup time (default: 0.0). Events during warmup are discarded.}
+
 \item{flow_mean}{Numeric vector of length d, mean vector for the flow (default: zero vector).}
 
 \item{flow_cov}{Numeric matrix of size d x d, covariance matrix for the flow (default: identity matrix).}
@@ -51,24 +58,35 @@ and return a numeric vector of the same length.}
 
 \item{theta0}{Numeric vector of length d, initial velocity (default: random based on the flow).}
 
-\item{hessian}{Function that returns the negative Hessian matrix of size d x d (default: NULL).}
+\item{hessian}{Function that returns the negative Hessian matrix of size d x d (default: NULL).
+Only used with GridThinningStrategy to compute the Hessian-vector product.}
 
 \item{sticky}{Logical, whether to use sticky sampling (default: FALSE).}
 
 \item{can_stick}{Logical vector of length d, which coordinates can stick (default: all FALSE).}
+
+\item{model_prior}{Prior distribution object for model selection. Should be of class
+'bernoulli' or 'beta-bernoulli' (default: NULL).}
+
+\item{parameter_prior}{Numeric vector of length d, prior parameters for sticky sampling (default: NULL).}
+
+\item{grid_n}{Integer, number of grid points for GridThinningStrategy (default: 30).}
+
+\item{grid_t_max}{Numeric, maximum time for grid in GridThinningStrategy (default: 2.0).}
 
 \item{show_progress}{Logical, whether to show progress bar (default: TRUE).}
 
 \item{discretize_dt}{Numeric, discretization time step. If NULL, uses mean
 inter-event time (default: NULL).}
 
-\item{kappa}{Numeric, stickiness parameter (default: NULL).}
+\item{n_chains}{Integer, number of chains to run (default: 1).}
+
+\item{threaded}{Logical, whether to run chains in parallel (default: FALSE).}
 }
 \value{
 A list containing:
   \item{samples}{Matrix of discretized samples}
-  \item{trace}{The full trace object}
-  \item{stats}{Sampling statistics}
+  \item{stats}{List of sampling statistics}
 }
 \description{
 Performs Piecewise Deterministic Markov Process (PDMP) sampling using the

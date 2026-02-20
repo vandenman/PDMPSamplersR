@@ -10,36 +10,36 @@ vignette: >
 ```{r}
 #| label: setup
 #| include: false
-library(PDMPSamplersR)
-library(tibble)
-library(ggplot2)
-library(patchwork)
-library(fs)
-
 julia_available <- tryCatch(
     {
+        library(PDMPSamplersR)
+        library(tibble)
+        library(ggplot2)
+        library(patchwork)
+        library(fs)
+
         invisible(capture.output(
             JuliaCall::julia_setup(verbose = FALSE),
             type = "message"
         ))
+
+        theme_set(
+          theme_bw(base_size = 16) +
+            theme(
+              geom = element_geom(
+                pointshape = 21, pointsize = 5,
+                fill = alpha("grey", .5)
+              )
+            )
+        )
         TRUE
     },
     error = function(e) {
-        message("JuliaCall setup failed: ", conditionMessage(e))
+        message("Vignette setup failed: ", conditionMessage(e))
         FALSE
     }
 )
 knitr::opts_chunk$set(eval = julia_available)
-
-theme_set(
-  theme_bw(base_size = 16) +
-    theme(
-      geom = element_geom(
-        pointshape = 21, pointsize = 5,
-        fill = alpha("grey", .5)
-      )
-    )
-)
 
 stan_model_dir <- system.file("stan", "models", package = "PDMPSamplersR")
 if (!nzchar(stan_model_dir)) {

@@ -37,31 +37,107 @@ function wrap_sticky(alg::PDMPSamplers.PoissonTimeStrategy, sticky::Bool, model_
     return Sticky(alg, κ, BitVector(can_stick))
 end
 
-function discretize_chains(chains::PDMPChains; discretize_dt::Union{Float64, Nothing} = nothing)
-    function _discretize_single(trace)
-        if isnothing(discretize_dt)
-            ts = [event.time for event in trace.events]
-            dt = mean(diff(ts))
-        else
-            dt = discretize_dt
-        end
-        return Matrix(PDMPDiscretize(trace, dt))
-    end
-    return [_discretize_single(trace) for trace in chains.traces]
+function _pack_result(chains::PDMPChains)
+    stats = extract_stats(chains)
+    d = length(first(chains.traces[1]).position)
+    return Dict{String,Any}(
+        "chains"   => chains,
+        "stats"    => stats,
+        "d"        => d,
+        "n_chains" => PDMPSamplers.n_chains(chains)
+    )
 end
 
-function _pack_result(chains::PDMPChains; discretize_dt::Union{Float64, Nothing} = nothing)
-    sample_matrices = discretize_chains(chains; discretize_dt)
-    stats = extract_stats(chains)
-    n_chains = length(chains.traces)
+# ──────────────────────────────────────────────────────────────────────────────
+# Bridge functions for R-side estimators
+# ──────────────────────────────────────────────────────────────────────────────
 
-    if n_chains == 1
-        return Dict{String,Any}("samples" => sample_matrices[1], "stats" => stats)
-    else
-        chain_dicts = [Dict{String,Any}("samples" => sample_matrices[i], "stats" => stats)
-                       for i in 1:n_chains]
-        return chain_dicts
+function r_discretize(chains::PDMPChains; dt::Union{Float64, Nothing} = nothing, chain::Int = 1)
+    trace = chains.traces[chain]
+    if isnothing(dt)
+        ts = [event.time for event in trace.events]
+        dt = mean(diff(ts))
     end
+    return Matrix(PDMPDiscretize(trace, dt))
+end
+
+r_mean(chains::PDMPChains; chain::Int = 1) = Statistics.mean(chains; chain)
+r_var(chains::PDMPChains; chain::Int = 1)  = Statistics.var(chains; chain)
+r_std(chains::PDMPChains; chain::Int = 1)  = Statistics.std(chains; chain)
+r_cov(chains::PDMPChains; chain::Int = 1)  = Statistics.cov(chains; chain)
+r_cor(chains::PDMPChains; chain::Int = 1)  = Statistics.cor(chains; chain)
+
+function r_quantile(chains::PDMPChains, p::Float64; chain::Int = 1, coordinate::Int = -1)
+    Statistics.quantile(chains, p; chain, coordinate)
+end
+
+function r_median(chains::PDMPChains; chain::Int = 1, coordinate::Int = -1)
+    Statistics.median(chains.traces[chain]; coordinate)
+end
+
+function r_cdf(chains::PDMPChains, q::Float64; chain::Int = 1, coordinate::Int)
+    cdf(chains, q; chain, coordinate)
+end
+
+function r_ess(chains::PDMPChains; chain::Int = 1, n_batches::Int = 0)
+    if n_batches > 0
+        ess(chains; chain, n_batches)
+    else
+        ess(chains; chain)
+    end
+end
+
+r_inclusion_probs(chains::PDMPChains; chain::Int = 1) = inclusion_probs(chains; chain)
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Transform construction and transformed estimators
+# ──────────────────────────────────────────────────────────────────────────────
+
+function _build_transforms(specs::AbstractVector)
+    map(specs) do s
+        t = s[:type]
+        if t == "identity"
+            PDMPSamplers.IdentityTransform()
+        elseif t == "lower"
+            PDMPSamplers.LowerBoundTransform(Float64(s[:lower]))
+        elseif t == "upper"
+            PDMPSamplers.UpperBoundTransform(Float64(s[:upper]))
+        elseif t == "double"
+            PDMPSamplers.DoubleBoundTransform(Float64(s[:lower]), Float64(s[:upper]))
+        else
+            error("Unknown transform type: $t")
+        end
+    end
+end
+
+function r_mean(chains::PDMPChains, specs::AbstractVector; chain::Int = 1)
+    transforms = _build_transforms(specs)
+    Statistics.mean(chains.traces[chain], transforms)
+end
+
+function r_var(chains::PDMPChains, specs::AbstractVector; chain::Int = 1)
+    transforms = _build_transforms(specs)
+    Statistics.var(chains.traces[chain], transforms)
+end
+
+function r_std(chains::PDMPChains, specs::AbstractVector; chain::Int = 1)
+    transforms = _build_transforms(specs)
+    Statistics.std(chains.traces[chain], transforms)
+end
+
+function r_quantile(chains::PDMPChains, p::Float64, specs::AbstractVector; chain::Int = 1, coordinate::Int = -1)
+    transforms = _build_transforms(specs)
+    Statistics.quantile(chains.traces[chain], p, transforms; coordinate)
+end
+
+function r_median(chains::PDMPChains, specs::AbstractVector; chain::Int = 1, coordinate::Int = -1)
+    transforms = _build_transforms(specs)
+    Statistics.median(chains.traces[chain], transforms; coordinate)
+end
+
+function r_cdf(chains::PDMPChains, q::Float64, specs::AbstractVector; chain::Int = 1, coordinate::Int)
+    transforms = _build_transforms(specs)
+    cdf(chains.traces[chain], q, transforms; coordinate)
 end
 
 function extract_stats(chains::PDMPChains)
@@ -105,7 +181,6 @@ function r_pdmp_stan(
         t0::Float64 = 0.0,
         T::Float64 = 10000.0,
         t_warmup::Float64 = 0.0,
-        discretize_dt::Union{Float64, Nothing} = nothing,
         sticky::Bool = false,
         can_stick::Union{AbstractVector{Bool}, Nothing} = nothing,
         model_prior = nothing,
@@ -124,7 +199,7 @@ function r_pdmp_stan(
 
     chains = pdmp_sample(x0, flow, model, alg, t0, T, t_warmup;
                          progress = show_progress, n_chains = n_chains, threaded = threaded)
-    return _pack_result(chains; discretize_dt)
+    return _pack_result(chains)
 end
 
 function r_pdmp_custom(
@@ -141,7 +216,6 @@ function r_pdmp_custom(
         t0::Float64 = 0.0,
         T::Float64 = 10000.0,
         t_warmup::Float64 = 0.0,
-        discretize_dt::Union{Float64, Nothing} = nothing,
         hessian = nothing,
         sticky::Bool = false,
         can_stick::Union{AbstractVector{Bool}, Nothing} = nothing,
@@ -169,5 +243,5 @@ function r_pdmp_custom(
 
     chains = pdmp_sample(x0, flow, model, alg, t0, T, t_warmup;
                          progress = show_progress, n_chains = n_chains, threaded = threaded)
-    return _pack_result(chains; discretize_dt)
+    return _pack_result(chains)
 end

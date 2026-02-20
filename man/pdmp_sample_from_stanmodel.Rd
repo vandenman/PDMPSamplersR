@@ -24,7 +24,6 @@ pdmp_sample_from_stanmodel(
   grid_n = 30,
   grid_t_max = 2,
   show_progress = TRUE,
-  discretize_dt = NULL,
   n_chains = 1L,
   threaded = FALSE
 )
@@ -73,17 +72,14 @@ BridgeStan will compile it automatically.}
 
 \item{show_progress}{Logical, whether to show progress bar (default: TRUE).}
 
-\item{discretize_dt}{Numeric, discretization time step. If NULL, uses mean
-inter-event time (default: NULL).}
-
 \item{n_chains}{Integer, number of chains to run (default: 1).}
 
 \item{threaded}{Logical, whether to run chains in parallel (default: FALSE).}
 }
 \value{
-A list containing:
-  \item{samples}{Matrix of discretized samples}
-  \item{stats}{List of sampling statistics}
+A \code{pdmp_result} object. Use \code{mean}, \code{var},
+  \code{quantile}, etc. for continuous-time estimators, or
+  \code{discretize} to obtain a sample matrix.
 }
 \description{
 Performs Piecewise Deterministic Markov Process (PDMP) sampling from a Stan model

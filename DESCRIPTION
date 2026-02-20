@@ -19,11 +19,13 @@ Imports:
     fs,
     JuliaCall,
     rappdirs,
-    rlang
+    rlang,
+    stats
 Suggests:
     BayesFactor,
     ggplot2,
     jsonlite,
+    knitr,
     patchwork,
     quarto,
     testthat (>= 3.0.0),

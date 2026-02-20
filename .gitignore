@@ -9,3 +9,7 @@ stan/omrf
 /Meta/
 *.so
 *.o
+
+# for vignettes, exclude everything and then use a negative pattern to include only the source .qmd file(s)
+vignettes/*
+!vignettes/stan-examples.qmd

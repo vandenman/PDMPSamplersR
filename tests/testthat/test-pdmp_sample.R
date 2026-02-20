@@ -31,8 +31,11 @@ test_that("pdmp_sample runs with a simple normal gradient", {
   result <- pdmp_sample(neg_grad, d = d, flow = "ZigZag", T = 500,
                         show_progress = FALSE)
 
-  expect_type(result, "list")
-  samples <- result$samples
+  expect_s3_class(result, "pdmp_result")
+  expect_equal(result$d, d)
+  expect_equal(result$n_chains, 1L)
+
+  samples <- discretize(result)
   expect_true(is.matrix(samples))
   expect_equal(ncol(samples), d)
   expect_gt(nrow(samples), 10)
@@ -48,8 +51,8 @@ test_that("pdmp_sample with BouncyParticle flow", {
   result <- pdmp_sample(neg_grad, d = d, flow = "BouncyParticle", T = 500,
                         show_progress = FALSE)
 
-  expect_type(result, "list")
-  samples <- result$samples
+  expect_s3_class(result, "pdmp_result")
+  samples <- discretize(result)
   expect_true(is.matrix(samples))
   expect_equal(ncol(samples), d)
 })
@@ -66,8 +69,8 @@ test_that("pdmp_sample with GridThinningStrategy", {
                         algorithm = "GridThinningStrategy", T = 500,
                         hessian = neg_hess, show_progress = FALSE)
 
-  expect_type(result, "list")
-  samples <- result$samples
+  expect_s3_class(result, "pdmp_result")
+  samples <- discretize(result)
   expect_true(is.matrix(samples))
   expect_equal(ncol(samples), d)
 })
@@ -82,12 +85,15 @@ test_that("pdmp_sample with multiple chains", {
   result <- pdmp_sample(neg_grad, d = d, flow = "ZigZag", T = 500,
                         n_chains = 2L, show_progress = FALSE)
 
-  expect_type(result, "list")
-  expect_length(result, 2)
-  for (chain in result) {
-    expect_true(is.matrix(chain$samples))
-    expect_equal(ncol(chain$samples), d)
-  }
+  expect_s3_class(result, "pdmp_result")
+  expect_equal(result$n_chains, 2L)
+
+  samples_1 <- discretize(result, chain = 1L)
+  samples_2 <- discretize(result, chain = 2L)
+  expect_true(is.matrix(samples_1))
+  expect_true(is.matrix(samples_2))
+  expect_equal(ncol(samples_1), d)
+  expect_equal(ncol(samples_2), d)
 })
 
 test_that("pdmp_sample posterior mean is reasonable for standard normal", {
@@ -100,9 +106,8 @@ test_that("pdmp_sample posterior mean is reasonable for standard normal", {
   result <- pdmp_sample(neg_grad, d = d, flow = "ZigZag", T = 5000,
                         show_progress = FALSE)
 
-  samples <- result$samples
-  posterior_means <- colMeans(samples)
-  # for standard normal, posterior means should be near zero
+  posterior_means <- mean(result)
+  expect_length(posterior_means, d)
   expect_true(all(abs(posterior_means) < 0.5))
 })
 

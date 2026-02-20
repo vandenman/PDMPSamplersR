@@ -2,7 +2,6 @@
 validate_pdmp_params <- function(d, flow, algorithm, T, t0 = 0.0, t_warmup = 0.0,
                                 flow_mean = NULL, flow_cov = NULL, c0 = 1e-2,
                                 x0 = NULL, theta0 = NULL, show_progress = TRUE,
-                                discretize_dt = NULL,
                                 sticky = FALSE, can_stick = NULL, model_prior = NULL, parameter_prior = NULL,
                                 grid_n = 30, grid_t_max = 2.0,
                                 n_chains = 1L, threaded = FALSE) {
@@ -62,10 +61,6 @@ validate_pdmp_params <- function(d, flow, algorithm, T, t0 = 0.0, t_warmup = 0.0
     }
   }
 
-  # Validate discretize_dt
-  if (!is.null(discretize_dt))
-    validate_type(discretize_dt, type = "double", n = 1, positive = TRUE)
-
   # Validate sticky parameters
   validate_type(sticky, type = "logical", n = 1)
   if (sticky) {
@@ -99,7 +94,6 @@ validate_pdmp_params <- function(d, flow, algorithm, T, t0 = 0.0, t_warmup = 0.0
     d = d, flow = flow, algorithm = algorithm, T = T, t0 = t0, t_warmup = t_warmup,
     flow_mean = flow_mean, flow_cov = flow_cov, c0 = c0,
     x0 = x0, theta0 = theta0, show_progress = show_progress,
-    discretize_dt = discretize_dt,
     sticky = sticky, can_stick = can_stick, model_prior = model_prior, parameter_prior = parameter_prior,
     grid_n = grid_n, grid_t_max = grid_t_max,
     n_chains = n_chains, threaded = threaded
@@ -136,14 +130,12 @@ validate_pdmp_params <- function(d, flow, algorithm, T, t0 = 0.0, t_warmup = 0.0
 #' @param grid_n Integer, number of grid points for GridThinningStrategy (default: 30).
 #' @param grid_t_max Numeric, maximum time for grid in GridThinningStrategy (default: 2.0).
 #' @param show_progress Logical, whether to show progress bar (default: TRUE).
-#' @param discretize_dt Numeric, discretization time step. If NULL, uses mean
-#'   inter-event time (default: NULL).
 #' @param n_chains Integer, number of chains to run (default: 1).
 #' @param threaded Logical, whether to run chains in parallel (default: FALSE).
 #'
-#' @return A list containing:
-#'   \item{samples}{Matrix of discretized samples}
-#'   \item{stats}{List of sampling statistics}
+#' @return A \code{pdmp_result} object. Use \code{mean}, \code{var},
+#'   \code{quantile}, etc. for continuous-time estimators, or
+#'   \code{discretize} to obtain a sample matrix.
 #'
 #' @export
 pdmp_sample <- function(f, d,
@@ -155,7 +147,7 @@ pdmp_sample <- function(f, d,
                         hessian = NULL,
                         sticky = FALSE, can_stick = NULL, model_prior = NULL, parameter_prior = NULL,
                         grid_n = 30, grid_t_max = 2.0,
-                        show_progress = TRUE, discretize_dt = NULL,
+                        show_progress = TRUE,
                         n_chains = 1L, threaded = FALSE) {
 
   # Validate function argument (fail fast before Julia setup)
@@ -168,7 +160,7 @@ pdmp_sample <- function(f, d,
 
   # Use common validation function
   params <- validate_pdmp_params(d, flow, algorithm, T, t0, t_warmup, flow_mean, flow_cov,
-                                c0, x0, theta0, show_progress, discretize_dt,
+                                c0, x0, theta0, show_progress,
                                 sticky, can_stick, model_prior, parameter_prior,
                                 grid_n, grid_t_max, n_chains, threaded)
 
@@ -220,13 +212,18 @@ pdmp_sample <- function(f, d,
     grad!, d, x0, flow, algorithm, flow_mean, flow_cov;
     c0 = c0, grid_n = grid_n, grid_t_max = grid_t_max,
     t0 = t0, T = T, t_warmup = t_warmup,
-    discretize_dt = discretize_dt, hessian = hessian_f,
+    hessian = hessian_f,
     sticky = sticky, can_stick = can_stick,
     model_prior = model_prior, parameter_prior = parameter_prior,
     show_progress = show_progress, n_chains = n_chains, threaded = threaded
   );")
   if (is.environment(result)) result <- as.list(result)
-  return(result)
+  new_pdmp_result(
+    chains   = result$chains,
+    stats    = result$stats,
+    d        = result$d,
+    n_chains = result$n_chains
+  )
 
 }
 
@@ -263,14 +260,12 @@ pdmp_sample <- function(f, d,
 #' @param grid_n Integer, number of grid points for GridThinningStrategy (default: 30).
 #' @param grid_t_max Numeric, maximum time for grid in GridThinningStrategy (default: 2.0).
 #' @param show_progress Logical, whether to show progress bar (default: TRUE).
-#' @param discretize_dt Numeric, discretization time step. If NULL, uses mean
-#'   inter-event time (default: NULL).
 #' @param n_chains Integer, number of chains to run (default: 1).
 #' @param threaded Logical, whether to run chains in parallel (default: FALSE).
 #'
-#' @return A list containing:
-#'   \item{samples}{Matrix of discretized samples}
-#'   \item{stats}{List of sampling statistics}
+#' @return A \code{pdmp_result} object. Use \code{mean}, \code{var},
+#'   \code{quantile}, etc. for continuous-time estimators, or
+#'   \code{discretize} to obtain a sample matrix.
 #'
 #' @export
 pdmp_sample_from_stanmodel <- function(path_to_stanmodel, path_to_standata,
@@ -281,7 +276,7 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, path_to_standata,
                         x0 = NULL, theta0 = NULL,
                         sticky = FALSE, can_stick = NULL, model_prior = NULL, parameter_prior = NULL,
                         grid_n = 30, grid_t_max = 2.0,
-                        show_progress = TRUE, discretize_dt = NULL,
+                        show_progress = TRUE,
                         n_chains = 1L, threaded = FALSE) {
 
   # Validate file paths on R side before setting up Julia (fail fast)
@@ -318,7 +313,7 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, path_to_standata,
 
   # Use common validation function
   params <- validate_pdmp_params(d, flow, algorithm, T, t0, t_warmup, flow_mean, flow_cov,
-                                 c0, x0, theta0, show_progress, discretize_dt,
+                                 c0, x0, theta0, show_progress,
                                  sticky, can_stick, model_prior, parameter_prior,
                                  grid_n, grid_t_max, n_chains, threaded)
 
@@ -330,11 +325,15 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, path_to_standata,
     _pdmp_model, x0, flow, algorithm, flow_mean, flow_cov;
     c0 = c0, grid_n = grid_n, grid_t_max = grid_t_max,
     t0 = t0, T = T, t_warmup = t_warmup,
-    discretize_dt = discretize_dt,
     sticky = sticky, can_stick = can_stick,
     model_prior = model_prior, parameter_prior = parameter_prior,
     show_progress = show_progress, n_chains = n_chains, threaded = threaded
   );")
   if (is.environment(result)) result <- as.list(result)
-  return(result)
+  new_pdmp_result(
+    chains   = result$chains,
+    stats    = result$stats,
+    d        = result$d,
+    n_chains = result$n_chains
+  )
 }

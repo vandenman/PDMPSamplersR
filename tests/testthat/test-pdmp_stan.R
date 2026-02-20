@@ -81,13 +81,15 @@ test_that("pdmp_sample_from_stanmodel runs with mvnormal Stan model", {
     show_progress = FALSE
   )
 
-  expect_type(result, "list")
-  samples <- result$samples
+  expect_s3_class(result, "pdmp_result")
+  expect_equal(result$d, d)
+
+  samples <- discretize(result)
   expect_true(is.matrix(samples))
   expect_equal(ncol(samples), d)
   expect_gt(nrow(samples), 10)
 
   # posterior means should be near zero for standard normal
-  posterior_means <- colMeans(samples)
+  posterior_means <- mean(result)
   expect_true(all(abs(posterior_means) < 1.0))
 })

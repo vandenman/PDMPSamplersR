@@ -47,10 +47,8 @@ test_that("mvnormal ZigZag with known mean and covariance recovers parameters", 
     flow_mean = mean_vec, flow_cov = cov_matrix,
     show_progress = FALSE
   )
-
-  samples  <- result$samples
-  est_mean <- colMeans(samples)
-  est_cov  <- cov(samples)
+  est_mean <- mean(result)
+  est_cov  <- cov(result)
 
   truth    <- c(mean_vec, cov_matrix[lower.tri(cov_matrix, diag = TRUE)])
   estimate <- c(est_mean, est_cov[lower.tri(est_cov, diag = TRUE)])
@@ -85,9 +83,8 @@ test_that("mvnormal ZigZag GridThinningStrategy recovers parameters", {
     show_progress = FALSE
   )
 
-  samples  <- result$samples
-  est_mean <- colMeans(samples)
-  est_cov  <- cov(samples)
+  est_mean <- mean(result)
+  est_cov  <- cov(result)
 
   truth    <- c(mean_vec, cov_matrix[lower.tri(cov_matrix, diag = TRUE)])
   estimate <- c(est_mean, est_cov[lower.tri(est_cov, diag = TRUE)])
@@ -129,7 +126,7 @@ test_that("spike-and-slab with diagonal covariance recovers inclusion probabilit
     show_progress = FALSE
   )
 
-  est_incl <- colMeans(result$samples != 0)
+  est_incl <- inclusion_probs(result)
 
   expect_gt(cor(prior_incl_prob, est_incl), 0.85)
   # all estimated inclusion probabilities should be between 0 and 1
@@ -172,7 +169,7 @@ test_that("spike-and-slab with beta-binomial prior recovers model probabilities"
     show_progress = FALSE
   )
 
-  samples <- result$samples
+  samples <- discretize(result, chain = 1L, dt = .25)
 
   # inclusion probabilities: under BetaBernoulli(1,1), marginal inclusion prob is 0.5
   prior_incl_prob <- rep(mp$a / (mp$a + mp$b), d)
@@ -243,15 +240,14 @@ test_that("logistic regression with spike-and-slab recovers parameters", {
     show_progress = FALSE
   )
 
-  samples  <- result$samples
-  est_coef <- colMeans(samples)
+  est_coef  <- mean(result)
   true_coef <- c(intercept, beta)
 
   # correlation between true and estimated coefficients
   expect_gt(cor(true_coef, est_coef), 0.85)
 
   # active coefficients should have higher inclusion probability than inactive
-  p_incl <- colMeans(samples != 0)
+  p_incl <- inclusion_probs(result)
   # intercept (col 1) is always included; check betas only
   active_incl   <- mean(p_incl[1 + idx_on])
   inactive_idx  <- setdiff(2:(d + 1), 1 + idx_on)
@@ -304,15 +300,14 @@ test_that("t-test Bayes factor is close to analytic result", {
     show_progress = FALSE
   )
 
-  samples <- result$samples
   prior_inclusion_prob    <- 0.5
-  posterior_inclusion_prob <- mean(samples[, 2] != 0)
+  posterior_inclusion_prob <- inclusion_probs(result)[2]
   prior_odds    <- prior_inclusion_prob / (1 - prior_inclusion_prob)
   posterior_odds <- posterior_inclusion_prob / (1 - posterior_inclusion_prob)
   pdmp_bf <- posterior_odds / prior_odds
 
   # log Bayes factors should be on the same side (both > 0 or both < 0)
   expect_equal(sign(log(pdmp_bf)), sign(log(analytic_bf)))
-  # log BF ratio should be within a factor of 3 on the log scale
-  expect_lt(abs(log(pdmp_bf) - log(analytic_bf)), log(3))
+  # 0.1 is a bit arbitrary, in practice this is smaller than 0.01 but I don't want to make the test too brittle
+  expect_lt(abs(log(pdmp_bf) - log(analytic_bf)), 0.1)
 })

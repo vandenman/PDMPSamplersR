@@ -38,6 +38,29 @@ if (!nzchar(stan_model_dir)) {
 }
 ```
 
+```{r}
+#| label: setup_shown
+#| include: true
+#| eval: false
+library(PDMPSamplersR)
+library(tibble)
+library(ggplot2)
+library(patchwork)
+library(fs)
+
+# some personal recommendations for nicer-looking plots
+# requires ggplot2 >= 3.4.0 for element_geom()
+theme_set(
+  theme_bw(base_size = 16) +
+    theme(
+      geom = element_geom(pointshape = 21, pointsize = 5, fill = alpha("grey", .5))
+    )
+)
+
+stan_model_dir <- system.file("stan", "models", package = "PDMPSamplersR")
+```
+
+
 This vignette demonstrates how to use `PDMPSamplersR` to sample from
 Stan models using piecewise deterministic Markov processes (PDMPs). We
 cover:
@@ -81,8 +104,8 @@ Compare estimated and true means and covariances:
 #| label: mvnormal-zigzag-plot
 #| fig-width: 8
 #| fig-height: 5
-est_mean <- colMeans(result$samples)
-est_cov  <- cov(result$samples)
+est_mean <- mean(result)
+est_cov  <- cov(result)
 
 tib <- tibble(
   truth    = c(mean_vec, cov_matrix[lower.tri(cov_matrix, diag = TRUE)]),
@@ -113,8 +136,8 @@ result2 <- pdmp_sample_from_stanmodel(
 #| label: mvnormal-grid-plot
 #| fig-width: 8
 #| fig-height: 5
-est_mean <- colMeans(result2$samples)
-est_cov  <- cov(result2$samples)
+est_mean <- mean(result2)
+est_cov  <- cov(result2)
 
 tib <- tibble(
   truth    = c(mean_vec, cov_matrix[lower.tri(cov_matrix, diag = TRUE)]),
@@ -165,7 +188,7 @@ result3 <- pdmp_sample_from_stanmodel(
 #| fig-height: 5
 tib <- tibble(
   true = prior_incl_prob,
-  est  = colMeans(result3$samples != 0)
+  est  = inclusion_probs(result3)
 )
 
 ggplot(tib, aes(x = true, y = est)) +
@@ -213,7 +236,7 @@ result4 <- pdmp_sample_from_stanmodel(
 #| fig-height: 5
 tib <- tibble(
   true = prior_incl_prob,
-  est  = colMeans(result4$samples != 0)
+  est  = inclusion_probs(result4)
 )
 
 ggplot(tib, aes(x = true, y = est)) +
@@ -273,11 +296,11 @@ beta_binomial_pmf <- function(k, d, a, b, log = FALSE,
 #| label: spike-slab-betabinom-plot
 #| fig-width: 10
 #| fig-height: 5
-samples <- result5$samples
+samples <- discretize(result5)
 
 tib_incl <- tibble(
   true = prior_incl_prob,
-  est  = colMeans(samples != 0)
+  est  = inclusion_probs(result5)
 )
 plt_incl <- ggplot(tib_incl, aes(x = true, y = est)) +
   geom_abline(slope = 1, intercept = 0, color = "grey", alpha = .8) +
@@ -358,13 +381,13 @@ result_lr <- pdmp_sample_from_stanmodel(
 #| label: logistic-regression-plot
 #| fig-width: 8
 #| fig-height: 8
-samples <- result_lr$samples
+samples <- discretize(result_lr)
 
 tib_lr <- tibble(
   true   = rep(c(intercept, beta), 2),
-  est    = c(colMeans(samples), coef(fit)),
+  est    = c(mean(result_lr), coef(fit)),
   how    = rep(c("Bayes", "Frequentist"), each = d + 1),
-  p_incl = c(colMeans(samples != 0), rep(1, d + 1)),
+  p_incl = c(inclusion_probs(result_lr), rep(1, d + 1)),
   param  = rep(c("intercept", rep("beta", d)), 2)
 )
 
@@ -427,7 +450,7 @@ result_ttest <- pdmp_sample_from_stanmodel(
 ```{r}
 #| label: ttest-bf
 prior_inclusion_prob    <- 0.5
-posterior_inclusion_prob <- mean(result_ttest$samples[, 2] != 0)
+posterior_inclusion_prob <- inclusion_probs(result_ttest)[2]
 prior_odds    <- prior_inclusion_prob / (1 - prior_inclusion_prob)
 posterior_odds <- posterior_inclusion_prob / (1 - posterior_inclusion_prob)
 pdmp_bf <- posterior_odds / prior_odds

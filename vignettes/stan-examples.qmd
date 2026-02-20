@@ -17,8 +17,17 @@ library(patchwork)
 library(fs)
 
 julia_available <- tryCatch(
-    { JuliaCall::julia_setup(verbose = FALSE); TRUE },
-    error = function(e) FALSE
+    {
+        invisible(capture.output(
+            JuliaCall::julia_setup(verbose = FALSE),
+            type = "message"
+        ))
+        TRUE
+    },
+    error = function(e) {
+        message("JuliaCall setup failed: ", conditionMessage(e))
+        FALSE
+    }
 )
 knitr::opts_chunk$set(eval = julia_available)
 

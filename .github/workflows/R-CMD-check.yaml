@@ -60,15 +60,12 @@ jobs:
       - name: Debug vignette rendering
         if: matrix.config.julia && runner.os == 'Linux'
         run: |
-          Rscript -e '
-            message("quarto version: ", system("quarto --version", intern = TRUE))
-            message("ggplot2 version: ", packageVersion("ggplot2"))
-            message("knitr version: ", packageVersion("knitr"))
-            tryCatch(
-              quarto::quarto_render("vignettes/stan-examples.qmd", output_dir = tempdir()),
-              error = function(e) message("Render failed: ", conditionMessage(e))
-            )
-          '
+          echo "=== quarto version ==="
+          quarto --version
+          echo "=== R package versions ==="
+          Rscript -e 'message("ggplot2: ", packageVersion("ggplot2")); message("knitr: ", packageVersion("knitr")); message("quarto: ", packageVersion("quarto"))'
+          echo "=== quarto render with trace ==="
+          cd vignettes && quarto render stan-examples.qmd --log-level trace 2>&1 || true
         shell: bash
         continue-on-error: true
 

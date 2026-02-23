@@ -57,7 +57,11 @@ jobs:
         shell: Rscript {0}
         run: |
           rhome <- R.home()
-          julia_ver <- system2("julia", c("-e", 'print(VERSION.major, ".", VERSION.minor)'), stdout = TRUE)
+          # "julia version 1.12.5" -> "1.12"
+          julia_ver_out <- system2("julia", "--version", stdout = TRUE)
+          julia_ver_full <- strsplit(trimws(julia_ver_out), "\\s+")[[1]][3]
+          parts <- strsplit(julia_ver_full, "\\.")[[1]]
+          julia_ver <- paste(parts[1:2], collapse = ".")
           julia_depot <- Sys.getenv("JULIA_DEPOT_PATH", unset = "")
           if (nzchar(julia_depot)) {
             # JULIA_DEPOT_PATH may be colon/semicolon-separated; take first entry

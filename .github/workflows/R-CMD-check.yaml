@@ -52,6 +52,42 @@ jobs:
         if: matrix.config.julia
         uses: julia-actions/cache@v2
 
+      - name: Configure RCall Julia preferences
+        if: matrix.config.julia
+        shell: Rscript {0}
+        run: |
+          rhome <- R.home()
+          julia_ver <- system2("julia", c("-e", 'print(VERSION.major, ".", VERSION.minor)'), stdout = TRUE)
+          julia_depot <- Sys.getenv("JULIA_DEPOT_PATH", unset = "")
+          if (nzchar(julia_depot)) {
+            # JULIA_DEPOT_PATH may be colon/semicolon-separated; take first entry
+            julia_depot <- strsplit(julia_depot, .Platform$path.sep)[[1]][1]
+          } else {
+            julia_depot <- file.path(path.expand("~"), ".julia")
+          }
+          env_dir <- file.path(julia_depot, "environments", paste0("v", julia_ver))
+          dir.create(env_dir, recursive = TRUE, showWarnings = FALSE)
+
+          sysname <- Sys.info()[["sysname"]]
+          libr <- if (sysname == "Windows") {
+            # try x64 first, fall back to plain bin/
+            p64 <- file.path(rhome, "bin", "x64", "R.dll")
+            if (file.exists(p64)) p64 else file.path(rhome, "bin", "R.dll")
+          } else if (sysname == "Darwin") {
+            file.path(rhome, "lib", "libR.dylib")
+          } else {
+            file.path(rhome, "lib", "libR.so")
+          }
+
+          # Normalise to forward slashes (important on Windows)
+          rhome <- gsub("\\\\", "/", rhome)
+          libr  <- gsub("\\\\", "/", libr)
+
+          prefs_path <- file.path(env_dir, "LocalPreferences.toml")
+          prefs <- sprintf('[RCall]\nRhome = "%s"\nlibR = "%s"\n', rhome, libr)
+          writeLines(prefs, prefs_path)
+          message("Wrote ", prefs_path, ":\n", prefs)
+
       - name: Install JuliaCall dependencies
         if: matrix.config.julia
         run: julia -e 'using Pkg; Pkg.add("Suppressor"); Pkg.add("RCall")'

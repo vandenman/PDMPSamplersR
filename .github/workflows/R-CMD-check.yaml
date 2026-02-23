@@ -57,6 +57,24 @@ jobs:
         run: julia -e 'using Pkg; Pkg.add("Suppressor"); Pkg.add("RCall")'
         shell: bash
 
+      - name: Setup PDMPSamplers Julia environment
+        if: matrix.config.julia
+        run: |
+          Rscript -e '
+            library(PDMPSamplersR)
+            message("=== Calling pdmpsamplers_setup() ===")
+            tryCatch(
+              pdmpsamplers_setup(verbose = TRUE),
+              error = function(e) {
+                message("Setup failed: ", conditionMessage(e))
+                traceback()
+                stop(e)
+              }
+            )
+            message("=== pdmpsamplers_setup() succeeded ===")
+          '
+        shell: bash
+
       - name: Debug vignette rendering
         if: matrix.config.julia && runner.os == 'Linux'
         run: |

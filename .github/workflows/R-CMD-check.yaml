@@ -92,9 +92,58 @@ jobs:
           writeLines(prefs, prefs_path)
           message("Wrote ", prefs_path, ":\n", prefs)
 
+          # Export R_HOME and library path so Julia/RCall can find R in all subsequent steps
+          gh_env <- Sys.getenv("GITHUB_ENV", unset = "")
+          if (nzchar(gh_env)) {
+            env_lines <- sprintf("R_HOME=%s", rhome)
+            if (sysname == "Linux") {
+              lib_dir <- file.path(rhome, "lib")
+              old_ld <- Sys.getenv("LD_LIBRARY_PATH", unset = "")
+              new_ld <- if (nzchar(old_ld)) paste(lib_dir, old_ld, sep = ":") else lib_dir
+              env_lines <- c(env_lines, sprintf("LD_LIBRARY_PATH=%s", new_ld))
+            } else if (sysname == "Darwin") {
+              lib_dir <- file.path(rhome, "lib")
+              old_dl <- Sys.getenv("DYLD_FALLBACK_LIBRARY_PATH", unset = "")
+              new_dl <- if (nzchar(old_dl)) paste(lib_dir, old_dl, sep = ":") else lib_dir
+              env_lines <- c(env_lines, sprintf("DYLD_FALLBACK_LIBRARY_PATH=%s", new_dl))
+            }
+            cat(paste(env_lines, collapse = "\n"), "\n", file = gh_env, append = TRUE)
+            message("Exported to GITHUB_ENV:\n", paste(env_lines, collapse = "\n"))
+          }
+
       - name: Install JuliaCall dependencies
         if: matrix.config.julia
         run: julia -e 'using Pkg; Pkg.add("Suppressor"); Pkg.add("RCall")'
+        shell: bash
+
+      - name: Test Julia-R integration
+        if: matrix.config.julia
+        run: |
+          echo "=== R_HOME=$R_HOME ==="
+          echo "=== LD_LIBRARY_PATH=$LD_LIBRARY_PATH ==="
+
+          echo "=== Step 1: Julia standalone ==="
+          julia -e 'println("Julia OK: ", VERSION)'
+
+          echo "=== Step 2: RCall in standalone Julia ==="
+          julia -e '
+            ENV["R_HOME"] = ENV["R_HOME"]
+            using RCall
+            println("RCall loaded OK")
+          ' || echo "RCall standalone failed (expected if R_HOME not set for standalone julia)"
+
+          echo "=== Step 3: JuliaCall::julia_setup() ==="
+          Rscript -e '
+            message("R_HOME = ", Sys.getenv("R_HOME"))
+            message("LD_LIBRARY_PATH = ", Sys.getenv("LD_LIBRARY_PATH"))
+            tryCatch({
+              JuliaCall::julia_setup(verbose = TRUE)
+              message("JuliaCall setup OK")
+            }, error = function(e) {
+              message("JuliaCall setup failed: ", conditionMessage(e))
+              stop(e)
+            })
+          '
         shell: bash
 
       - name: Setup PDMPSamplers Julia environment

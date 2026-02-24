@@ -26,9 +26,6 @@ jobs:
     env:
       GITHUB_PAT: ${{ secrets.GITHUB_TOKEN }}
       R_KEEP_PKG_SOURCE: yes
-      QUARTO_LOG_LEVEL: TRACE
-      # Limit Julia threads to prevent JuliaCall embedding segfaults
-      JULIA_NUM_THREADS: '1'
 
     steps:
       - uses: actions/checkout@v6
@@ -41,9 +38,9 @@ jobs:
         with:
           # local::. is needed for quarto vignettes on Windows
           # see https://github.com/quarto-dev/quarto-r/issues/217
-          # JuliaInterop/JuliaCall: need dev version for libunwind fix (PR https://github.com/JuliaInterop/JuliaCall/pull/265)
-          # that prevents segfaults on Ubuntu 24.04; CRAN 0.17.6 predates this fix
-          extra-packages: any::rcmdcheck, local::., JuliaInterop/JuliaCall
+          # JuliaCall dev version needed for libunwind fix (PR #265)
+          # that prevents segfaults on Ubuntu 24.04; CRAN 0.17.6 predates this
+          extra-packages: any::rcmdcheck, github::Non-Contradiction/JuliaCall, local::.
           needs: check
 
       - name: Install Julia
@@ -100,101 +97,6 @@ jobs:
         if: matrix.config.julia
         run: julia -e 'using Pkg; Pkg.add("Suppressor"); Pkg.add("RCall")'
         shell: bash
-
-      - name: Diagnose Julia + R interop
-        if: matrix.config.julia
-        shell: Rscript {0}
-        run: |
-          message("=== R session info ===")
-          message("R.home(): ", R.home())
-          message("Platform: ", .Platform$OS.type)
-          message("Sys.info sysname: ", Sys.info()[["sysname"]])
-
-          message("\n=== Julia binary check ===")
-          julia_bin <- Sys.which("julia")
-          message("julia path: ", julia_bin)
-          stopifnot("julia not on PATH" = nzchar(julia_bin))
-          message(system2("julia", "--version", stdout = TRUE))
-
-          message("\n=== JULIA_NUM_THREADS: ", Sys.getenv("JULIA_NUM_THREADS", unset = "(unset)"))
-          message("JULIA_DEPOT_PATH: ", Sys.getenv("JULIA_DEPOT_PATH", unset = "(unset)"))
-
-          message("\n=== LocalPreferences.toml check ===")
-          julia_ver_out <- system2("julia", "--version", stdout = TRUE)
-          julia_ver_full <- strsplit(trimws(julia_ver_out), "\\s+")[[1]][3]
-          parts <- strsplit(julia_ver_full, "\\.")[[1]]
-          julia_ver <- paste(parts[1:2], collapse = ".")
-          julia_depot <- Sys.getenv("JULIA_DEPOT_PATH", unset = "")
-          if (nzchar(julia_depot)) {
-            julia_depot <- strsplit(julia_depot, .Platform$path.sep)[[1]][1]
-          } else {
-            julia_depot <- file.path(path.expand("~"), ".julia")
-          }
-          prefs_path <- file.path(julia_depot, "environments", paste0("v", julia_ver), "LocalPreferences.toml")
-          if (file.exists(prefs_path)) {
-            message("Contents of ", prefs_path, ":")
-            message(paste(readLines(prefs_path), collapse = "\n"))
-          } else {
-            message("WARNING: ", prefs_path, " does not exist!")
-          }
-
-          message("\n=== libR / R.dll check ===")
-          sysname <- Sys.info()[["sysname"]]
-          if (sysname == "Windows") {
-            candidates <- c(
-              file.path(R.home(), "bin", "x64", "R.dll"),
-              file.path(R.home(), "bin", "R.dll")
-            )
-            for (p in candidates) message("  ", p, " exists: ", file.exists(p))
-          }
-
-          message("\n=== Attempting JuliaCall::julia_setup() ===")
-          library(JuliaCall)
-          julia_setup(verbose = TRUE)
-          message("=== JuliaCall::julia_setup() succeeded ===")
-
-          message("\n=== Quick Julia eval test ===")
-          result <- julia_eval("1 + 1")
-          message("julia_eval('1 + 1') = ", result)
-          stopifnot(result == 2)
-          message("=== All diagnostics passed ===")
-
-      - name: Setup PDMPSamplers Julia environment
-        if: matrix.config.julia
-        shell: Rscript {0}
-        run: |
-          library(PDMPSamplersR)
-          message("=== Calling pdmpsamplers_setup() ===")
-          tryCatch(
-            pdmpsamplers_setup(verbose = TRUE),
-            error = function(e) {
-              message("Setup failed: ", conditionMessage(e))
-              traceback()
-              stop(e)
-            }
-          )
-          message("=== pdmpsamplers_setup() succeeded ===")
-
-      - name: Debug vignette rendering
-        if: matrix.config.julia
-        run: |
-          echo "=== quarto version ==="
-          quarto --version || echo "quarto not found!"
-          echo "=== julia version ==="
-          julia --version || echo "julia not found!"
-          echo "=== JULIA_NUM_THREADS: ${JULIA_NUM_THREADS:-unset} ==="
-          echo "=== R package versions ==="
-          Rscript -e '
-            message("ggplot2: ", packageVersion("ggplot2"))
-            message("knitr: ", packageVersion("knitr"))
-            message("quarto: ", packageVersion("quarto"))
-            message("JuliaCall: ", packageVersion("JuliaCall"))
-            message("PDMPSamplersR: ", packageVersion("PDMPSamplersR"))
-          '
-          echo "=== quarto render with trace ==="
-          cd vignettes && quarto render stan-examples.qmd --log-level trace 2>&1 || true
-        shell: bash
-        continue-on-error: true
 
       - uses: r-lib/actions/check-r-package@v2
         with:

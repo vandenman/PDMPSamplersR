@@ -1,0 +1,62 @@
+url: https://vandenman.github.io/PDMPSamplersR/
+
+template:
+  bootstrap: 5
+
+home:
+  title: PDMPSamplersR
+  description: >
+    R interface to PDMPSamplers.jl for Bayesian inference with
+    Piecewise Deterministic Markov Processes.
+
+navbar:
+  structure:
+    left: [intro, reference, articles]
+    right: [search, github, main-docs]
+  components:
+    main-docs:
+      text: "Full Documentation"
+      href: https://vandenman.github.io/PDMPSamplers.jl/dev/
+      icon: fa-book
+    github:
+      icon: fa-github
+      href: https://github.com/vandenman/PDMPSamplersR
+
+reference:
+  - title: Sampling
+    contents:
+      - pdmp_sample
+      - pdmp_sample_from_stanmodel
+      - write_stan_json
+  - title: Results
+    contents:
+      - mean.pdmp_result
+      - median.pdmp_result
+      - var.pdmp_result
+      - var
+      - sd
+      - cov.pdmp_result
+      - cov
+      - cor.pdmp_result
+      - cor
+      - quantile.pdmp_result
+      - ess
+      - inclusion_probs
+      - cdf
+      - discretize
+  - title: Transforms
+    contents:
+      - identity_transform
+      - lower_transform
+      - upper_transform
+      - double_transform
+  - title: Priors
+    contents:
+      - bernoulli
+      - betabernoulli
+  - title: Setup
+    contents:
+      - pdmpsamplers_setup
+      - pdmpsamplers_update
+      - use_local_pdmpsamplers
+      - check_for_julia_setup

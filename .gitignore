@@ -6,6 +6,7 @@ renv/
 stan/omrf
 .Rproj.user
 /doc/
+/docs/
 /Meta/
 *.so
 *.o

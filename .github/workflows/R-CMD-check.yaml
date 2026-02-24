@@ -27,6 +27,8 @@ jobs:
       GITHUB_PAT: ${{ secrets.GITHUB_TOKEN }}
       R_KEEP_PKG_SOURCE: yes
       QUARTO_LOG_LEVEL: TRACE
+      # Limit Julia threads to prevent JuliaCall embedding segfaults
+      JULIA_NUM_THREADS: '1'
 
     steps:
       - uses: actions/checkout@v6
@@ -102,9 +104,6 @@ jobs:
       - name: Diagnose Julia + R interop
         if: matrix.config.julia
         shell: Rscript {0}
-        env:
-          # Limit threads to 1 on Windows to prevent JuliaCall embedding segfaults
-          JULIA_NUM_THREADS: ${{ runner.os == 'Windows' && '1' || '' }}
         run: |
           message("=== R session info ===")
           message("R.home(): ", R.home())
@@ -163,8 +162,6 @@ jobs:
       - name: Setup PDMPSamplers Julia environment
         if: matrix.config.julia
         shell: Rscript {0}
-        env:
-          JULIA_NUM_THREADS: ${{ runner.os == 'Windows' && '1' || '' }}
         run: |
           library(PDMPSamplersR)
           message("=== Calling pdmpsamplers_setup() ===")
@@ -179,12 +176,21 @@ jobs:
           message("=== pdmpsamplers_setup() succeeded ===")
 
       - name: Debug vignette rendering
-        if: matrix.config.julia && runner.os == 'Linux'
+        if: matrix.config.julia
         run: |
           echo "=== quarto version ==="
-          quarto --version
+          quarto --version || echo "quarto not found!"
+          echo "=== julia version ==="
+          julia --version || echo "julia not found!"
+          echo "=== JULIA_NUM_THREADS: ${JULIA_NUM_THREADS:-unset} ==="
           echo "=== R package versions ==="
-          Rscript -e 'message("ggplot2: ", packageVersion("ggplot2")); message("knitr: ", packageVersion("knitr")); message("quarto: ", packageVersion("quarto"))'
+          Rscript -e '
+            message("ggplot2: ", packageVersion("ggplot2"))
+            message("knitr: ", packageVersion("knitr"))
+            message("quarto: ", packageVersion("quarto"))
+            message("JuliaCall: ", packageVersion("JuliaCall"))
+            message("PDMPSamplersR: ", packageVersion("PDMPSamplersR"))
+          '
           echo "=== quarto render with trace ==="
           cd vignettes && quarto render stan-examples.qmd --log-level trace 2>&1 || true
         shell: bash

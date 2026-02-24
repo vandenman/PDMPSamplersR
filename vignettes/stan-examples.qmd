@@ -10,7 +10,11 @@ vignette: >
 ```{r}
 #| label: setup
 #| include: false
-julia_available <- tryCatch(
+# Guard: check Julia is actually on PATH before calling julia_setup(),
+# because a segfault in JuliaCall::julia_setup() is not catchable by tryCatch.
+julia_on_path <- nzchar(Sys.which("julia"))
+
+julia_available <- julia_on_path && tryCatch(
     {
         library(PDMPSamplersR)
         library(tibble)
@@ -22,6 +26,9 @@ julia_available <- tryCatch(
             JuliaCall::julia_setup(verbose = FALSE),
             type = "message"
         ))
+
+        check_for_julia_setup(error_if_not_exists = FALSE,
+                              setup_if_not_exists = FALSE)
 
         theme_set(
           theme_bw(base_size = 16) +

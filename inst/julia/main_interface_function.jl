@@ -1,12 +1,16 @@
 using PDMPSamplers, LinearAlgebra, BridgeStan
 
-function build_flow(flow_type::String, prec::AbstractMatrix{Float64}, flow_mean::AbstractVector{Float64})
+function build_flow(flow_type::String, prec::AbstractMatrix{Float64}, flow_mean::AbstractVector{Float64};
+                    adaptive_scheme::String="diagonal")
     if flow_type == "ZigZag"
         return ZigZag(prec, flow_mean)
     elseif flow_type == "BouncyParticle"
         return BouncyParticle(prec, flow_mean)
     elseif flow_type == "Boomerang"
         return Boomerang(prec, flow_mean)
+    elseif flow_type == "AdaptiveBoomerang"
+        d = length(flow_mean)
+        return AdaptiveBoomerang(d; scheme=Symbol(adaptive_scheme))
     else
         throw(ArgumentError("Unknown flow type: $flow_type"))
     end
@@ -187,13 +191,14 @@ function r_pdmp_stan(
         parameter_prior::Union{AbstractVector{Float64}, Nothing} = nothing,
         show_progress::Bool = true,
         n_chains::Int = 1,
-        threaded::Bool = false
+        threaded::Bool = false,
+        adaptive_scheme::String = "diagonal"
     )
 
     d = model.d
 
     prec = inv(Symmetric(flow_cov))
-    flow = build_flow(flow_type, prec, flow_mean)
+    flow = build_flow(flow_type, prec, flow_mean; adaptive_scheme)
     alg = build_algorithm(algorithm_type; c0, d, grid_n, grid_t_max)
     alg = wrap_sticky(alg, sticky, model_prior, parameter_prior, can_stick)
 
@@ -223,7 +228,8 @@ function r_pdmp_custom(
         parameter_prior::Union{AbstractVector{Float64}, Nothing} = nothing,
         show_progress::Bool = true,
         n_chains::Int = 1,
-        threaded::Bool = false
+        threaded::Bool = false,
+        adaptive_scheme::String = "diagonal"
     )
 
     hvp = if !isnothing(hessian)
@@ -237,7 +243,7 @@ function r_pdmp_custom(
     model = PDMPModel(d, FullGradient(grad!), hvp)
 
     prec = inv(Symmetric(flow_cov))
-    flow = build_flow(flow_type, prec, flow_mean)
+    flow = build_flow(flow_type, prec, flow_mean; adaptive_scheme)
     alg = build_algorithm(algorithm_type; c0, d, grid_n, grid_t_max)
     alg = wrap_sticky(alg, sticky, model_prior, parameter_prior, can_stick)
 

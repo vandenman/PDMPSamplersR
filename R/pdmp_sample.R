@@ -4,7 +4,8 @@ validate_pdmp_params <- function(d, flow, algorithm, T, t0 = 0.0, t_warmup = 0.0
                                 x0 = NULL, theta0 = NULL, show_progress = TRUE,
                                 sticky = FALSE, can_stick = NULL, model_prior = NULL, parameter_prior = NULL,
                                 grid_n = 30, grid_t_max = 2.0,
-                                n_chains = 1L, threaded = FALSE) {
+                                n_chains = 1L, threaded = FALSE,
+                                adaptive_scheme = "diagonal") {
 
   # Validate basic parameters
   d <- cast_integer(d, n = 1)
@@ -18,8 +19,19 @@ validate_pdmp_params <- function(d, flow, algorithm, T, t0 = 0.0, t_warmup = 0.0
   if (t_warmup >= T - t0)
     cli::cli_abort("Argument {.arg t_warmup} ({t_warmup}) must be less than {.code T - t0} ({T - t0}).")
 
-  flow <- match.arg(flow, c("ZigZag", "BouncyParticle", "Boomerang"))
+  flow <- match.arg(flow, c("ZigZag", "BouncyParticle", "Boomerang", "AdaptiveBoomerang"))
   algorithm <- match.arg(algorithm, c("ThinningStrategy", "GridThinningStrategy", "RootsPoissonStrategy"))
+
+  # AdaptiveBoomerang requires GridThinningStrategy and a warmup period
+  if (flow == "AdaptiveBoomerang") {
+    if (algorithm != "GridThinningStrategy")
+      cli::cli_abort("{.val AdaptiveBoomerang} requires {.val GridThinningStrategy} as the algorithm.")
+    adaptive_scheme <- match.arg(adaptive_scheme, c("diagonal", "fullrank"))
+    if (t_warmup == 0) {
+      t_warmup <- (T - t0) / 5
+      cli::cli_inform("Setting {.arg t_warmup} to {t_warmup} (20% of sampling time) for {.val AdaptiveBoomerang}.")
+    }
+  }
 
   validate_type(c0, type = "double", n = 1, positive = TRUE)
   validate_type(show_progress, type = "logical", n = 1)
@@ -96,7 +108,8 @@ validate_pdmp_params <- function(d, flow, algorithm, T, t0 = 0.0, t_warmup = 0.0
     x0 = x0, theta0 = theta0, show_progress = show_progress,
     sticky = sticky, can_stick = can_stick, model_prior = model_prior, parameter_prior = parameter_prior,
     grid_n = grid_n, grid_t_max = grid_t_max,
-    n_chains = n_chains, threaded = threaded
+    n_chains = n_chains, threaded = threaded,
+    adaptive_scheme = adaptive_scheme
   ))
 }
 
@@ -109,7 +122,9 @@ validate_pdmp_params <- function(d, flow, algorithm, T, t0 = 0.0, t_warmup = 0.0
 #'   and return a numeric vector of the same length.
 #' @param d Integer, dimension of the problem.
 #' @param flow Character string specifying the flow type. One of "ZigZag",
-#'   "BouncyParticle", or "Boomerang".
+#'   "BouncyParticle", "Boomerang", or "AdaptiveBoomerang".
+#'   The `"AdaptiveBoomerang"` flow learns its reference (mean and precision)
+#'   during warmup and requires `"GridThinningStrategy"` as the algorithm.
 #' @param algorithm Character string specifying the algorithm. One of
 #'   "ThinningStrategy", "GridThinningStrategy", or "RootsPoissonStrategy".
 #' @param T Numeric, total sampling time (default: 50000).
@@ -132,6 +147,9 @@ validate_pdmp_params <- function(d, flow, algorithm, T, t0 = 0.0, t_warmup = 0.0
 #' @param show_progress Logical, whether to show progress bar (default: TRUE).
 #' @param n_chains Integer, number of chains to run (default: 1).
 #' @param threaded Logical, whether to run chains in parallel (default: FALSE).
+#' @param adaptive_scheme Character string, adaptation scheme for AdaptiveBoomerang.
+#'   One of "diagonal" (default, O(d) per update) or "fullrank" (O(d^3) per update,
+#'   better for correlated targets). Ignored for other flow types.
 #'
 #' @return A \code{pdmp_result} object. Use \code{mean}, \code{var},
 #'   \code{quantile}, etc. for continuous-time estimators, or
@@ -139,7 +157,7 @@ validate_pdmp_params <- function(d, flow, algorithm, T, t0 = 0.0, t_warmup = 0.0
 #'
 #' @export
 pdmp_sample <- function(f, d,
-                        flow = c("ZigZag", "BouncyParticle", "Boomerang"),
+                        flow = c("ZigZag", "BouncyParticle", "Boomerang", "AdaptiveBoomerang"),
                         algorithm = c("ThinningStrategy", "GridThinningStrategy", "RootsPoissonStrategy"),
                         T = 50000, t0 = 0.0, t_warmup = 0.0,
                         flow_mean = NULL, flow_cov = NULL, c0 = 1e-2,
@@ -148,7 +166,8 @@ pdmp_sample <- function(f, d,
                         sticky = FALSE, can_stick = NULL, model_prior = NULL, parameter_prior = NULL,
                         grid_n = 30, grid_t_max = 2.0,
                         show_progress = TRUE,
-                        n_chains = 1L, threaded = FALSE) {
+                        n_chains = 1L, threaded = FALSE,
+                        adaptive_scheme = c("diagonal", "fullrank")) {
 
   # Validate function argument (fail fast before Julia setup)
   if (!rlang::is_function(f)) {
@@ -162,7 +181,8 @@ pdmp_sample <- function(f, d,
   params <- validate_pdmp_params(d, flow, algorithm, T, t0, t_warmup, flow_mean, flow_cov,
                                 c0, x0, theta0, show_progress,
                                 sticky, can_stick, model_prior, parameter_prior,
-                                grid_n, grid_t_max, n_chains, threaded)
+                                grid_n, grid_t_max, n_chains, threaded,
+                                adaptive_scheme = adaptive_scheme)
 
   # Test the function with a sample input
   tryCatch({
@@ -215,7 +235,8 @@ pdmp_sample <- function(f, d,
     hessian = hessian_f,
     sticky = sticky, can_stick = can_stick,
     model_prior = model_prior, parameter_prior = parameter_prior,
-    show_progress = show_progress, n_chains = n_chains, threaded = threaded
+    show_progress = show_progress, n_chains = n_chains, threaded = threaded,
+    adaptive_scheme = adaptive_scheme
   );")
   if (is.environment(result)) result <- as.list(result)
   new_pdmp_result(
@@ -241,7 +262,9 @@ pdmp_sample <- function(f, d,
 #'   BridgeStan will compile it automatically.
 #' @param path_to_standata Character, path to the Stan data file (JSON format).
 #' @param flow Character string specifying the flow type. One of "ZigZag",
-#'   "BouncyParticle", or "Boomerang".
+#'   "BouncyParticle", "Boomerang", or "AdaptiveBoomerang".
+#'   The `"AdaptiveBoomerang"` flow learns its reference (mean and precision)
+#'   during warmup and requires `"GridThinningStrategy"` as the algorithm.
 #' @param algorithm Character string specifying the algorithm. One of
 #'   "ThinningStrategy", "GridThinningStrategy", or "RootsPoissonStrategy".
 #' @param T Numeric, total sampling time (default: 50000).
@@ -262,6 +285,9 @@ pdmp_sample <- function(f, d,
 #' @param show_progress Logical, whether to show progress bar (default: TRUE).
 #' @param n_chains Integer, number of chains to run (default: 1).
 #' @param threaded Logical, whether to run chains in parallel (default: FALSE).
+#' @param adaptive_scheme Character string, adaptation scheme for AdaptiveBoomerang.
+#'   One of "diagonal" (default, O(d) per update) or "fullrank" (O(d^3) per update,
+#'   better for correlated targets). Ignored for other flow types.
 #'
 #' @return A \code{pdmp_result} object. Use \code{mean}, \code{var},
 #'   \code{quantile}, etc. for continuous-time estimators, or
@@ -269,7 +295,7 @@ pdmp_sample <- function(f, d,
 #'
 #' @export
 pdmp_sample_from_stanmodel <- function(path_to_stanmodel, path_to_standata,
-                        flow = c("ZigZag", "BouncyParticle", "Boomerang"),
+                        flow = c("ZigZag", "BouncyParticle", "Boomerang", "AdaptiveBoomerang"),
                         algorithm = c("ThinningStrategy", "GridThinningStrategy", "RootsPoissonStrategy"),
                         T = 50000, t0 = 0.0, t_warmup = 0.0,
                         flow_mean = NULL, flow_cov = NULL, c0 = 1e-2,
@@ -277,7 +303,8 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, path_to_standata,
                         sticky = FALSE, can_stick = NULL, model_prior = NULL, parameter_prior = NULL,
                         grid_n = 30, grid_t_max = 2.0,
                         show_progress = TRUE,
-                        n_chains = 1L, threaded = FALSE) {
+                        n_chains = 1L, threaded = FALSE,
+                        adaptive_scheme = c("diagonal", "fullrank")) {
 
   # Validate file paths on R side before setting up Julia (fail fast)
   validate_type(path_to_stanmodel, type = "character", n = 1)
@@ -315,7 +342,8 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, path_to_standata,
   params <- validate_pdmp_params(d, flow, algorithm, T, t0, t_warmup, flow_mean, flow_cov,
                                  c0, x0, theta0, show_progress,
                                  sticky, can_stick, model_prior, parameter_prior,
-                                 grid_n, grid_t_max, n_chains, threaded)
+                                 grid_n, grid_t_max, n_chains, threaded,
+                                 adaptive_scheme = adaptive_scheme)
 
   # Pass arguments to Julia
   for (nm in names(params))
@@ -327,7 +355,8 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, path_to_standata,
     t0 = t0, T = T, t_warmup = t_warmup,
     sticky = sticky, can_stick = can_stick,
     model_prior = model_prior, parameter_prior = parameter_prior,
-    show_progress = show_progress, n_chains = n_chains, threaded = threaded
+    show_progress = show_progress, n_chains = n_chains, threaded = threaded,
+    adaptive_scheme = adaptive_scheme
   );")
   if (is.environment(result)) result <- as.list(result)
   new_pdmp_result(

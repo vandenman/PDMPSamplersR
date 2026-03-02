@@ -11,6 +11,12 @@ function build_flow(flow_type::String, prec::AbstractMatrix{Float64}, flow_mean:
     elseif flow_type == "AdaptiveBoomerang"
         d = length(flow_mean)
         return AdaptiveBoomerang(d; scheme=Symbol(adaptive_scheme))
+    elseif flow_type == "PreconditionedZigZag"
+        d = length(flow_mean)
+        return PreconditionedZigZag(prec, flow_mean)
+    elseif flow_type == "PreconditionedBPS"
+        d = length(flow_mean)
+        return PreconditionedBPS(prec, flow_mean)
     else
         throw(ArgumentError("Unknown flow type: $flow_type"))
     end
@@ -147,13 +153,20 @@ end
 function extract_stats(chains::PDMPChains)
     s = chains.stats[1]
     return Dict{String, Any}(
-        "reflections_events"   => s.reflections_events,
-        "reflections_accepted" => s.reflections_accepted,
-        "refreshment_events"   => s.refreshment_events,
-        "sticky_events"        => s.sticky_events,
-        "gradient_calls"       => s.∇f_calls,
-        "hessian_calls"        => s.∇²f_calls,
-        "elapsed_time"         => s.elapsed_time
+        "reflections_events"    => s.reflections_events,
+        "reflections_accepted"  => s.reflections_accepted,
+        "refreshment_events"    => s.refreshment_events,
+        "sticky_events"         => s.sticky_events,
+        "gradient_calls"        => s.∇f_calls,
+        "hessian_calls"         => s.∇²f_calls,
+        "elapsed_time"          => s.elapsed_time,
+        "grid_builds"           => s.grid_builds,
+        "grid_shrinks"          => s.grid_shrinks,
+        "grid_grows"            => s.grid_grows,
+        "grid_early_stops"      => s.grid_early_stops,
+        "grid_points_evaluated" => s.grid_points_evaluated,
+        "grid_points_skipped"   => s.grid_points_skipped,
+        "grid_N_current"        => s.grid_N_current
     )
 end
 

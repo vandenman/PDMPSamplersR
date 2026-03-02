@@ -8,6 +8,15 @@
 \description{
 More about what it does (maybe more than one line). Continuation lines should be indented.
 }
+\seealso{
+Useful links:
+\itemize{
+  \item \url{https://vandenman.github.io/PDMPSamplersR/}
+  \item \url{https://github.com/vandenman/PDMPSamplersR}
+  \item Report bugs at \url{https://github.com/vandenman/PDMPSamplersR/issues}
+}
+
+}
 \author{
 \strong{Maintainer}: Don van den Bergh \email{d.vandenbergh@uva.nl}
 

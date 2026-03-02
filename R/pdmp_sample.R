@@ -19,7 +19,7 @@ validate_pdmp_params <- function(d, flow, algorithm, T, t0 = 0.0, t_warmup = 0.0
   if (t_warmup >= T - t0)
     cli::cli_abort("Argument {.arg t_warmup} ({t_warmup}) must be less than {.code T - t0} ({T - t0}).")
 
-  flow <- match.arg(flow, c("ZigZag", "BouncyParticle", "Boomerang", "AdaptiveBoomerang"))
+  flow <- match.arg(flow, c("ZigZag", "BouncyParticle", "Boomerang", "AdaptiveBoomerang", "PreconditionedZigZag", "PreconditionedBPS"))
   algorithm <- match.arg(algorithm, c("ThinningStrategy", "GridThinningStrategy", "RootsPoissonStrategy"))
 
   # AdaptiveBoomerang requires GridThinningStrategy and a warmup period
@@ -30,6 +30,16 @@ validate_pdmp_params <- function(d, flow, algorithm, T, t0 = 0.0, t_warmup = 0.0
     if (t_warmup == 0) {
       t_warmup <- (T - t0) / 5
       cli::cli_inform("Setting {.arg t_warmup} to {t_warmup} (20% of sampling time) for {.val AdaptiveBoomerang}.")
+    }
+  }
+
+  # PreconditionedZigZag and PreconditionedBPS require GridThinningStrategy and a warmup period
+  if (flow %in% c("PreconditionedZigZag", "PreconditionedBPS")) {
+    if (algorithm != "GridThinningStrategy")
+      cli::cli_abort("{.val {flow}} requires {.val GridThinningStrategy} as the algorithm.")
+    if (t_warmup == 0) {
+      t_warmup <- (T - t0) / 5
+      cli::cli_inform("Setting {.arg t_warmup} to {t_warmup} (20% of sampling time) for {.val {flow}}.")
     }
   }
 
@@ -122,9 +132,13 @@ validate_pdmp_params <- function(d, flow, algorithm, T, t0 = 0.0, t_warmup = 0.0
 #'   and return a numeric vector of the same length.
 #' @param d Integer, dimension of the problem.
 #' @param flow Character string specifying the flow type. One of "ZigZag",
-#'   "BouncyParticle", "Boomerang", or "AdaptiveBoomerang".
+#'   "BouncyParticle", "Boomerang", "AdaptiveBoomerang", "PreconditionedZigZag",
+#'   or "PreconditionedBPS".
 #'   The `"AdaptiveBoomerang"` flow learns its reference (mean and precision)
 #'   during warmup and requires `"GridThinningStrategy"` as the algorithm.
+#'   The `"PreconditionedZigZag"` and `"PreconditionedBPS"` flows learn a
+#'   diagonal preconditioner during warmup and also require
+#'   `"GridThinningStrategy"` as the algorithm.
 #' @param algorithm Character string specifying the algorithm. One of
 #'   "ThinningStrategy", "GridThinningStrategy", or "RootsPoissonStrategy".
 #' @param T Numeric, total sampling time (default: 50000).
@@ -157,7 +171,7 @@ validate_pdmp_params <- function(d, flow, algorithm, T, t0 = 0.0, t_warmup = 0.0
 #'
 #' @export
 pdmp_sample <- function(f, d,
-                        flow = c("ZigZag", "BouncyParticle", "Boomerang", "AdaptiveBoomerang"),
+                        flow = c("ZigZag", "BouncyParticle", "Boomerang", "AdaptiveBoomerang", "PreconditionedZigZag", "PreconditionedBPS"),
                         algorithm = c("ThinningStrategy", "GridThinningStrategy", "RootsPoissonStrategy"),
                         T = 50000, t0 = 0.0, t_warmup = 0.0,
                         flow_mean = NULL, flow_cov = NULL, c0 = 1e-2,
@@ -262,9 +276,13 @@ pdmp_sample <- function(f, d,
 #'   BridgeStan will compile it automatically.
 #' @param path_to_standata Character, path to the Stan data file (JSON format).
 #' @param flow Character string specifying the flow type. One of "ZigZag",
-#'   "BouncyParticle", "Boomerang", or "AdaptiveBoomerang".
+#'   "BouncyParticle", "Boomerang", "AdaptiveBoomerang", "PreconditionedZigZag",
+#'   or "PreconditionedBPS".
 #'   The `"AdaptiveBoomerang"` flow learns its reference (mean and precision)
 #'   during warmup and requires `"GridThinningStrategy"` as the algorithm.
+#'   The `"PreconditionedZigZag"` and `"PreconditionedBPS"` flows learn a
+#'   diagonal preconditioner during warmup and also require
+#'   `"GridThinningStrategy"` as the algorithm.
 #' @param algorithm Character string specifying the algorithm. One of
 #'   "ThinningStrategy", "GridThinningStrategy", or "RootsPoissonStrategy".
 #' @param T Numeric, total sampling time (default: 50000).
@@ -295,7 +313,7 @@ pdmp_sample <- function(f, d,
 #'
 #' @export
 pdmp_sample_from_stanmodel <- function(path_to_stanmodel, path_to_standata,
-                        flow = c("ZigZag", "BouncyParticle", "Boomerang", "AdaptiveBoomerang"),
+                        flow = c("ZigZag", "BouncyParticle", "Boomerang", "AdaptiveBoomerang", "PreconditionedZigZag", "PreconditionedBPS"),
                         algorithm = c("ThinningStrategy", "GridThinningStrategy", "RootsPoissonStrategy"),
                         T = 50000, t0 = 0.0, t_warmup = 0.0,
                         flow_mean = NULL, flow_cov = NULL, c0 = 1e-2,

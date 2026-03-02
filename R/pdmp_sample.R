@@ -21,12 +21,12 @@ validate_pdmp_params <- function(d, flow, algorithm, T, t0 = 0.0, t_warmup = 0.0
 
   flow <- match.arg(flow, c("ZigZag", "BouncyParticle", "Boomerang", "AdaptiveBoomerang", "PreconditionedZigZag", "PreconditionedBPS"))
   algorithm <- match.arg(algorithm, c("ThinningStrategy", "GridThinningStrategy", "RootsPoissonStrategy"))
+  adaptive_scheme <- match.arg(adaptive_scheme, c("diagonal", "fullrank"))
 
   # AdaptiveBoomerang requires GridThinningStrategy and a warmup period
   if (flow == "AdaptiveBoomerang") {
     if (algorithm != "GridThinningStrategy")
       cli::cli_abort("{.val AdaptiveBoomerang} requires {.val GridThinningStrategy} as the algorithm.")
-    adaptive_scheme <- match.arg(adaptive_scheme, c("diagonal", "fullrank"))
     if (t_warmup == 0) {
       t_warmup <- (T - t0) / 5
       cli::cli_inform("Setting {.arg t_warmup} to {t_warmup} (20% of sampling time) for {.val AdaptiveBoomerang}.")

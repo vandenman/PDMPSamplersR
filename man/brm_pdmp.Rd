@@ -23,6 +23,9 @@ brm_pdmp(
   grid_t_max = 2,
   show_progress = TRUE,
   discretize_dt = NULL,
+  n_chains = 1L,
+  threaded = FALSE,
+  compute_lp = FALSE,
   stanvars = NULL,
   sample_prior = "no",
   save_model = NULL,
@@ -65,6 +68,15 @@ brm_pdmp(
 \item{discretize_dt}{Numeric time step for discretization, or NULL
 for automatic (yields ~1000 samples).}
 
+\item{n_chains}{Integer number of chains (default: 1). With multiple
+chains, `Rhat` and multi-chain diagnostics become available.}
+
+\item{threaded}{Logical; run chains in parallel (default: FALSE).}
+
+\item{compute_lp}{Logical; compute `lp__` via `BridgeStan::log_density()`
+for each sample (default: FALSE). Adds overhead but enables
+`bridge_sampler()` and populates the `lp__` diagnostic column.}
+
 \item{stanvars}{Optional `stanvar` object for custom Stan code.}
 
 \item{sample_prior}{Currently only `"no"` is supported.}
@@ -90,5 +102,6 @@ plots, `nuts_params()`) will not produce meaningful output.
 `loo()` works because brms computes `log_lik` directly from model
 parameters, not from `lp__`.
 
-With a single chain, `Rhat` will report `NA`.
+With a single chain, `Rhat` will report `NA`. Use `n_chains >= 2`
+for convergence diagnostics.
 }

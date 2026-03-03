@@ -173,3 +173,151 @@ test_that("brm_pdmp: Poisson regression example in epileptic patients", {
   }
 })
 
+
+test_that("brm_pdmp: multi-chain gaussian with Rhat", {
+  skip_if_no_brms_setup()
+
+  set.seed(42)
+  n <- 50
+  x <- rnorm(n)
+  y <- 2 + 0.5 * x + rnorm(n, sd = 0.5)
+  df <- data.frame(y = y, x = x)
+
+  fit <- brm_pdmp(y ~ x, data = df, family = gaussian(),
+                  flow = "ZigZag", algorithm = "GridThinningStrategy",
+                  T = 50000, show_progress = FALSE,
+                  n_chains = 2L)
+
+  expect_s3_class(fit, "brmsfit")
+
+  s <- summary(fit)
+  fixed <- s$fixed
+
+  expect_true("Rhat" %in% colnames(fixed))
+  rhat_vals <- fixed[, "Rhat"]
+  for (rh in rhat_vals) {
+    expect_lt(rh, 1.05)
+  }
+
+  expect_true(abs(fixed["Intercept", "Estimate"] - 2) < 0.1)
+  expect_true(abs(fixed["x", "Estimate"] - 0.5) < 0.15)
+})
+
+test_that("brm_pdmp: compute_lp populates lp__", {
+  skip_if_no_brms_setup()
+
+  set.seed(42)
+  n <- 50
+  x <- rnorm(n)
+  y <- 2 + 0.5 * x + rnorm(n, sd = 0.5)
+  df <- data.frame(y = y, x = x)
+
+  fit <- brm_pdmp(y ~ x, data = df, family = gaussian(),
+                  flow = "AdaptiveBoomerang", algorithm = "GridThinningStrategy",
+                  T = 20000, show_progress = FALSE,
+                  compute_lp = TRUE)
+
+  expect_s3_class(fit, "brmsfit")
+  lp <- rstan::extract(fit$fit, pars = "lp__")$lp__
+  expect_true(all(is.finite(lp)))
+  expect_true(all(lp < 0))
+})
+
+test_that("brm_pdmp: student_t family", {
+  skip_if_no_brms_setup()
+
+  set.seed(100)
+  n <- 80
+  x <- rnorm(n)
+  y <- 1.5 + 0.8 * x + rt(n, df = 3)
+  df <- data.frame(y = y, x = x)
+
+  fit <- brm_pdmp(y ~ x, data = df, family = brms::student(),
+                  flow = "AdaptiveBoomerang", algorithm = "GridThinningStrategy",
+                  T = 50000, show_progress = FALSE)
+
+  expect_s3_class(fit, "brmsfit")
+  s <- summary(fit)
+  expect_true("Intercept" %in% rownames(s$fixed))
+  expect_true(abs(s$fixed["Intercept", "Estimate"] - 1.5) < 0.1)
+  expect_true(abs(s$fixed["x", "Estimate"] - 0.8) < 0.15)
+})
+
+test_that("brm_pdmp: negbinomial family", {
+  skip_if_no_brms_setup()
+
+  set.seed(200)
+  n <- 100
+  x <- rnorm(n)
+  mu <- exp(0.5 + 0.3 * x)
+  y <- rnbinom(n, size = 5, mu = mu)
+  df <- data.frame(y = y, x = x)
+
+  fit <- brm_pdmp(y ~ x, data = df, family = brms::negbinomial(),
+                  flow = "AdaptiveBoomerang", algorithm = "GridThinningStrategy",
+                  T = 50000, show_progress = FALSE)
+
+  expect_s3_class(fit, "brmsfit")
+  s <- summary(fit)
+  expect_true("Intercept" %in% rownames(s$fixed))
+  expect_true(abs(s$fixed["Intercept", "Estimate"] - 0.5) < 1.0)
+  expect_true(abs(s$fixed["x", "Estimate"] - 0.3) < 1.0)
+})
+
+test_that("brm_pdmp: Beta family", {
+  skip_if_no_brms_setup()
+
+  set.seed(300)
+  n <- 100
+  x <- rnorm(n)
+  mu <- plogis(0.5 + 0.4 * x)
+  phi <- 10
+  y <- rbeta(n, shape1 = mu * phi, shape2 = (1 - mu) * phi)
+  y <- pmin(pmax(y, 0.001), 0.999) # avoid (unlikely) exact 0 or 1 values which cause issues
+  df <- data.frame(y = y, x = x)
+
+  fit <- brm_pdmp(y ~ x, data = df, family = brms::Beta(),
+                  flow = "AdaptiveBoomerang", algorithm = "GridThinningStrategy",
+                  T = 50000, show_progress = FALSE)
+
+  expect_s3_class(fit, "brmsfit")
+  s <- summary(fit)
+  expect_true("Intercept" %in% rownames(s$fixed))
+  expect_true("x" %in% rownames(s$fixed))
+})
+
+test_that("brm_pdmp: pp_check works", {
+  skip_if_no_brms_setup()
+
+  set.seed(42)
+  n <- 50
+  x <- rnorm(n)
+  y <- 2 + 0.5 * x + rnorm(n, sd = 0.5)
+  df <- data.frame(y = y, x = x)
+
+  fit <- brm_pdmp(y ~ x, data = df, family = gaussian(),
+                  flow = "PreconditionedZigZag", algorithm = "GridThinningStrategy",
+                  T = 20000, show_progress = FALSE)
+
+  pp <- brms::pp_check(fit, ndraws = 50)
+  expect_s3_class(pp, "gg")
+})
+
+test_that("brm_pdmp: loo works", {
+  skip_if_no_brms_setup()
+
+  set.seed(42)
+  n <- 50
+  x <- rnorm(n)
+  y <- 2 + 0.5 * x + rnorm(n, sd = 0.5)
+  df <- data.frame(y = y, x = x)
+
+  fit <- brm_pdmp(y ~ x, data = df, family = gaussian(),
+                  flow = "PreconditionedZigZag", algorithm = "GridThinningStrategy",
+                  T = 20000, show_progress = FALSE)
+
+  loo_result <- suppressWarnings(brms::loo(fit))
+  expect_s3_class(loo_result, "loo")
+  expect_true(!is.null(loo_result$estimates))
+  # TODO: some substantial check on loo result?
+})

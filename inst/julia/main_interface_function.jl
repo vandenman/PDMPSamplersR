@@ -362,7 +362,7 @@ end
 # ──────────────────────────────────────────────────────────────────────────────
 
 function write_cmdstan_csv(path::String, draws::Matrix{Float64}, param_names::Vector{String};
-                           chain_id::Int=1)
+                           chain_id::Int=1, lp_values::Union{Vector{Float64}, Nothing}=nothing)
     n_samples = size(draws, 1)
     open(path, "w") do io
         println(io, "# model = PDMPSamplers_model")
@@ -382,7 +382,8 @@ function write_cmdstan_csv(path::String, draws::Matrix{Float64}, param_names::Ve
         header = join(vcat(diag_cols, param_names), ",")
         println(io, header)
         for i in 1:n_samples
-            print(io, "0,0,0,0,0,0,0")
+            lp = isnothing(lp_values) ? 0.0 : lp_values[i]
+            print(io, lp, ",0,0,0,0,0,0")
             for j in axes(draws, 2)
                 print(io, ",", draws[i, j])
             end
@@ -393,16 +394,21 @@ function write_cmdstan_csv(path::String, draws::Matrix{Float64}, param_names::Ve
 end
 
 function r_constrain_and_write_csv(sm::BridgeStan.StanModel, draws_unc::Matrix{Float64},
-                                   output_csv::String; chain_id::Int=1)
+                                   output_csv::String; chain_id::Int=1, compute_lp::Bool=false)
     param_names_c = BridgeStan.param_names(sm; include_tp=true, include_gq=true)
     rng = BridgeStan.StanRNG(sm, chain_id)
     n = size(draws_unc, 1)
     n_c = length(param_names_c)
     draws_con = Matrix{Float64}(undef, n, n_c)
+    lp_values = compute_lp ? Vector{Float64}(undef, n) : nothing
     for i in 1:n
-        draws_con[i, :] .= BridgeStan.param_constrain(sm, Vector(draws_unc[i, :]); include_tp=true, include_gq=true, rng)
+        row = Vector(draws_unc[i, :])
+        draws_con[i, :] .= BridgeStan.param_constrain(sm, row; include_tp=true, include_gq=true, rng)
+        if compute_lp
+            lp_values[i] = BridgeStan.log_density(sm, row)
+        end
     end
-    write_cmdstan_csv(output_csv, draws_con, param_names_c; chain_id)
+    write_cmdstan_csv(output_csv, draws_con, param_names_c; chain_id, lp_values)
     return output_csv
 end
 
@@ -424,7 +430,8 @@ function r_pdmp_stan_for_brms(
         discretize_dt::Float64 = 0.0,
         show_progress::Bool = true,
         n_chains::Int = 1,
-        threaded::Bool = false
+        threaded::Bool = false,
+        compute_lp::Bool = false
     )
     sm = BridgeStan.StanModel(path_to_stan_model, path_to_stan_data)
     model = PDMPModel(sm)
@@ -452,7 +459,7 @@ function r_pdmp_stan_for_brms(
         end
         draws_unc = Matrix(PDMPDiscretize(trace, dt))
         csv_path = n_ch == 1 ? output_csv : replace(output_csv, r"\.csv$" => "_chain$(chain_idx).csv")
-        r_constrain_and_write_csv(sm, draws_unc, csv_path; chain_id = chain_idx)
+        r_constrain_and_write_csv(sm, draws_unc, csv_path; chain_id = chain_idx, compute_lp)
         push!(csv_paths, csv_path)
     end
 

@@ -22,6 +22,12 @@
 #' @param show_progress Logical; show sampling progress bar.
 #' @param discretize_dt Numeric time step for discretization, or NULL
 #'   for automatic (yields ~1000 samples).
+#' @param n_chains Integer number of chains (default: 1). With multiple
+#'   chains, `Rhat` and multi-chain diagnostics become available.
+#' @param threaded Logical; run chains in parallel (default: FALSE).
+#' @param compute_lp Logical; compute `lp__` via `BridgeStan::log_density()`
+#'   for each sample (default: FALSE). Adds overhead but enables
+#'   `bridge_sampler()` and populates the `lp__` diagnostic column.
 #' @param stanvars Optional `stanvar` object for custom Stan code.
 #' @param sample_prior Currently only `"no"` is supported.
 #' @param save_model Optional file path to save the generated Stan code.
@@ -38,7 +44,8 @@
 #' `loo()` works because brms computes `log_lik` directly from model
 #' parameters, not from `lp__`.
 #'
-#' With a single chain, `Rhat` will report `NA`.
+#' With a single chain, `Rhat` will report `NA`. Use `n_chains >= 2`
+#' for convergence diagnostics.
 #'
 #' @export
 brm_pdmp <- function(
@@ -54,6 +61,8 @@ brm_pdmp <- function(
     grid_n = 30, grid_t_max = 2.0,
     show_progress = TRUE,
     discretize_dt = NULL,
+    n_chains = 1L, threaded = FALSE,
+    compute_lp = FALSE,
     stanvars = NULL, sample_prior = "no",
     save_model = NULL,
     ...
@@ -129,8 +138,9 @@ brm_pdmp <- function(
     adaptive_scheme = adaptive_scheme,
     discretize_dt = jl_discretize_dt,
     show_progress = show_progress,
-    n_chains = 1L,
-    threaded = FALSE
+    n_chains = as.integer(n_chains),
+    threaded = threaded,
+    compute_lp = compute_lp
   )
 
   stanfit <- rstan::read_stan_csv(csv_paths)

@@ -1,4 +1,4 @@
-using PDMPSamplers, LinearAlgebra, BridgeStan
+using PDMPSamplers, LinearAlgebra, BridgeStan, Random
 
 function build_flow(flow_type::String, prec::AbstractMatrix{Float64}, flow_mean::AbstractVector{Float64};
                     adaptive_scheme::String="diagonal")
@@ -273,6 +273,87 @@ function r_pdmp_custom(
 
     chains = pdmp_sample(x0, flow, model, alg, t0, T, t_warmup;
                          progress = show_progress, n_chains = n_chains, threaded = threaded)
+    return _pack_result(chains)
+end
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Subsampled gradient bridge (R callbacks)
+# ──────────────────────────────────────────────────────────────────────────────
+
+function r_pdmp_custom_subsampled(
+        grad_sub_r,
+        d::Integer,
+        n_obs::Integer,
+        subsample_size::Integer,
+        x0::AbstractVector{Float64},
+        flow_type::String,
+        algorithm_type::String,
+        flow_mean::AbstractVector{Float64},
+        flow_cov::AbstractMatrix{Float64};
+        hvp_sub_r = nothing,
+        grad_full_r = nothing,
+        use_full_gradient_for_reflections::Bool = false,
+        c0::Float64 = 1e-2,
+        grid_n::Int = 30,
+        grid_t_max::Float64 = 2.0,
+        t0::Float64 = 0.0,
+        T::Float64 = 10000.0,
+        t_warmup::Float64 = 0.0,
+        show_progress::Bool = true,
+        n_chains::Int = 1,
+        threaded::Bool = false,
+        adaptive_scheme::String = "diagonal"
+    )
+
+    indices = Vector{Int}(undef, subsample_size)
+    _perm = Vector{Int}(undef, n_obs)
+
+    function resample!(nsub)
+        Random.randperm!(_perm)
+        for i in 1:subsample_size
+            indices[i] = _perm[i]
+        end
+    end
+
+    function subsampled_grad!(out, x)
+        out .= grad_sub_r(x, indices)
+    end
+
+    full_grad! = if isnothing(grad_full_r)
+        (out, x) -> error("No full gradient provided but it was requested")
+    else
+        (out, x) -> (out .= grad_full_r(x))
+    end
+
+    grad = SubsampledGradient(
+        subsampled_grad!, resample!, (trace) -> nothing,
+        FullGradient(full_grad!),
+        subsample_size, 0, use_full_gradient_for_reflections
+    )
+
+    hvp = if isnothing(hvp_sub_r)
+        let ε = 1e-5, _buf1 = zeros(d), _buf2 = zeros(d)
+            (out, x, v) -> begin
+                @. _buf2 = x - ε * v
+                subsampled_grad!(_buf1, _buf2)
+                @. _buf2 = x + ε * v
+                subsampled_grad!(out, _buf2)
+                @. out = (out - _buf1) / (2ε)
+            end
+        end
+    else
+        (out, x, v) -> (out .= hvp_sub_r(x, v, indices))
+    end
+
+    model = PDMPModel(d, grad, hvp)
+
+    prec = isempty(flow_cov) ? Matrix{Float64}(I, d, d) : inv(Symmetric(flow_cov))
+    fmean = isempty(flow_mean) ? zeros(d) : flow_mean
+    flow = build_flow(flow_type, prec, fmean; adaptive_scheme)
+    alg = build_algorithm(algorithm_type; c0, d, grid_n, grid_t_max)
+
+    chains = pdmp_sample(x0, flow, model, alg, t0, T, t_warmup;
+                         progress = show_progress, n_chains, threaded)
     return _pack_result(chains)
 end
 

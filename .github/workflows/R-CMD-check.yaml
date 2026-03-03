@@ -26,6 +26,10 @@ jobs:
     env:
       GITHUB_PAT: ${{ secrets.GITHUB_TOKEN }}
       R_KEEP_PKG_SOURCE: yes
+      # Serialize Julia precompilation to reduce memory pressure on CI runners.
+      # The precompile workload runs real sampling code, which can OOM-kill
+      # parallel workers on resource-constrained runners.
+      JULIA_NUM_PRECOMPILE_TASKS: "1"
 
     steps:
       - uses: actions/checkout@v6
@@ -97,6 +101,37 @@ jobs:
         if: matrix.config.julia
         run: julia -e 'using Pkg; Pkg.add("Suppressor"); Pkg.add("RCall")'
         shell: bash
+
+      - name: Set up Julia backend
+        if: matrix.config.julia
+        shell: Rscript {0}
+        run: |
+          library(PDMPSamplersR)
+          pdmpsamplers_setup()
+
+      - name: Show Julia precompile logs on failure
+        if: failure() && matrix.config.julia
+        shell: bash
+        run: |
+          echo "=== Julia precompile error logs ==="
+          find ~/.julia/compiled -name '*.log' -newer ~/.julia/compiled -exec echo '--- {} ---' \; -exec cat {} \; 2>/dev/null || true
+          echo "=== Attempting manual precompile with verbose output ==="
+          julia -e '
+            ENV["JULIA_DEBUG"] = "loading"
+            import Pkg
+            try
+              Pkg.activate(expanduser("~/.cache/PDMPSamplersR/_juliaProject"))
+              Pkg.precompile()
+            catch e
+              @error "Precompile failed" exception=(e, catch_backtrace())
+            end
+            try
+              @info "Attempting: using PDMPSamplers"
+              @eval using PDMPSamplers
+            catch e
+              @error "using PDMPSamplers failed" exception=(e, catch_backtrace())
+            end
+          ' 2>&1 || true
 
       - uses: r-lib/actions/check-r-package@v2
         with:

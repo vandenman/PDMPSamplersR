@@ -16,6 +16,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       GITHUB_PAT: ${{ secrets.GITHUB_TOKEN }}
+      JULIA_NUM_PRECOMPILE_TASKS: "1"
     steps:
       - uses: actions/checkout@v6
 
@@ -67,6 +68,30 @@ jobs:
             library(PDMPSamplersR)
             pdmpsamplers_setup()
           '
+
+      - name: Show Julia precompile logs on failure
+        if: failure()
+        shell: bash
+        run: |
+          echo "=== Julia precompile error logs ==="
+          find ~/.julia/compiled -name '*.log' -newer ~/.julia/compiled -exec echo '--- {} ---' \; -exec cat {} \; 2>/dev/null || true
+          echo "=== Attempting manual precompile with verbose output ==="
+          julia -e '
+            ENV["JULIA_DEBUG"] = "loading"
+            import Pkg
+            try
+              Pkg.activate(expanduser("~/.cache/PDMPSamplersR/_juliaProject"))
+              Pkg.precompile()
+            catch e
+              @error "Precompile failed" exception=(e, catch_backtrace())
+            end
+            try
+              @info "Attempting: using PDMPSamplers"
+              @eval using PDMPSamplers
+            catch e
+              @error "using PDMPSamplers failed" exception=(e, catch_backtrace())
+            end
+          ' 2>&1 || true
 
       - name: Build site
         run: pkgdown::build_site_github_pages(new_process = FALSE, install = FALSE)

@@ -70,7 +70,7 @@ jobs:
       - name: Pre-compile Julia project
         shell: bash
         run: |
-          PROJECT_DIR=$(Rscript -e 'cat(file.path(rappdirs::user_cache_dir("PDMPSamplersR"), "_juliaProject"))')
+          PROJECT_DIR=$(Rscript -e 'cat(path.expand(file.path(rappdirs::user_cache_dir("PDMPSamplersR"), "_juliaProject")))')
           echo "Julia project directory: $PROJECT_DIR"
           mkdir -p "$PROJECT_DIR"
           julia --project="$PROJECT_DIR" -e '

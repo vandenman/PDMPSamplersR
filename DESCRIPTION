@@ -26,11 +26,13 @@ Imports:
     stats
 Suggests:
     BayesFactor,
+    brms,
     ggplot2,
     jsonlite,
     knitr,
     patchwork,
     quarto,
+    rstan,
     testthat (>= 3.0.0),
     tibble
 Config/testthat/edition: 3

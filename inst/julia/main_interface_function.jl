@@ -275,3 +275,105 @@ function r_pdmp_custom(
                          progress = show_progress, n_chains = n_chains, threaded = threaded)
     return _pack_result(chains)
 end
+
+# ──────────────────────────────────────────────────────────────────────────────
+# brms backend helpers
+# ──────────────────────────────────────────────────────────────────────────────
+
+function write_cmdstan_csv(path::String, draws::Matrix{Float64}, param_names::Vector{String};
+                           chain_id::Int=1)
+    n_samples = size(draws, 1)
+    open(path, "w") do io
+        println(io, "# model = PDMPSamplers_model")
+        println(io, "# method = sample (adapt engaged=0)")
+        println(io, "#   sample")
+        println(io, "#     num_samples = ", n_samples)
+        println(io, "#     num_warmup = 0")
+        println(io, "#     save_warmup = 0")
+        println(io, "#     thin = 1")
+        println(io, "# id = ", chain_id)
+        println(io, "# Adaptation terminated")
+        println(io, "#  Elapsed Time: 0 seconds (Warm-up)")
+        println(io, "#                0 seconds (Sampling)")
+        println(io, "#                0 seconds (Total)")
+        diag_cols = ["lp__", "accept_stat__", "stepsize__", "treedepth__",
+                     "n_leapfrog__", "divergent__", "energy__"]
+        header = join(vcat(diag_cols, param_names), ",")
+        println(io, header)
+        for i in 1:n_samples
+            print(io, "0,0,0,0,0,0,0")
+            for j in axes(draws, 2)
+                print(io, ",", draws[i, j])
+            end
+            println(io)
+        end
+    end
+    return path
+end
+
+function r_constrain_and_write_csv(sm::BridgeStan.StanModel, draws_unc::Matrix{Float64},
+                                   output_csv::String; chain_id::Int=1)
+    param_names_c = BridgeStan.param_names(sm; include_tp=true, include_gq=true)
+    rng = BridgeStan.StanRNG(sm, chain_id)
+    n = size(draws_unc, 1)
+    n_c = length(param_names_c)
+    draws_con = Matrix{Float64}(undef, n, n_c)
+    for i in 1:n
+        draws_con[i, :] .= BridgeStan.param_constrain(sm, Vector(draws_unc[i, :]); include_tp=true, include_gq=true, rng)
+    end
+    write_cmdstan_csv(output_csv, draws_con, param_names_c; chain_id)
+    return output_csv
+end
+
+function r_pdmp_stan_for_brms(
+        path_to_stan_model::String,
+        path_to_stan_data::String,
+        flow_type::String,
+        algorithm_type::String,
+        flow_mean::AbstractVector{Float64},
+        flow_cov::AbstractMatrix{Float64},
+        output_csv::String;
+        c0::Float64 = 1e-2,
+        grid_n::Int = 30,
+        grid_t_max::Float64 = 2.0,
+        t0::Float64 = 0.0,
+        T::Float64 = 10000.0,
+        t_warmup::Float64 = 0.0,
+        adaptive_scheme::String = "diagonal",
+        discretize_dt::Float64 = 0.0,
+        show_progress::Bool = true,
+        n_chains::Int = 1,
+        threaded::Bool = false
+    )
+    sm = BridgeStan.StanModel(path_to_stan_model, path_to_stan_data)
+    model = PDMPModel(sm)
+    d = model.d
+
+    fmean = isempty(flow_mean) ? zeros(d) : flow_mean
+    prec = isempty(flow_cov) ? Matrix{Float64}(I, d, d) : inv(Symmetric(flow_cov))
+
+    flow = build_flow(flow_type, prec, fmean; adaptive_scheme)
+    alg = build_algorithm(algorithm_type; c0, d, grid_n, grid_t_max)
+
+    chains = pdmp_sample(d, flow, model, alg, t0, T, t_warmup;
+                         progress = show_progress, n_chains, threaded)
+
+    n_ch = length(chains.traces)
+    csv_paths = String[]
+    for chain_idx in 1:n_ch
+        trace = chains.traces[chain_idx]
+        dt = if discretize_dt > 0
+            discretize_dt
+        else
+            t_start = first_event_time(trace)
+            t_end = last_event_time(trace)
+            (t_end - t_start) / 1000
+        end
+        draws_unc = Matrix(PDMPDiscretize(trace, dt))
+        csv_path = n_ch == 1 ? output_csv : replace(output_csv, r"\.csv$" => "_chain$(chain_idx).csv")
+        r_constrain_and_write_csv(sm, draws_unc, csv_path; chain_id = chain_idx)
+        push!(csv_paths, csv_path)
+    end
+
+    return csv_paths
+end

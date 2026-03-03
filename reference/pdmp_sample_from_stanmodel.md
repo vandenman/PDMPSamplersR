@@ -9,8 +9,9 @@ integration.
 ``` r
 pdmp_sample_from_stanmodel(
   path_to_stanmodel,
-  path_to_standata,
-  flow = c("ZigZag", "BouncyParticle", "Boomerang"),
+  standata,
+  flow = c("ZigZag", "BouncyParticle", "Boomerang", "AdaptiveBoomerang",
+    "PreconditionedZigZag", "PreconditionedBPS"),
   algorithm = c("ThinningStrategy", "GridThinningStrategy", "RootsPoissonStrategy"),
   T = 50000,
   t0 = 0,
@@ -28,7 +29,8 @@ pdmp_sample_from_stanmodel(
   grid_t_max = 2,
   show_progress = TRUE,
   n_chains = 1L,
-  threaded = FALSE
+  threaded = FALSE,
+  adaptive_scheme = c("diagonal", "fullrank")
 )
 ```
 
@@ -40,14 +42,22 @@ pdmp_sample_from_stanmodel(
   (.so/.dll/.dylib). If a .stan file is provided, BridgeStan will
   compile it automatically.
 
-- path_to_standata:
+- standata:
 
-  Character, path to the Stan data file (JSON format).
+  Either a character path to the Stan data file (JSON format), or a
+  named list that will be written to a temporary JSON file via
+  \[write_stan_json()\].
 
 - flow:
 
   Character string specifying the flow type. One of "ZigZag",
-  "BouncyParticle", or "Boomerang".
+  "BouncyParticle", "Boomerang", "AdaptiveBoomerang",
+  "PreconditionedZigZag", or "PreconditionedBPS". The
+  \`"AdaptiveBoomerang"\` flow learns its reference (mean and precision)
+  during warmup and requires \`"GridThinningStrategy"\` as the
+  algorithm. The \`"PreconditionedZigZag"\` and \`"PreconditionedBPS"\`
+  flows learn a diagonal preconditioner during warmup and also require
+  \`"GridThinningStrategy"\` as the algorithm.
 
 - algorithm:
 
@@ -128,6 +138,12 @@ pdmp_sample_from_stanmodel(
 - threaded:
 
   Logical, whether to run chains in parallel (default: FALSE).
+
+- adaptive_scheme:
+
+  Character string, adaptation scheme for AdaptiveBoomerang. One of
+  "diagonal" (default, O(d) per update) or "fullrank" (O(d^3) per
+  update, better for correlated targets). Ignored for other flow types.
 
 ## Value
 

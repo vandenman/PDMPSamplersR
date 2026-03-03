@@ -49,7 +49,8 @@ PDMPSamplers.jl Julia package.</p>
     <div class="sourceCode"><pre class="sourceCode r"><code><span><span class="fu">pdmp_sample</span><span class="op">(</span></span>
 <span>  <span class="va">f</span>,</span>
 <span>  <span class="va">d</span>,</span>
-<span>  flow <span class="op">=</span> <span class="fu"><a href="https://rdrr.io/r/base/c.html" class="external-link">c</a></span><span class="op">(</span><span class="st">"ZigZag"</span>, <span class="st">"BouncyParticle"</span>, <span class="st">"Boomerang"</span><span class="op">)</span>,</span>
+<span>  flow <span class="op">=</span> <span class="fu"><a href="https://rdrr.io/r/base/c.html" class="external-link">c</a></span><span class="op">(</span><span class="st">"ZigZag"</span>, <span class="st">"BouncyParticle"</span>, <span class="st">"Boomerang"</span>, <span class="st">"AdaptiveBoomerang"</span>,</span>
+<span>    <span class="st">"PreconditionedZigZag"</span>, <span class="st">"PreconditionedBPS"</span><span class="op">)</span>,</span>
 <span>  algorithm <span class="op">=</span> <span class="fu"><a href="https://rdrr.io/r/base/c.html" class="external-link">c</a></span><span class="op">(</span><span class="st">"ThinningStrategy"</span>, <span class="st">"GridThinningStrategy"</span>, <span class="st">"RootsPoissonStrategy"</span><span class="op">)</span>,</span>
 <span>  T <span class="op">=</span> <span class="fl">50000</span>,</span>
 <span>  t0 <span class="op">=</span> <span class="fl">0</span>,</span>
@@ -68,7 +69,8 @@ PDMPSamplers.jl Julia package.</p>
 <span>  grid_t_max <span class="op">=</span> <span class="fl">2</span>,</span>
 <span>  show_progress <span class="op">=</span> <span class="cn">TRUE</span>,</span>
 <span>  n_chains <span class="op">=</span> <span class="fl">1L</span>,</span>
-<span>  threaded <span class="op">=</span> <span class="cn">FALSE</span></span>
+<span>  threaded <span class="op">=</span> <span class="cn">FALSE</span>,</span>
+<span>  adaptive_scheme <span class="op">=</span> <span class="fu"><a href="https://rdrr.io/r/base/c.html" class="external-link">c</a></span><span class="op">(</span><span class="st">"diagonal"</span>, <span class="st">"fullrank"</span><span class="op">)</span></span>
 <span><span class="op">)</span></span></code></pre></div>
     </div>
 
@@ -87,7 +89,13 @@ and return a numeric vector of the same length.</p></dd>
 
 <dt id="arg-flow">flow<a class="anchor" aria-label="anchor" href="#arg-flow"></a></dt>
 <dd><p>Character string specifying the flow type. One of "ZigZag",
-"BouncyParticle", or "Boomerang".</p></dd>
+"BouncyParticle", "Boomerang", "AdaptiveBoomerang", "PreconditionedZigZag",
+or "PreconditionedBPS".
+The `"AdaptiveBoomerang"` flow learns its reference (mean and precision)
+during warmup and requires `"GridThinningStrategy"` as the algorithm.
+The `"PreconditionedZigZag"` and `"PreconditionedBPS"` flows learn a
+diagonal preconditioner during warmup and also require
+`"GridThinningStrategy"` as the algorithm.</p></dd>
 
 
 <dt id="arg-algorithm">algorithm<a class="anchor" aria-label="anchor" href="#arg-algorithm"></a></dt>
@@ -167,6 +175,12 @@ Only used with GridThinningStrategy to compute the Hessian-vector product.</p></
 
 <dt id="arg-threaded">threaded<a class="anchor" aria-label="anchor" href="#arg-threaded"></a></dt>
 <dd><p>Logical, whether to run chains in parallel (default: FALSE).</p></dd>
+
+
+<dt id="arg-adaptive-scheme">adaptive_scheme<a class="anchor" aria-label="anchor" href="#arg-adaptive-scheme"></a></dt>
+<dd><p>Character string, adaptation scheme for AdaptiveBoomerang.
+One of "diagonal" (default, O(d) per update) or "fullrank" (O(d^3) per update,
+better for correlated targets). Ignored for other flow types.</p></dd>
 
 </dl></div>
     <div class="section level2">

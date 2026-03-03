@@ -65,8 +65,10 @@ end
 function r_discretize(chains::PDMPChains; dt::Union{Float64, Nothing} = nothing, chain::Int = 1)
     trace = chains.traces[chain]
     if isnothing(dt)
-        ts = [event.time for event in trace.events]
-        dt = mean(diff(ts))
+        t_start = first_event_time(trace)
+        t_end = last_event_time(trace)
+        n = length(trace)
+        dt = (t_end - t_start) / max(n - 1, 1)
     end
     return Matrix(PDMPDiscretize(trace, dt))
 end
@@ -251,7 +253,16 @@ function r_pdmp_custom(
             mul!(out, hess, v)
         end
     else
-        nothing
+        # Centered finite-difference HVP: H(x)*v ≈ (∇f(x + εv) - ∇f(x - εv)) / (2ε)
+        let ε = 1e-5, _buf1 = zeros(d), _buf2 = zeros(d)
+            (out, x, v) -> begin
+                @. _buf2 = x - ε * v
+                grad!(_buf1, _buf2)
+                @. _buf2 = x + ε * v
+                grad!(out, _buf2)
+                @. out = (out - _buf1) / (2ε)
+            end
+        end
     end
     model = PDMPModel(d, FullGradient(grad!), hvp)
 

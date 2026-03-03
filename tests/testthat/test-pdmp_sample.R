@@ -143,7 +143,7 @@ test_that("pdmp_sample runs with AdaptiveBoomerang (diagonal)", {
   neg_grad <- function(x) x
 
   result <- pdmp_sample(neg_grad, d = d, flow = "AdaptiveBoomerang",
-                        algorithm = "GridThinningStrategy", T = 500,
+                        algorithm = "GridThinningStrategy", T = 5000,
                         adaptive_scheme = "diagonal",
                         show_progress = FALSE)
 
@@ -159,7 +159,7 @@ test_that("pdmp_sample runs with AdaptiveBoomerang (fullrank)", {
   neg_grad <- function(x) x
 
   result <- pdmp_sample(neg_grad, d = d, flow = "AdaptiveBoomerang",
-                        algorithm = "GridThinningStrategy", T = 500,
+                        algorithm = "GridThinningStrategy", T = 5000,
                         adaptive_scheme = "fullrank",
                         show_progress = FALSE)
 

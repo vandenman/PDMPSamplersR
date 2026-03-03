@@ -115,3 +115,84 @@ test_that("pdmp_sample rejects invalid gradient function", {
   expect_error(pdmp_sample("not a function", d = 2, flow = "ZigZag", T = 100), "function")
   expect_error(pdmp_sample(function(x) x[1], d = 2, flow = "ZigZag", T = 100), "length")
 })
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Smoke tests for all dynamics (just check they run, not correctness)
+# ──────────────────────────────────────────────────────────────────────────────
+
+test_that("pdmp_sample runs with Boomerang flow", {
+  skip_on_cran()
+  skip_if_no_julia()
+
+  d <- 2
+  neg_grad <- function(x) x
+
+  result <- pdmp_sample(neg_grad, d = d, flow = "Boomerang",
+                        algorithm = "GridThinningStrategy", T = 500,
+                        show_progress = FALSE)
+
+  expect_s3_class(result, "pdmp_result")
+  expect_equal(result$d, d)
+})
+
+test_that("pdmp_sample runs with AdaptiveBoomerang (diagonal)", {
+  skip_on_cran()
+  skip_if_no_julia()
+
+  d <- 2
+  neg_grad <- function(x) x
+
+  result <- pdmp_sample(neg_grad, d = d, flow = "AdaptiveBoomerang",
+                        algorithm = "GridThinningStrategy", T = 5000,
+                        adaptive_scheme = "diagonal",
+                        show_progress = FALSE)
+
+  expect_s3_class(result, "pdmp_result")
+  expect_equal(result$d, d)
+})
+
+test_that("pdmp_sample runs with AdaptiveBoomerang (fullrank)", {
+  skip_on_cran()
+  skip_if_no_julia()
+
+  d <- 2
+  neg_grad <- function(x) x
+
+  result <- pdmp_sample(neg_grad, d = d, flow = "AdaptiveBoomerang",
+                        algorithm = "GridThinningStrategy", T = 5000,
+                        adaptive_scheme = "fullrank",
+                        show_progress = FALSE)
+
+  expect_s3_class(result, "pdmp_result")
+  expect_equal(result$d, d)
+})
+
+test_that("pdmp_sample runs with PreconditionedZigZag", {
+  skip_on_cran()
+  skip_if_no_julia()
+
+  d <- 2
+  neg_grad <- function(x) x
+
+  result <- pdmp_sample(neg_grad, d = d, flow = "PreconditionedZigZag",
+                        algorithm = "GridThinningStrategy", T = 500,
+                        show_progress = FALSE)
+
+  expect_s3_class(result, "pdmp_result")
+  expect_equal(result$d, d)
+})
+
+test_that("pdmp_sample runs with PreconditionedBPS", {
+  skip_on_cran()
+  skip_if_no_julia()
+
+  d <- 2
+  neg_grad <- function(x) x
+
+  result <- pdmp_sample(neg_grad, d = d, flow = "PreconditionedBPS",
+                        algorithm = "GridThinningStrategy", T = 500,
+                        show_progress = FALSE)
+
+  expect_s3_class(result, "pdmp_result")
+  expect_equal(result$d, d)
+})

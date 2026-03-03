@@ -16,6 +16,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       GITHUB_PAT: ${{ secrets.GITHUB_TOKEN }}
+      JULIA_NUM_PRECOMPILE_TASKS: "1"
     steps:
       - uses: actions/checkout@v6
 
@@ -60,6 +61,27 @@ jobs:
           prefs <- sprintf('[RCall]\nRhome = "%s"\nlibR = "%s"\n', rhome, libr)
           writeLines(prefs, prefs_path)
           message("Wrote ", prefs_path, ":\n", prefs)
+
+      # Pre-compile Julia packages in a standalone Julia process.
+      # JuliaCall's embedded Julia cannot reliably precompile packages
+      # (the precompile worker subprocess crashes silently inside R).
+      # Running precompilation here ensures the cache is warm before
+      # JuliaCall starts, so it only needs to load the cached files.
+      - name: Pre-compile Julia project
+        shell: bash
+        run: |
+          PROJECT_DIR=$(Rscript -e 'cat(path.expand(file.path(rappdirs::user_cache_dir("PDMPSamplersR"), "_juliaProject")))')
+          echo "Julia project directory: $PROJECT_DIR"
+          mkdir -p "$PROJECT_DIR"
+          julia --project="$PROJECT_DIR" -e '
+            import Pkg
+            Pkg.add(url="https://github.com/vandenman/PDMPSamplers.jl")
+            Pkg.add("BridgeStan")
+            Pkg.update()
+            Pkg.precompile()
+            using PDMPSamplers, LinearAlgebra, BridgeStan
+            @info "Pre-compilation and loading successful"
+          '
 
       - name: Set up Julia backend
         run: |

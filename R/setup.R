@@ -27,6 +27,51 @@ setup_julia_project <- function() {
   JuliaCall::julia_command('Pkg.update()')
   JuliaCall::julia_command('Pkg.precompile()')
 
+  # Verify that PDMPSamplers actually loads; if precompilation silently failed
+  # (e.g., OOM-killed worker on CI), `using` will trigger precompilation again
+  # and surface the real error.
+  tryCatch(
+    JuliaCall::julia_command("using PDMPSamplers"),
+    error = function(e) {
+      cli::cli_warn(c(
+        "!" = "PDMPSamplers failed to load after precompilation.",
+        "i" = "This is sometimes caused by insufficient memory during precompilation on CI.",
+        "i" = "Retrying precompilation with verbose output..."
+      ))
+      # Show the precompile log if available
+      tryCatch({
+        JuliaCall::julia_command('
+          for (uuid, info) in Pkg.Types.Context().env.manifest.deps
+            if info.name == "PDMPSamplers"
+              compiled_dir = joinpath(first(DEPOT_PATH), "compiled", "v$(VERSION.major).$(VERSION.minor)", "PDMPSamplers")
+              if isdir(compiled_dir)
+                for f in readdir(compiled_dir)
+                  if endswith(f, ".log")
+                    logpath = joinpath(compiled_dir, f)
+                    println("=== Precompile log: $logpath ===")
+                    println(read(logpath, String))
+                  end
+                end
+              end
+            end
+          end
+        ')
+      }, error = function(e2) NULL)
+
+      # Retry once
+      tryCatch({
+        JuliaCall::julia_command('Pkg.precompile()')
+        JuliaCall::julia_command("using PDMPSamplers")
+      }, error = function(e2) {
+        cli::cli_abort(c(
+          "PDMPSamplers.jl failed to precompile.",
+          "x" = conditionMessage(e),
+          "i" = "Check the Julia precompile logs above for details."
+        ))
+      })
+    }
+  )
+
 }
 
 load_julia_project <- function() {

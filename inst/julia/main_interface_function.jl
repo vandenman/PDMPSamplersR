@@ -1,12 +1,22 @@
 using PDMPSamplers, LinearAlgebra, BridgeStan
 
-function build_flow(flow_type::String, prec::AbstractMatrix{Float64}, flow_mean::AbstractVector{Float64})
+function build_flow(flow_type::String, prec::AbstractMatrix{Float64}, flow_mean::AbstractVector{Float64};
+                    adaptive_scheme::String="diagonal")
     if flow_type == "ZigZag"
         return ZigZag(prec, flow_mean)
     elseif flow_type == "BouncyParticle"
         return BouncyParticle(prec, flow_mean)
     elseif flow_type == "Boomerang"
         return Boomerang(prec, flow_mean)
+    elseif flow_type == "AdaptiveBoomerang"
+        d = length(flow_mean)
+        return AdaptiveBoomerang(d; scheme=Symbol(adaptive_scheme))
+    elseif flow_type == "PreconditionedZigZag"
+        d = length(flow_mean)
+        return PreconditionedZigZag(prec, flow_mean)
+    elseif flow_type == "PreconditionedBPS"
+        d = length(flow_mean)
+        return PreconditionedBPS(prec, flow_mean)
     else
         throw(ArgumentError("Unknown flow type: $flow_type"))
     end
@@ -55,8 +65,10 @@ end
 function r_discretize(chains::PDMPChains; dt::Union{Float64, Nothing} = nothing, chain::Int = 1)
     trace = chains.traces[chain]
     if isnothing(dt)
-        ts = [event.time for event in trace.events]
-        dt = mean(diff(ts))
+        t_start = first_event_time(trace)
+        t_end = last_event_time(trace)
+        n = length(trace)
+        dt = (t_end - t_start) / max(n - 1, 1)
     end
     return Matrix(PDMPDiscretize(trace, dt))
 end
@@ -143,13 +155,20 @@ end
 function extract_stats(chains::PDMPChains)
     s = chains.stats[1]
     return Dict{String, Any}(
-        "reflections_events"   => s.reflections_events,
-        "reflections_accepted" => s.reflections_accepted,
-        "refreshment_events"   => s.refreshment_events,
-        "sticky_events"        => s.sticky_events,
-        "gradient_calls"       => s.∇f_calls,
-        "hessian_calls"        => s.∇²f_calls,
-        "elapsed_time"         => s.elapsed_time
+        "reflections_events"    => s.reflections_events,
+        "reflections_accepted"  => s.reflections_accepted,
+        "refreshment_events"    => s.refreshment_events,
+        "sticky_events"         => s.sticky_events,
+        "gradient_calls"        => s.∇f_calls,
+        "hessian_calls"         => s.∇²f_calls,
+        "elapsed_time"          => s.elapsed_time,
+        "grid_builds"           => s.grid_builds,
+        "grid_shrinks"          => s.grid_shrinks,
+        "grid_grows"            => s.grid_grows,
+        "grid_early_stops"      => s.grid_early_stops,
+        "grid_points_evaluated" => s.grid_points_evaluated,
+        "grid_points_skipped"   => s.grid_points_skipped,
+        "grid_N_current"        => s.grid_N_current
     )
 end
 
@@ -187,13 +206,14 @@ function r_pdmp_stan(
         parameter_prior::Union{AbstractVector{Float64}, Nothing} = nothing,
         show_progress::Bool = true,
         n_chains::Int = 1,
-        threaded::Bool = false
+        threaded::Bool = false,
+        adaptive_scheme::String = "diagonal"
     )
 
     d = model.d
 
     prec = inv(Symmetric(flow_cov))
-    flow = build_flow(flow_type, prec, flow_mean)
+    flow = build_flow(flow_type, prec, flow_mean; adaptive_scheme)
     alg = build_algorithm(algorithm_type; c0, d, grid_n, grid_t_max)
     alg = wrap_sticky(alg, sticky, model_prior, parameter_prior, can_stick)
 
@@ -223,7 +243,8 @@ function r_pdmp_custom(
         parameter_prior::Union{AbstractVector{Float64}, Nothing} = nothing,
         show_progress::Bool = true,
         n_chains::Int = 1,
-        threaded::Bool = false
+        threaded::Bool = false,
+        adaptive_scheme::String = "diagonal"
     )
 
     hvp = if !isnothing(hessian)
@@ -232,12 +253,21 @@ function r_pdmp_custom(
             mul!(out, hess, v)
         end
     else
-        nothing
+        # Centered finite-difference HVP: H(x)*v ≈ (∇f(x + εv) - ∇f(x - εv)) / (2ε)
+        let ε = 1e-5, _buf1 = zeros(d), _buf2 = zeros(d)
+            (out, x, v) -> begin
+                @. _buf2 = x - ε * v
+                grad!(_buf1, _buf2)
+                @. _buf2 = x + ε * v
+                grad!(out, _buf2)
+                @. out = (out - _buf1) / (2ε)
+            end
+        end
     end
     model = PDMPModel(d, FullGradient(grad!), hvp)
 
     prec = inv(Symmetric(flow_cov))
-    flow = build_flow(flow_type, prec, flow_mean)
+    flow = build_flow(flow_type, prec, flow_mean; adaptive_scheme)
     alg = build_algorithm(algorithm_type; c0, d, grid_n, grid_t_max)
     alg = wrap_sticky(alg, sticky, model_prior, parameter_prior, can_stick)
 

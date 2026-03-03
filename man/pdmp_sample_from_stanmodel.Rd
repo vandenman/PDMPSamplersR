@@ -6,7 +6,7 @@
 \usage{
 pdmp_sample_from_stanmodel(
   path_to_stanmodel,
-  path_to_standata,
+  standata,
   flow = c("ZigZag", "BouncyParticle", "Boomerang", "AdaptiveBoomerang",
     "PreconditionedZigZag", "PreconditionedBPS"),
   algorithm = c("ThinningStrategy", "GridThinningStrategy", "RootsPoissonStrategy"),
@@ -35,7 +35,9 @@ pdmp_sample_from_stanmodel(
 compiled Stan model (.so/.dll/.dylib). If a .stan file is provided,
 BridgeStan will compile it automatically.}
 
-\item{path_to_standata}{Character, path to the Stan data file (JSON format).}
+\item{standata}{Either a character path to the Stan data file (JSON format),
+or a named list that will be written to a temporary JSON file via
+[write_stan_json()].}
 
 \item{flow}{Character string specifying the flow type. One of "ZigZag",
 "BouncyParticle", "Boomerang", "AdaptiveBoomerang", "PreconditionedZigZag",

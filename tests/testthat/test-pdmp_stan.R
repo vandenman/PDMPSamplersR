@@ -18,9 +18,41 @@ skip_if_no_julia <- function() {
 
 # Pure R-side validation tests (don't call check_for_julia_setup)
 
-test_that("pdmp_sample_from_stanmodel validates file path types", {
+test_that("pdmp_sample_from_stanmodel validates input types", {
   expect_error(pdmp_sample_from_stanmodel(123, "data.json"), "type")
   expect_error(pdmp_sample_from_stanmodel("model.stan", 123), "type")
+})
+
+test_that("pdmp_sample_from_stanmodel accepts standata as list", {
+  model_file <- tempfile(fileext = ".stan")
+  file.create(model_file)
+  on.exit(unlink(model_file), add = TRUE)
+
+  captured <- new.env(parent = emptyenv())
+  captured$data <- NULL
+  captured$file <- NULL
+
+  testthat::local_mocked_bindings(
+    write_stan_json = function(data, file, always_decimal = FALSE) {
+      captured$data <- data
+      captured$file <- file
+      jsonlite::write_json(list(N = 1), path = file, auto_unbox = TRUE)
+    },
+    check_for_julia_setup = function() {
+      stop("SENTINEL_CHECK_SETUP", call. = FALSE)
+    },
+    .package = "PDMPSamplersR"
+  )
+
+  expect_error(
+    pdmp_sample_from_stanmodel(model_file, list(N = 1)),
+    "SENTINEL_CHECK_SETUP"
+  )
+
+  expect_equal(captured$data, list(N = 1))
+  expect_true(is.character(captured$file))
+  expect_match(captured$file, "\\.json$")
+  expect_false(file.exists(captured$file))
 })
 
 test_that("pdmp_sample_from_stanmodel validates file existence", {

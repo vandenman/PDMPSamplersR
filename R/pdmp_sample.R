@@ -274,7 +274,9 @@ pdmp_sample <- function(f, d,
 #' @param path_to_stanmodel Character, path to a Stan model file (.stan) or a
 #'   compiled Stan model (.so/.dll/.dylib). If a .stan file is provided,
 #'   BridgeStan will compile it automatically.
-#' @param path_to_standata Character, path to the Stan data file (JSON format).
+#' @param standata Either a character path to the Stan data file (JSON format),
+#'   or a named list that will be written to a temporary JSON file via
+#'   [write_stan_json()].
 #' @param flow Character string specifying the flow type. One of "ZigZag",
 #'   "BouncyParticle", "Boomerang", "AdaptiveBoomerang", "PreconditionedZigZag",
 #'   or "PreconditionedBPS".
@@ -312,7 +314,7 @@ pdmp_sample <- function(f, d,
 #'   \code{discretize} to obtain a sample matrix.
 #'
 #' @export
-pdmp_sample_from_stanmodel <- function(path_to_stanmodel, path_to_standata,
+pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
                         flow = c("ZigZag", "BouncyParticle", "Boomerang", "AdaptiveBoomerang", "PreconditionedZigZag", "PreconditionedBPS"),
                         algorithm = c("ThinningStrategy", "GridThinningStrategy", "RootsPoissonStrategy"),
                         T = 50000, t0 = 0.0, t_warmup = 0.0,
@@ -326,21 +328,29 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, path_to_standata,
 
   # Validate file paths on R side before setting up Julia (fail fast)
   validate_type(path_to_stanmodel, type = "character", n = 1)
-  validate_type(path_to_standata,  type = "character", n = 1)
+
+  if (is.list(standata)) {
+    standata_path <- tempfile(fileext = ".json")
+    write_stan_json(standata, standata_path)
+    on.exit(unlink(standata_path), add = TRUE)
+  } else {
+    validate_type(standata, type = "character", n = 1)
+    standata_path <- standata
+  }
 
   if (!file.exists(path_to_stanmodel))
     cli::cli_abort("Stan model file not found: {.path {path_to_stanmodel}}")
-  if (!file.exists(path_to_standata))
-    cli::cli_abort("Stan data file not found: {.path {path_to_standata}}")
+  if (!file.exists(standata_path))
+    cli::cli_abort("Stan data file not found: {.path {standata_path}}")
   if (!grepl("\\.(so|dll|dylib|stan)$", path_to_stanmodel))
     cli::cli_abort(c(
       "{.arg path_to_stanmodel} should point to a Stan model ({.file .stan}) or a compiled Stan model ({.file .so}, {.file .dll}, or {.file .dylib}).",
       "i" = "Got: {.path {path_to_stanmodel}}"
     ))
-  if (!grepl("\\.json$", path_to_standata))
+  if (!grepl("\\.json$", standata_path))
     cli::cli_abort(c(
-      "{.arg path_to_standata} should be a JSON file.",
-      "i" = "Got: {.path {path_to_standata}}",
+      "{.arg standata} should be a JSON file path or a list that can be written to JSON.",
+      "i" = "Got: {.path {standata_path}}",
       "i" = "Use {.fn write_stan_json} to create a data file."
     ))
 
@@ -348,11 +358,11 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, path_to_standata,
 
   # Normalize paths to absolute
   path_to_stanmodel <- normalizePath(path_to_stanmodel, mustWork = TRUE)
-  path_to_standata  <- normalizePath(path_to_standata,  mustWork = TRUE)
+  standata_path     <- normalizePath(standata_path,     mustWork = TRUE)
 
   # Create PDMPModel in Julia and get dimension
   JuliaCall::julia_assign("_path_to_stan_model", path_to_stanmodel)
-  JuliaCall::julia_assign("_path_to_stan_data",  path_to_standata)
+  JuliaCall::julia_assign("_path_to_stan_data",  standata_path)
   JuliaCall::julia_command("_pdmp_model = PDMPModel(_path_to_stan_model, _path_to_stan_data);")
   d <- JuliaCall::julia_eval("_pdmp_model.d")
 

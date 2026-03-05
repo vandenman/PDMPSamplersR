@@ -412,6 +412,247 @@ function r_constrain_and_write_csv(sm::BridgeStan.StanModel, draws_unc::Matrix{F
     return output_csv
 end
 
+# ──────────────────────────────────────────────────────────────────────────────
+# BridgeStan subsampling for brms models
+# ──────────────────────────────────────────────────────────────────────────────
+
+mutable struct BridgeStanSubsamplingContext
+    sm_full::BridgeStan.StanModel
+    sm_sub::BridgeStan.StanModel
+    sm_prior::BridgeStan.StanModel
+    lib_path::String
+    Y_full::Vector{Float64}
+    X_full::Matrix{Float64}
+    means_X::Vector{Float64}
+    K::Int
+    Kc::Int
+    Y_is_int::Bool
+    correction::Vector{Float64}
+    N::Int
+    m::Int
+    perm::Vector{Int}
+    grad_buf1::Vector{Float64}
+    grad_buf2::Vector{Float64}
+end
+
+function _bss_json_array(io::IO, v::AbstractVector{<:Real}, as_int::Bool)
+    print(io, '[')
+    for i in eachindex(v)
+        i > firstindex(v) && print(io, ',')
+        xi = v[i]
+        if as_int
+            print(io, round(Int, xi))
+        elseif isinteger(xi) && isfinite(xi)
+            print(io, round(Int, xi))
+        else
+            print(io, xi)
+        end
+    end
+    print(io, ']')
+end
+
+function _bss_json_matrix(io::IO, M::AbstractMatrix{<:Real})
+    nr, nc = size(M)
+    print(io, '[')
+    for i in 1:nr
+        i > 1 && print(io, ',')
+        print(io, '[')
+        for j in 1:nc
+            j > 1 && print(io, ',')
+            v = M[i, j]
+            if isinteger(v) && isfinite(v)
+                print(io, round(Int, v))
+            else
+                print(io, v)
+            end
+        end
+        print(io, ']')
+    end
+    print(io, ']')
+end
+
+function _bss_subsample_json(Y_full::AbstractVector{Float64}, X_full::AbstractMatrix{Float64},
+                             means_X::AbstractVector{Float64}, K::Int, Kc::Int,
+                             Y_is_int::Bool, idxs::AbstractVector{Int})
+    io = IOBuffer()
+    print(io, "{\"N\":", length(idxs), ",\"Y\":")
+    _bss_json_array(io, view(Y_full, idxs), Y_is_int)
+    print(io, ",\"K\":", K, ",\"Kc\":", Kc, ",\"X\":")
+    _bss_json_matrix(io, view(X_full, idxs, :))
+    print(io, ",\"means_X\":")
+    _bss_json_array(io, means_X, false)
+    print(io, ",\"prior_only\":0}")
+    String(take!(io))
+end
+
+function _build_bss_model(ctx::BridgeStanSubsamplingContext, n_anchor_updates::Int)
+    s = ctx.N / ctx.m
+    d = Int(BridgeStan.param_unc_num(ctx.sm_full))
+
+    function neg_grad_cv!(out::Vector{Float64}, θ::Vector{Float64})
+        BridgeStan.log_density_gradient!(ctx.sm_sub, θ, ctx.grad_buf1)
+        BridgeStan.log_density_gradient!(ctx.sm_prior, θ, ctx.grad_buf2)
+        @. out = -((1 - s) * ctx.grad_buf2 + s * ctx.grad_buf1 + ctx.correction)
+        return out
+    end
+
+    function resample!(nsub)
+        Random.randperm!(ctx.perm)
+        json = _bss_subsample_json(ctx.Y_full, ctx.X_full, ctx.means_X, ctx.K, ctx.Kc,
+                                   ctx.Y_is_int, view(ctx.perm, 1:ctx.m))
+        finalize(ctx.sm_sub)
+        ctx.sm_sub = BridgeStan.StanModel(ctx.lib_path, json; warn=false)
+    end
+
+    function update_anchor!(trace)
+        θ_a = Vector{Float64}(vec(Statistics.mean(trace)))
+        BridgeStan.log_density_gradient!(ctx.sm_full, θ_a, ctx.grad_buf1)
+        g_full = copy(ctx.grad_buf1)
+        BridgeStan.log_density_gradient!(ctx.sm_sub, θ_a, ctx.grad_buf1)
+        BridgeStan.log_density_gradient!(ctx.sm_prior, θ_a, ctx.grad_buf2)
+        @. ctx.correction = (s - 1) * ctx.grad_buf2 - s * ctx.grad_buf1 + g_full
+    end
+
+    function neg_grad_full!(out::Vector{Float64}, θ::Vector{Float64})
+        BridgeStan.log_density_gradient!(ctx.sm_full, θ, out)
+        out .= .-out
+        return out
+    end
+
+    function neg_hvp_sub!(out::Vector{Float64}, θ::Vector{Float64}, v::Vector{Float64})
+        BridgeStan.log_density_hessian_vector_product!(ctx.sm_sub, θ, v, out)
+        out .= .-out
+        return out
+    end
+
+    grad = SubsampledGradient(
+        neg_grad_cv!, resample!, update_anchor!,
+        neg_grad_full!,
+        ctx.m, n_anchor_updates, true
+    )
+    return PDMPModel(d, grad, neg_hvp_sub!), d
+end
+
+function _new_bss_context(lib_path::String, data_full_file::String, data_prior_file::String,
+                          Y_full::Vector{Float64}, X_full::Matrix{Float64}, means_X::Vector{Float64},
+                          K::Int, Kc::Int, Y_is_int::Bool, N::Int, m::Int, d::Int)
+    sm_full = BridgeStan.StanModel(lib_path, data_full_file; warn=false)
+    sm_prior = BridgeStan.StanModel(lib_path, data_prior_file; warn=false)
+    perm = Vector{Int}(undef, N)
+    Random.randperm!(perm)
+    json = _bss_subsample_json(Y_full, X_full, means_X, K, Kc, Y_is_int, view(perm, 1:m))
+    sm_sub = BridgeStan.StanModel(lib_path, json; warn=false)
+    BridgeStanSubsamplingContext(
+        sm_full, sm_sub, sm_prior, lib_path,
+        Y_full, X_full, means_X, K, Kc, Y_is_int,
+        zeros(d), N, m, perm, zeros(d), zeros(d)
+    )
+end
+
+function r_pdmp_brms_subsampled(
+        stan_file::String,
+        data_full_file::String,
+        data_prior_file::String,
+        data_sub_file::String,
+        Y_full::AbstractVector,
+        X_full::AbstractMatrix,
+        means_X::AbstractVector,
+        N::Integer,
+        subsample_size::Integer,
+        flow_type::String,
+        algorithm_type::String,
+        flow_mean::AbstractVector,
+        flow_cov::AbstractMatrix,
+        output_csv::String;
+        c0::Float64 = 1e-2,
+        grid_n::Int = 30,
+        grid_t_max::Float64 = 2.0,
+        t0::Float64 = 0.0,
+        T::Float64 = 10000.0,
+        t_warmup::Float64 = 0.0,
+        n_anchor_updates::Int = 10,
+        adaptive_scheme::String = "diagonal",
+        discretize_dt::Float64 = 0.0,
+        show_progress::Bool = true,
+        n_chains::Int = 1,
+        threaded::Bool = false,
+        compute_lp::Bool = false
+    )
+    lib_path = BridgeStan.compile_model(stan_file)
+
+    Y_vec = Vector{Float64}(Y_full)
+    X_mat = Matrix{Float64}(X_full)
+    mx = Vector{Float64}(means_X)
+    N_int = Int(N)
+    m = Int(subsample_size)
+    K = size(X_mat, 2)
+    Kc = K - 1
+    Y_is_int = all(x -> x == round(x), Y_vec)
+
+    sm_full = BridgeStan.StanModel(lib_path, data_full_file; warn=false)
+    sm_prior = BridgeStan.StanModel(lib_path, data_prior_file; warn=false)
+    sm_sub = BridgeStan.StanModel(lib_path, data_sub_file; warn=false)
+    d = Int(BridgeStan.param_unc_num(sm_full))
+
+    ctx = BridgeStanSubsamplingContext(
+        sm_full, sm_sub, sm_prior, lib_path,
+        Y_vec, X_mat, mx, K, Kc, Y_is_int,
+        zeros(d), N_int, m,
+        Vector{Int}(undef, N_int),
+        zeros(d), zeros(d)
+    )
+
+    model, _ = _build_bss_model(ctx, n_anchor_updates)
+
+    fmean = isempty(flow_mean) ? zeros(d) : Vector{Float64}(flow_mean)
+    prec = isempty(flow_cov) ? Matrix{Float64}(I, d, d) : inv(Symmetric(Matrix{Float64}(flow_cov)))
+    flow = build_flow(flow_type, prec, fmean; adaptive_scheme)
+    alg = build_algorithm(algorithm_type; c0, d, grid_n, grid_t_max)
+
+    if n_chains == 1
+        chains = pdmp_sample(d, flow, model, alg, t0, T, t_warmup;
+                             progress=show_progress, n_chains=1, threaded=false)
+    else
+        results = map(1:n_chains) do chain_idx
+            if chain_idx == 1
+                model_i = model
+            else
+                ctx_i = _new_bss_context(lib_path, data_full_file, data_prior_file,
+                                         Y_vec, X_mat, mx, K, Kc, Y_is_int, N_int, m, d)
+                model_i, _ = _build_bss_model(ctx_i, n_anchor_updates)
+            end
+            chains_i = pdmp_sample(d, flow, model_i, alg, t0, T, t_warmup;
+                                   progress=(show_progress && chain_idx == 1), n_chains=1, threaded=false)
+            (chains_i.traces[1], chains_i.stats[1])
+        end
+        chains = PDMPChains([r[1] for r in results], [r[2] for r in results])
+    end
+
+    sm_constrain = sm_full
+    n_ch = length(chains.traces)
+    csv_paths = String[]
+    for chain_idx in 1:n_ch
+        trace = chains.traces[chain_idx]
+        dt = if discretize_dt > 0
+            discretize_dt
+        else
+            t_start = first_event_time(trace)
+            t_end = last_event_time(trace)
+            (t_end - t_start) / 1000
+        end
+        draws_unc = Matrix(PDMPDiscretize(trace, dt))
+        csv_path = n_ch == 1 ? output_csv : replace(output_csv, r"\.csv$" => "_chain$(chain_idx).csv")
+        r_constrain_and_write_csv(sm_constrain, draws_unc, csv_path; chain_id=chain_idx, compute_lp)
+        push!(csv_paths, csv_path)
+    end
+
+    return csv_paths
+end
+
+# ──────────────────────────────────────────────────────────────────────────────
+# brms backend (full-data, non-subsampled)
+# ──────────────────────────────────────────────────────────────────────────────
+
 function r_pdmp_stan_for_brms(
         path_to_stan_model::String,
         path_to_stan_data::String,

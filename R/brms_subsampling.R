@@ -39,7 +39,9 @@ fix_brms_stancode <- function(stancode) {
 subset_standata <- function(sdata, indices, means_X) {
   sub <- sdata
   sub$N <- length(indices)
-  sub$Y <- sdata$Y[indices]
+  Y_sub <- sdata$Y[indices]
+  if (length(Y_sub) == 1L) Y_sub <- array(Y_sub)
+  sub$Y <- Y_sub
   sub$X <- sdata$X[indices, , drop = FALSE]
   sub$means_X <- means_X
   sub
@@ -49,7 +51,7 @@ make_prior_standata <- function(sdata, means_X) {
   K <- sdata$K
   prior <- list(
     N = 1L,
-    Y = if (is.integer(sdata$Y)) 0L else 0.0,
+    Y = array(if (is.integer(sdata$Y)) 0L else 0.0),
     K = K,
     Kc = sdata$Kc,
     X = matrix(0, nrow = 1, ncol = K),
@@ -61,30 +63,16 @@ make_prior_standata <- function(sdata, means_X) {
 
 #' Fit a brms model using PDMP samplers with subsampled gradients
 #'
-#' Uses BridgeStan data-swapping to compute control-variate subsampled
-#' gradients. The same compiled Stan model is shared across the full dataset,
-#' subsample, and prior-only evaluations.
+#' @description
+#' Deprecated: use [brm_pdmp()] with the `subsample_size` argument instead.
 #'
 #' @inheritParams brm_pdmp
 #' @param subsample_size Integer, number of observations per subsample.
-#'   Must be less than `nrow(data)`. Default: `max(1, nrow(data) %/% 10)`.
+#'   Default: `max(1, nrow(data) %/% 10)`.
 #' @param n_anchor_updates Integer, number of anchor updates during warmup
 #'   (default: 10).
 #'
 #' @return A `brmsfit` object.
-#'
-#' @details
-#' The subsampled gradient uses a control-variate estimator that combines
-#' a subsample gradient, a prior-only gradient, and a cached full-data
-#' correction term (updated at anchor points during warmup).
-#'
-#' A centering fix is applied to the brms-generated Stan code to ensure
-#' consistent predictor centering across subsamples. This moves `means_X`
-#' from `transformed data` to `data`, always using the full-data column
-#' means.
-#'
-#' Currently supports fixed-effects models only (no random effects).
-#'
 #' @export
 brm_pdmp_subsampled <- function(
     formula, data, family = gaussian(),
@@ -107,117 +95,30 @@ brm_pdmp_subsampled <- function(
     save_model = NULL,
     ...
 ) {
-  if (!requireNamespace("brms", quietly = TRUE))
-    cli::cli_abort("Package {.pkg brms} is required for {.fn brm_pdmp_subsampled}.")
-  if (!requireNamespace("rstan", quietly = TRUE))
-    cli::cli_abort("Package {.pkg rstan} is required for {.fn brm_pdmp_subsampled}.")
+  cli::cli_warn(c(
+    "{.fn brm_pdmp_subsampled} is deprecated.",
+    "i" = "Use {.fn brm_pdmp} with {.arg subsample_size} instead."
+  ))
 
-  if (sample_prior != "no")
-    cli::cli_abort('{.fn brm_pdmp_subsampled} only supports {.code sample_prior = "no"}.')
+  if (is.null(subsample_size))
+    subsample_size <- max(1L, nrow(data) %/% 10L)
 
-  flow <- match.arg(flow)
-  algorithm <- match.arg(algorithm)
-  adaptive_scheme <- match.arg(adaptive_scheme)
-  N <- nrow(data)
-
-  if (is.null(subsample_size)) subsample_size <- max(1L, N %/% 10L)
-  subsample_size <- as.integer(subsample_size)
-  if (subsample_size >= N)
-    cli::cli_abort("{.arg subsample_size} ({subsample_size}) must be less than nrow(data) ({N}).")
-
-  n_anchor_updates <- as.integer(n_anchor_updates)
-
-  if (flow == "AdaptiveBoomerang") {
-    if (algorithm != "GridThinningStrategy")
-      cli::cli_abort("{.val AdaptiveBoomerang} requires {.val GridThinningStrategy}.")
-    if (t_warmup == 0) {
-      t_warmup <- (T - t0) / 5
-      cli::cli_inform("Setting {.arg t_warmup} to {t_warmup} (20% of sampling time) for {.val AdaptiveBoomerang}.")
-    }
-  }
-  if (flow %in% c("PreconditionedZigZag", "PreconditionedBPS")) {
-    if (algorithm != "GridThinningStrategy")
-      cli::cli_abort("{.val {flow}} requires {.val GridThinningStrategy}.")
-    if (t_warmup == 0) {
-      t_warmup <- (T - t0) / 5
-      cli::cli_inform("Setting {.arg t_warmup} to {t_warmup} (20% of sampling time) for {.val {flow}}.")
-    }
-  }
-
-  check_for_julia_setup()
-
-  scode <- brms::stancode(formula, data = data, family = family,
-                          prior = prior, stanvars = stanvars,
-                          sample_prior = sample_prior, ...)
-  sdata <- brms::standata(formula, data = data, family = family,
-                          prior = prior, stanvars = stanvars,
-                          sample_prior = sample_prior, ...)
-
-  scode_fixed <- fix_brms_stancode(scode)
-
-  means_X <- colMeans(sdata$X[, -1, drop = FALSE])
-
-  sdata_full <- sdata
-  sdata_full$means_X <- means_X
-
-  sdata_prior <- make_prior_standata(sdata, means_X)
-
-  init_indices <- sample.int(N, subsample_size)
-  sdata_sub <- subset_standata(sdata, init_indices, means_X)
-
-  empty_fit <- brms::brm(formula, data = data, family = family,
-                         prior = prior, stanvars = stanvars,
-                         sample_prior = sample_prior,
-                         empty = TRUE, ...)
-
-  stan_file <- tempfile(fileext = ".stan")
-  cat(scode_fixed, file = stan_file)
-  data_full_file <- tempfile(fileext = ".json")
-  write_stan_json(sdata_full, data_full_file)
-  data_prior_file <- tempfile(fileext = ".json")
-  write_stan_json(sdata_prior, data_prior_file)
-  data_sub_file <- tempfile(fileext = ".json")
-  write_stan_json(sdata_sub, data_sub_file)
-
-  if (!is.null(save_model))
-    cat(scode_fixed, file = save_model)
-
-  csv_file <- tempfile(fileext = ".csv")
-
-  jl_flow_mean <- if (is.null(flow_mean)) numeric(0) else flow_mean
-  jl_flow_cov  <- if (is.null(flow_cov)) matrix(numeric(0), nrow = 0, ncol = 0) else flow_cov
-  jl_discretize_dt <- if (is.null(discretize_dt)) 0.0 else discretize_dt
-
-  # Serialize full standata fields needed for subsample JSON construction
-  Y_full <- as.numeric(sdata$Y)
-  X_full <- sdata$X
-
-  csv_paths <- JuliaCall::julia_call(
-    "r_pdmp_brms_subsampled",
-    normalizePath(stan_file, mustWork = TRUE),
-    normalizePath(data_full_file, mustWork = TRUE),
-    normalizePath(data_prior_file, mustWork = TRUE),
-    normalizePath(data_sub_file, mustWork = TRUE),
-    Y_full, X_full, means_X,
-    as.integer(N), subsample_size,
-    flow, algorithm,
-    jl_flow_mean, jl_flow_cov,
-    csv_file,
-    c0 = c0,
-    grid_n = as.integer(grid_n),
-    grid_t_max = grid_t_max,
-    t0 = t0, T = T, t_warmup = t_warmup,
-    n_anchor_updates = n_anchor_updates,
+  brm_pdmp(
+    formula = formula, data = data, family = family,
+    prior = prior,
+    flow = flow, algorithm = algorithm,
     adaptive_scheme = adaptive_scheme,
-    discretize_dt = jl_discretize_dt,
+    T = T, t0 = t0, t_warmup = t_warmup,
+    flow_mean = flow_mean, flow_cov = flow_cov, c0 = c0,
+    grid_n = grid_n, grid_t_max = grid_t_max,
     show_progress = show_progress,
-    n_chains = as.integer(n_chains),
-    threaded = threaded,
-    compute_lp = compute_lp
+    discretize_dt = discretize_dt,
+    n_chains = n_chains, threaded = threaded,
+    compute_lp = compute_lp,
+    subsample_size = subsample_size,
+    n_anchor_updates = n_anchor_updates,
+    stanvars = stanvars, sample_prior = sample_prior,
+    save_model = save_model,
+    ...
   )
-
-  stanfit <- rstan::read_stan_csv(csv_paths)
-  empty_fit$fit <- stanfit
-  empty_fit <- brms::rename_pars(empty_fit)
-  empty_fit
 }

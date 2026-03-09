@@ -556,7 +556,7 @@ function r_pdmp_brms_subsampled(
         data_sub_file::String,
         Y_full::AbstractVector,
         X_full::AbstractMatrix,
-        means_X::AbstractVector,
+        means_X::Union{AbstractVector, Real},
         N::Integer,
         subsample_size::Integer,
         flow_type::String,
@@ -582,7 +582,7 @@ function r_pdmp_brms_subsampled(
 
     Y_vec = Vector{Float64}(Y_full)
     X_mat = Matrix{Float64}(X_full)
-    mx = Vector{Float64}(means_X)
+    mx = means_X isa Real ? [Float64(means_X)] : Vector{Float64}(means_X)
     N_int = Int(N)
     m = Int(subsample_size)
     K = size(X_mat, 2)

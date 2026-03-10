@@ -68,7 +68,7 @@ make_prior_standata <- function(sdata, means_X) {
 #'
 #' @inheritParams brm_pdmp
 #' @param subsample_size Integer, number of observations per subsample.
-#'   Default: `max(1, nrow(data) %/% 10)`.
+#'   Default: `max(1, nrow(data) \%/\% 10)`.
 #' @param n_anchor_updates Integer, number of anchor updates during warmup
 #'   (default: 10).
 #'

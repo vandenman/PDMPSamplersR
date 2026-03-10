@@ -26,6 +26,10 @@ brm_pdmp(
   n_chains = 1L,
   threaded = FALSE,
   compute_lp = FALSE,
+  subsample_size = NULL,
+  n_anchor_updates = 10L,
+  resample_dt = NULL,
+  async_prebuild = FALSE,
   stanvars = NULL,
   sample_prior = "no",
   save_model = NULL,
@@ -51,7 +55,9 @@ brm_pdmp(
 
 \item{t0}{Numeric start time.}
 
-\item{t_warmup}{Numeric warmup duration. Auto-set for adaptive flows.}
+\item{t_warmup}{Numeric warmup duration. Auto-set for adaptive flows.
+ When subsampling is active and `t_warmup` is 0, it is automatically
+set to 20\% of the sampling time.}
 
 \item{flow_mean}{Numeric vector for the flow reference mean, or NULL.}
 
@@ -76,6 +82,15 @@ chains, `Rhat` and multi-chain diagnostics become available.}
 \item{compute_lp}{Logical; compute `lp__` via `BridgeStan::log_density()`
 for each sample (default: FALSE). Adds overhead but enables
 `bridge_sampler()` and populates the `lp__` diagnostic column.}
+
+\item{subsample_size}{Integer number of observations per subsample,
+or NULL (default) for full-data gradients. When non-NULL, a
+BridgeStan control-variate subsampled gradient is used. Must be
+less than `nrow(data)`. Currently only fixed-effects models are
+supported for subsampling.}
+
+\item{n_anchor_updates}{Integer number of anchor updates during warmup
+(default: 10). Only used when `subsample_size` is non-NULL.}
 
 \item{stanvars}{Optional `stanvar` object for custom Stan code.}
 
@@ -104,4 +119,9 @@ parameters, not from `lp__`.
 
 With a single chain, `Rhat` will report `NA`. Use `n_chains >= 2`
 for convergence diagnostics.
+
+When `subsample_size` is specified, the function uses BridgeStan
+data-swapping to compute control-variate subsampled gradients. A
+centering fix is applied to the brms-generated Stan code so that
+predictor centering remains consistent across subsamples.
 }

@@ -287,27 +287,3 @@ test_that("brm_pdmp with subsample_size: multi-chain Rhat", {
     expect_true(is.finite(rh))
   }
 })
-
-test_that("brm_pdmp_subsampled wrapper works with deprecation warning", {
-  skip_if_no_brms_setup()
-
-  set.seed(123)
-  n <- 200
-  x <- rnorm(n)
-  prob <- plogis(0.5 + 1.0 * x)
-  y <- rbinom(n, 1, prob)
-  df <- data.frame(y = y, x = x)
-
-  expect_warning(
-    fit <- brm_pdmp_subsampled(
-      y ~ x, data = df, family = brms::bernoulli(),
-      flow = "ZigZag", algorithm = "GridThinningStrategy",
-      T = 50000, t_warmup = 5000,
-      subsample_size = 30L,
-      show_progress = FALSE
-    ),
-    "deprecated"
-  )
-
-  expect_s3_class(fit, "brmsfit")
-})

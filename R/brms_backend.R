@@ -14,8 +14,8 @@
 #' @param T Numeric total simulation time.
 #' @param t0 Numeric start time.
 #' @param t_warmup Numeric warmup duration. Auto-set for adaptive flows.
-#'   When subsampling is active and `t_warmup` is 0, it is automatically
-#'   set to 20% of the sampling time.
+#'    When subsampling is active and `t_warmup` is 0, it is automatically
+#'   set to 20\% of the sampling time.
 #' @param flow_mean Numeric vector for the flow reference mean, or NULL.
 #' @param flow_cov Numeric matrix for the flow covariance, or NULL.
 #' @param c0 Numeric thinning bound constant.
@@ -79,6 +79,8 @@ brm_pdmp <- function(
     compute_lp = FALSE,
     subsample_size = NULL,
     n_anchor_updates = 10L,
+    resample_dt = NULL,
+    async_prebuild = FALSE,
     stanvars = NULL, sample_prior = "no",
     save_model = NULL,
     ...
@@ -156,8 +158,7 @@ brm_pdmp <- function(
                          sample_prior = sample_prior,
                          empty = TRUE, ...)
 
-  stan_file <- tempfile(fileext = ".stan")
-  cat(scode, file = stan_file)
+  stan_file <- cached_stan_model(scode)
 
   if (subsampled) {
     data_full_file <- tempfile(fileext = ".json")
@@ -178,6 +179,7 @@ brm_pdmp <- function(
   jl_flow_mean <- if (is.null(flow_mean)) numeric(0) else flow_mean
   jl_flow_cov  <- if (is.null(flow_cov)) matrix(numeric(0), nrow = 0, ncol = 0) else flow_cov
   jl_discretize_dt <- if (is.null(discretize_dt)) 0.0 else discretize_dt
+  jl_resample_dt <- if (is.null(resample_dt)) 0.0 else resample_dt
 
   if (subsampled) {
     csv_paths <- JuliaCall::julia_call(
@@ -201,7 +203,9 @@ brm_pdmp <- function(
       show_progress = show_progress,
       n_chains = as.integer(n_chains),
       threaded = threaded,
-      compute_lp = compute_lp
+      compute_lp = compute_lp,
+      resample_dt = jl_resample_dt,
+      async_prebuild = async_prebuild
     )
   } else {
     csv_paths <- JuliaCall::julia_call(
@@ -228,4 +232,15 @@ brm_pdmp <- function(
   empty_fit$fit <- stanfit
   empty_fit <- brms::rename_pars(empty_fit)
   empty_fit
+}
+
+cached_stan_model <- function(scode) {
+  cache_dir <- file.path(rappdirs::user_cache_dir("PDMPSamplersR"), "stan_cache")
+  dir.create(cache_dir, showWarnings = FALSE, recursive = TRUE)
+  hash <- rlang::hash(scode)
+  so_path <- file.path(cache_dir, paste0(hash, "_model.so"))
+  if (file.exists(so_path)) return(so_path)
+  stan_path <- file.path(cache_dir, paste0(hash, ".stan"))
+  writeLines(scode, stan_path)
+  stan_path
 }

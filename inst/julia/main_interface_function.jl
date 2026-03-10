@@ -328,7 +328,7 @@ function r_pdmp_custom_subsampled(
     grad = SubsampledGradient(
         subsampled_grad!, resample!, (trace) -> nothing,
         FullGradient(full_grad!),
-        subsample_size, 0, use_full_gradient_for_reflections
+        subsample_size, 0, use_full_gradient_for_reflections, 0.0
     )
 
     hvp = if isnothing(hvp_sub_r)
@@ -433,6 +433,19 @@ mutable struct BridgeStanSubsamplingContext
     perm::Vector{Int}
     grad_buf1::Vector{Float64}
     grad_buf2::Vector{Float64}
+    io_buf::IOBuffer
+    g_full_buf::Vector{Float64}
+    next_sm_task::Union{Nothing, Task}
+    fetch_time_ns::Int64
+    n_resamples::Int
+end
+
+function _partial_shuffle!(perm::Vector{Int}, m::Int)
+    n = length(perm)
+    @inbounds for i in 1:m
+        j = rand(i:n)
+        perm[i], perm[j] = perm[j], perm[i]
+    end
 end
 
 function _bss_json_array(io::IO, v::AbstractVector{<:Real}, as_int::Bool)
@@ -471,10 +484,10 @@ function _bss_json_matrix(io::IO, M::AbstractMatrix{<:Real})
     print(io, ']')
 end
 
-function _bss_subsample_json(Y_full::AbstractVector{Float64}, X_full::AbstractMatrix{Float64},
+function _bss_subsample_json(io::IOBuffer, Y_full::AbstractVector{Float64}, X_full::AbstractMatrix{Float64},
                              means_X::AbstractVector{Float64}, K::Int, Kc::Int,
                              Y_is_int::Bool, idxs::AbstractVector{Int})
-    io = IOBuffer()
+    truncate(io, 0)
     print(io, "{\"N\":", length(idxs), ",\"Y\":")
     _bss_json_array(io, view(Y_full, idxs), Y_is_int)
     print(io, ",\"K\":", K, ",\"Kc\":", Kc, ",\"X\":")
@@ -485,7 +498,25 @@ function _bss_subsample_json(Y_full::AbstractVector{Float64}, X_full::AbstractMa
     String(take!(io))
 end
 
-function _build_bss_model(ctx::BridgeStanSubsamplingContext, n_anchor_updates::Int)
+function _spawn_next_sm(ctx::BridgeStanSubsamplingContext)
+    _partial_shuffle!(ctx.perm, ctx.m)
+    idxs = ctx.perm[1:ctx.m]
+    lib = ctx.lib_path
+    Y = ctx.Y_full
+    X = ctx.X_full
+    mx = ctx.means_X
+    K = ctx.K
+    Kc = ctx.Kc
+    Y_is_int = ctx.Y_is_int
+    ctx.next_sm_task = Threads.@spawn begin
+        io = IOBuffer()
+        json = _bss_subsample_json(io, Y, X, mx, K, Kc, Y_is_int, idxs)
+        BridgeStan.StanModel(lib, json; warn=false)
+    end
+end
+
+function _build_bss_model(ctx::BridgeStanSubsamplingContext, n_anchor_updates::Int;
+                          resample_dt::Float64=0.0, async_prebuild::Bool=false)
     s = ctx.N / ctx.m
     d = Int(BridgeStan.param_unc_num(ctx.sm_full))
 
@@ -496,21 +527,41 @@ function _build_bss_model(ctx::BridgeStanSubsamplingContext, n_anchor_updates::I
         return out
     end
 
-    function resample!(nsub)
-        Random.randperm!(ctx.perm)
-        json = _bss_subsample_json(ctx.Y_full, ctx.X_full, ctx.means_X, ctx.K, ctx.Kc,
-                                   ctx.Y_is_int, view(ctx.perm, 1:ctx.m))
-        finalize(ctx.sm_sub)
-        ctx.sm_sub = BridgeStan.StanModel(ctx.lib_path, json; warn=false)
+    resample! = if async_prebuild
+        function (nsub)
+            ctx.n_resamples += 1
+            if ctx.next_sm_task !== nothing
+                t0 = time_ns()
+                next_sm = fetch(ctx.next_sm_task)
+                ctx.fetch_time_ns += time_ns() - t0
+                finalize(ctx.sm_sub)
+                ctx.sm_sub = next_sm
+            else
+                _partial_shuffle!(ctx.perm, ctx.m)
+                json = _bss_subsample_json(ctx.io_buf, ctx.Y_full, ctx.X_full, ctx.means_X, ctx.K, ctx.Kc,
+                                           ctx.Y_is_int, view(ctx.perm, 1:ctx.m))
+                finalize(ctx.sm_sub)
+                ctx.sm_sub = BridgeStan.StanModel(ctx.lib_path, json; warn=false)
+            end
+            _spawn_next_sm(ctx)
+        end
+    else
+        function (nsub)
+            ctx.n_resamples += 1
+            _partial_shuffle!(ctx.perm, ctx.m)
+            json = _bss_subsample_json(ctx.io_buf, ctx.Y_full, ctx.X_full, ctx.means_X, ctx.K, ctx.Kc,
+                                       ctx.Y_is_int, view(ctx.perm, 1:ctx.m))
+            finalize(ctx.sm_sub)
+            ctx.sm_sub = BridgeStan.StanModel(ctx.lib_path, json; warn=false)
+        end
     end
 
     function update_anchor!(trace)
         θ_a = Vector{Float64}(vec(Statistics.mean(trace)))
-        BridgeStan.log_density_gradient!(ctx.sm_full, θ_a, ctx.grad_buf1)
-        g_full = copy(ctx.grad_buf1)
+        BridgeStan.log_density_gradient!(ctx.sm_full, θ_a, ctx.g_full_buf)
         BridgeStan.log_density_gradient!(ctx.sm_sub, θ_a, ctx.grad_buf1)
         BridgeStan.log_density_gradient!(ctx.sm_prior, θ_a, ctx.grad_buf2)
-        @. ctx.correction = (s - 1) * ctx.grad_buf2 - s * ctx.grad_buf1 + g_full
+        @. ctx.correction = (s - 1) * ctx.grad_buf2 - s * ctx.grad_buf1 + ctx.g_full_buf
     end
 
     function neg_grad_full!(out::Vector{Float64}, θ::Vector{Float64})
@@ -528,7 +579,8 @@ function _build_bss_model(ctx::BridgeStanSubsamplingContext, n_anchor_updates::I
     grad = SubsampledGradient(
         neg_grad_cv!, resample!, update_anchor!,
         neg_grad_full!,
-        ctx.m, n_anchor_updates, true
+        ctx.m, n_anchor_updates, true;
+        resample_dt
     )
     return PDMPModel(d, grad, neg_hvp_sub!), d
 end
@@ -538,14 +590,17 @@ function _new_bss_context(lib_path::String, data_full_file::String, data_prior_f
                           K::Int, Kc::Int, Y_is_int::Bool, N::Int, m::Int, d::Int)
     sm_full = BridgeStan.StanModel(lib_path, data_full_file; warn=false)
     sm_prior = BridgeStan.StanModel(lib_path, data_prior_file; warn=false)
-    perm = Vector{Int}(undef, N)
-    Random.randperm!(perm)
-    json = _bss_subsample_json(Y_full, X_full, means_X, K, Kc, Y_is_int, view(perm, 1:m))
+    perm = collect(1:N)
+    _partial_shuffle!(perm, m)
+    io_buf = IOBuffer()
+    json = _bss_subsample_json(io_buf, Y_full, X_full, means_X, K, Kc, Y_is_int, view(perm, 1:m))
     sm_sub = BridgeStan.StanModel(lib_path, json; warn=false)
     BridgeStanSubsamplingContext(
         sm_full, sm_sub, sm_prior, lib_path,
         Y_full, X_full, means_X, K, Kc, Y_is_int,
-        zeros(d), N, m, perm, zeros(d), zeros(d)
+        zeros(d), N, m, perm, zeros(d), zeros(d),
+        io_buf, zeros(d),
+        nothing, 0, 0
     )
 end
 
@@ -556,7 +611,7 @@ function r_pdmp_brms_subsampled(
         data_sub_file::String,
         Y_full::AbstractVector,
         X_full::AbstractMatrix,
-        means_X::Union{AbstractVector, Real},
+        means_X,
         N::Integer,
         subsample_size::Integer,
         flow_type::String,
@@ -576,13 +631,19 @@ function r_pdmp_brms_subsampled(
         show_progress::Bool = true,
         n_chains::Int = 1,
         threaded::Bool = false,
-        compute_lp::Bool = false
+        compute_lp::Bool = false,
+        resample_dt::Float64 = 0.0,
+        async_prebuild::Bool = false
     )
-    lib_path = BridgeStan.compile_model(stan_file)
+    lib_path = if endswith(stan_file, ".stan")
+        BridgeStan.compile_model(stan_file)
+    else
+        stan_file
+    end
 
     Y_vec = Vector{Float64}(Y_full)
     X_mat = Matrix{Float64}(X_full)
-    mx = means_X isa Real ? [Float64(means_X)] : Vector{Float64}(means_X)
+    mx = means_X isa AbstractVector ? Vector{Float64}(means_X) : [Float64(means_X)]
     N_int = Int(N)
     m = Int(subsample_size)
     K = size(X_mat, 2)
@@ -598,11 +659,13 @@ function r_pdmp_brms_subsampled(
         sm_full, sm_sub, sm_prior, lib_path,
         Y_vec, X_mat, mx, K, Kc, Y_is_int,
         zeros(d), N_int, m,
-        Vector{Int}(undef, N_int),
-        zeros(d), zeros(d)
+        collect(1:N_int),
+        zeros(d), zeros(d),
+        IOBuffer(), zeros(d),
+        nothing, 0, 0
     )
 
-    model, _ = _build_bss_model(ctx, n_anchor_updates)
+    model, _ = _build_bss_model(ctx, n_anchor_updates; resample_dt, async_prebuild)
 
     fmean = isempty(flow_mean) ? zeros(d) : Vector{Float64}(flow_mean)
     prec = isempty(flow_cov) ? Matrix{Float64}(I, d, d) : inv(Symmetric(Matrix{Float64}(flow_cov)))
@@ -619,7 +682,7 @@ function r_pdmp_brms_subsampled(
             else
                 ctx_i = _new_bss_context(lib_path, data_full_file, data_prior_file,
                                          Y_vec, X_mat, mx, K, Kc, Y_is_int, N_int, m, d)
-                model_i, _ = _build_bss_model(ctx_i, n_anchor_updates)
+                model_i, _ = _build_bss_model(ctx_i, n_anchor_updates; resample_dt, async_prebuild)
             end
             chains_i = pdmp_sample(d, flow, model_i, alg, t0, T, t_warmup;
                                    progress=(show_progress && chain_idx == 1), n_chains=1, threaded=false)
@@ -646,12 +709,14 @@ function r_pdmp_brms_subsampled(
         push!(csv_paths, csv_path)
     end
 
+    if ctx.n_resamples > 0
+        fetch_ms = ctx.fetch_time_ns / 1e6
+        avg_fetch_ms = ctx.n_resamples > 0 ? fetch_ms / ctx.n_resamples : 0.0
+        @info "Resample stats" n_resamples=ctx.n_resamples total_fetch_ms=round(fetch_ms; digits=1) avg_fetch_ms=round(avg_fetch_ms; digits=3) async=async_prebuild
+    end
+
     return csv_paths
 end
-
-# ──────────────────────────────────────────────────────────────────────────────
-# brms backend (full-data, non-subsampled)
-# ──────────────────────────────────────────────────────────────────────────────
 
 function r_pdmp_stan_for_brms(
         path_to_stan_model::String,
@@ -674,7 +739,7 @@ function r_pdmp_stan_for_brms(
         threaded::Bool = false,
         compute_lp::Bool = false
     )
-    sm = BridgeStan.StanModel(path_to_stan_model, path_to_stan_data)
+    sm = BridgeStan.StanModel(path_to_stan_model, path_to_stan_data; warn=false)
     model = PDMPModel(sm)
     d = model.d
 

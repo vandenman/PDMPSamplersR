@@ -44,7 +44,7 @@ brm_pdmp_subsampled(
 \item{prior}{A `brmsprior` object or NULL for default priors.}
 
 \item{subsample_size}{Integer, number of observations per subsample.
-Must be less than `nrow(data)`. Default: `max(1, nrow(data) %/% 10)`.}
+Default: `max(1, nrow(data) \%/\% 10)`.}
 
 \item{flow}{Character string specifying the PDMP flow type.}
 
@@ -56,7 +56,9 @@ Must be less than `nrow(data)`. Default: `max(1, nrow(data) %/% 10)`.}
 
 \item{t0}{Numeric start time.}
 
-\item{t_warmup}{Numeric warmup duration. Auto-set for adaptive flows.}
+\item{t_warmup}{Numeric warmup duration. Auto-set for adaptive flows.
+ When subsampling is active and `t_warmup` is 0, it is automatically
+set to 20\% of the sampling time.}
 
 \item{n_anchor_updates}{Integer, number of anchor updates during warmup
 (default: 10).}
@@ -97,19 +99,5 @@ for each sample (default: FALSE). Adds overhead but enables
 A `brmsfit` object.
 }
 \description{
-Uses BridgeStan data-swapping to compute control-variate subsampled
-gradients. The same compiled Stan model is shared across the full dataset,
-subsample, and prior-only evaluations.
-}
-\details{
-The subsampled gradient uses a control-variate estimator that combines
-a subsample gradient, a prior-only gradient, and a cached full-data
-correction term (updated at anchor points during warmup).
-
-A centering fix is applied to the brms-generated Stan code to ensure
-consistent predictor centering across subsamples. This moves `means_X`
-from `transformed data` to `data`, always using the full-data column
-means.
-
-Currently supports fixed-effects models only (no random effects).
+Deprecated: use [brm_pdmp()] with the `subsample_size` argument instead.
 }

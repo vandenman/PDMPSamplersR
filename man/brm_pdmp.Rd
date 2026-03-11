@@ -29,7 +29,7 @@ brm_pdmp(
   subsample_size = NULL,
   n_anchor_updates = 10L,
   resample_dt = NULL,
-  async_prebuild = FALSE,
+  hvp_mode = c("scaled", "none"),
   stanvars = NULL,
   sample_prior = "no",
   save_model = NULL,

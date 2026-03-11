@@ -80,7 +80,7 @@ brm_pdmp <- function(
     subsample_size = NULL,
     n_anchor_updates = 10L,
     resample_dt = NULL,
-    async_prebuild = FALSE,
+    hvp_mode = c("scaled", "none"),
     stanvars = NULL, sample_prior = "no",
     save_model = NULL,
     ...
@@ -96,6 +96,7 @@ brm_pdmp <- function(
   flow <- match.arg(flow)
   algorithm <- match.arg(algorithm)
   adaptive_scheme <- match.arg(adaptive_scheme)
+  hvp_mode <- match.arg(hvp_mode)
   subsampled <- !is.null(subsample_size)
   N <- nrow(data)
 
@@ -143,14 +144,13 @@ brm_pdmp <- function(
         "i" = "Remove random effects from the formula, or omit {.arg subsample_size} to use full-data gradients."
       ))
     scode <- fix_brms_stancode(scode)
+    scode_ext <- inject_ext_cpp_stancode(scode)
     means_X <- array(colMeans(sdata$X[, -1, drop = FALSE]))
     Y_full <- as.numeric(sdata$Y)
     X_full <- sdata$X
     sdata_full <- sdata
     sdata_full$means_X <- means_X
     sdata_prior <- make_prior_standata(sdata, means_X)
-    init_indices <- sample.int(N, subsample_size)
-    sdata_sub <- subset_standata(sdata, init_indices, means_X)
   }
 
   empty_fit <- brms::brm(formula, data = data, family = family,
@@ -161,12 +161,11 @@ brm_pdmp <- function(
   stan_file <- cached_stan_model(scode)
 
   if (subsampled) {
+    stan_file_ext <- cached_stan_model(scode_ext)
     data_full_file <- tempfile(fileext = ".json")
     write_stan_json(sdata_full, data_full_file)
     data_prior_file <- tempfile(fileext = ".json")
     write_stan_json(sdata_prior, data_prior_file)
-    data_sub_file <- tempfile(fileext = ".json")
-    write_stan_json(sdata_sub, data_sub_file)
   } else {
     data_file <- tempfile(fileext = ".json")
     write_stan_json(sdata, data_file)
@@ -185,10 +184,10 @@ brm_pdmp <- function(
     csv_paths <- JuliaCall::julia_call(
       "r_pdmp_brms_subsampled",
       normalizePath(stan_file, mustWork = TRUE),
+      normalizePath(stan_file_ext, mustWork = TRUE),
+      normalizePath(hpp_path(), mustWork = TRUE),
       normalizePath(data_full_file, mustWork = TRUE),
       normalizePath(data_prior_file, mustWork = TRUE),
-      normalizePath(data_sub_file, mustWork = TRUE),
-      Y_full, X_full, array(means_X),
       as.integer(N), subsample_size,
       flow, algorithm,
       jl_flow_mean, jl_flow_cov,
@@ -205,7 +204,7 @@ brm_pdmp <- function(
       threaded = threaded,
       compute_lp = compute_lp,
       resample_dt = jl_resample_dt,
-      async_prebuild = async_prebuild
+      hvp_mode = hvp_mode
     )
   } else {
     csv_paths <- JuliaCall::julia_call(

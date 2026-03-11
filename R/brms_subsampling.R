@@ -61,64 +61,142 @@ make_prior_standata <- function(sdata, means_X) {
   prior
 }
 
-#' Fit a brms model using PDMP samplers with subsampled gradients
+inject_ext_cpp_stancode <- function(stancode) {
+  y_is_int <- grepl("array\\[N\\] int Y;", stancode)
+
+  if (y_is_int) {
+    func_decls <- paste(
+      "  array[] int get_subsampled_Y_int(array[] int Y_full);",
+      "  matrix get_subsampled_Xc(matrix Xc_full);",
+      sep = "\n"
+    )
+    y_getter <- "get_subsampled_Y_int"
+  } else {
+    func_decls <- paste(
+      "  vector get_subsampled_Y_real(vector Y_full);",
+      "  matrix get_subsampled_Xc(matrix Xc_full);",
+      sep = "\n"
+    )
+    y_getter <- "get_subsampled_Y_real"
+  }
+
+  stancode <- sub(
+    "(functions\\s*\\{)\n",
+    paste0("\\1\n", func_decls, "\n"),
+    stancode
+  )
+
+  stancode <- gsub(
+    "(_glm_lp[dm]f\\()([^|]+)(\\|\\s*)Xc,",
+    paste0("\\1", y_getter, "(\\2) \\3get_subsampled_Xc(Xc),"),
+    stancode
+  )
+  stancode
+}
+
+hpp_path <- function() {
+  system.file("stan", "pdmp_subsample.hpp", package = "PDMPSamplersR")
+}
+
+#' Show the Stan code used by brm_pdmp
 #'
-#' @description
-#' Deprecated: use [brm_pdmp()] with the `subsample_size` argument instead.
+#' Returns the Stan code that [brm_pdmp()] would compile, after any
+#' subsampling modifications. Without `subsample_size`, this is
+#' identical to `brms::stancode()`. With `subsample_size`, two
+#' variants are returned:
+#' \describe{
+#'   \item{standard}{The standard model with `means_X` moved to data
+#'     (used for the full-data and prior-only models).}
+#'   \item{ext_cpp}{The model with external C++ subsetting functions
+#'     injected (used for the subsampled-gradient model).}
+#' }
 #'
 #' @inheritParams brm_pdmp
-#' @param subsample_size Integer, number of observations per subsample.
-#'   Default: `max(1, nrow(data) \%/\% 10)`.
-#' @param n_anchor_updates Integer, number of anchor updates during warmup
-#'   (default: 10).
 #'
-#' @return A `brmsfit` object.
+#' @return A character string when `subsample_size` is NULL, or a
+#'   named list with elements `standard` and `ext_cpp`.
 #' @export
-brm_pdmp_subsampled <- function(
+pdmp_stancode <- function(
     formula, data, family = gaussian(),
     prior = NULL,
     subsample_size = NULL,
-    flow = c("ZigZag", "BouncyParticle", "Boomerang",
-             "AdaptiveBoomerang", "PreconditionedZigZag", "PreconditionedBPS"),
-    algorithm = c("GridThinningStrategy", "ThinningStrategy",
-                  "RootsPoissonStrategy"),
-    adaptive_scheme = c("diagonal", "fullrank"),
-    T = 50000, t0 = 0.0, t_warmup = 1000.0,
-    n_anchor_updates = 10L,
-    flow_mean = NULL, flow_cov = NULL, c0 = 1e-2,
-    grid_n = 30, grid_t_max = 2.0,
-    show_progress = TRUE,
-    discretize_dt = NULL,
-    n_chains = 1L, threaded = FALSE,
-    compute_lp = FALSE,
     stanvars = NULL, sample_prior = "no",
-    save_model = NULL,
     ...
 ) {
-  cli::cli_warn(c(
-    "{.fn brm_pdmp_subsampled} is deprecated.",
-    "i" = "Use {.fn brm_pdmp} with {.arg subsample_size} instead."
-  ))
+  if (!requireNamespace("brms", quietly = TRUE))
+    cli::cli_abort("Package {.pkg brms} is required for {.fn pdmp_stancode}.")
 
-  if (is.null(subsample_size))
-    subsample_size <- max(1L, nrow(data) %/% 10L)
+  scode <- brms::stancode(formula, data = data, family = family,
+                          prior = prior, stanvars = stanvars,
+                          sample_prior = sample_prior, ...)
+  if (is.null(subsample_size)) return(scode)
 
-  brm_pdmp(
-    formula = formula, data = data, family = family,
-    prior = prior,
-    flow = flow, algorithm = algorithm,
-    adaptive_scheme = adaptive_scheme,
-    T = T, t0 = t0, t_warmup = t_warmup,
-    flow_mean = flow_mean, flow_cov = flow_cov, c0 = c0,
-    grid_n = grid_n, grid_t_max = grid_t_max,
-    show_progress = show_progress,
-    discretize_dt = discretize_dt,
-    n_chains = n_chains, threaded = threaded,
-    compute_lp = compute_lp,
-    subsample_size = subsample_size,
-    n_anchor_updates = n_anchor_updates,
-    stanvars = stanvars, sample_prior = sample_prior,
-    save_model = save_model,
-    ...
+  list(
+    standard = fix_brms_stancode(scode),
+    ext_cpp  = inject_ext_cpp_stancode(fix_brms_stancode(scode))
   )
+}
+
+#' Show the Stan data used by brm_pdmp
+#'
+#' Returns the Stan data that [brm_pdmp()] would pass to BridgeStan,
+#' after any subsampling modifications. Without `subsample_size`, this
+#' is identical to `brms::standata()`. With `subsample_size`, returns
+#' a named list with three elements:
+#' \describe{
+#'   \item{full}{Full dataset with `means_X` added.}
+#'   \item{prior}{Prior-only dummy data (`N=1`, `prior_only=1`).}
+#'   \item{subsample}{An initial subsample of `subsample_size` rows.}
+#' }
+#'
+#' @inheritParams brm_pdmp
+#' @param indices Optional integer vector of observation indices for
+#'   the initial subsample. If NULL (default), a random sample of
+#'   size `subsample_size` is drawn.
+#'
+#' @return A list (Stan data) when `subsample_size` is NULL, or a
+#'   named list with elements `full`, `prior`, and `subsample`.
+#' @export
+pdmp_standata <- function(
+    formula, data, family = gaussian(),
+    prior = NULL,
+    subsample_size = NULL,
+    indices = NULL,
+    stanvars = NULL, sample_prior = "no",
+    ...
+) {
+  if (!requireNamespace("brms", quietly = TRUE))
+    cli::cli_abort("Package {.pkg brms} is required for {.fn pdmp_standata}.")
+
+  sdata <- brms::standata(formula, data = data, family = family,
+                          prior = prior, stanvars = stanvars,
+                          sample_prior = sample_prior, ...)
+
+  if (is.null(subsample_size)) return(sdata)
+
+  N <- nrow(data)
+  subsample_size <- as.integer(subsample_size)
+  if (subsample_size >= N)
+    cli::cli_abort("{.arg subsample_size} ({subsample_size}) must be less than {.code nrow(data)} ({N}).")
+
+  if (any(grepl("^(J|Z)_", names(sdata))))
+    cli::cli_abort(c(
+      "Subsampled gradients currently support fixed-effects models only.",
+      "i" = "Remove random effects from the formula, or omit {.arg subsample_size} to use full-data gradients."
+    ))
+
+  means_X <- array(colMeans(sdata$X[, -1, drop = FALSE]))
+  sdata_full <- sdata
+  sdata_full$means_X <- means_X
+  sdata_prior <- make_prior_standata(sdata, means_X)
+
+  if (is.null(indices)) {
+    indices <- sample.int(N, subsample_size)
+  } else {
+    if (length(indices) != subsample_size)
+      cli::cli_abort("{.arg indices} length ({length(indices)}) must equal {.arg subsample_size} ({subsample_size}).")
+  }
+  sdata_sub <- subset_standata(sdata, indices, means_X)
+
+  list(full = sdata_full, prior = sdata_prior, subsample = sdata_sub)
 }

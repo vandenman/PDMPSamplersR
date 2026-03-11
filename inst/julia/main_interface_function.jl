@@ -629,16 +629,17 @@ function r_pdmp_brms_subsampled(
     sm_constrain = sm_full
     n_ch = length(chains.traces)
     csv_paths = String[]
+    dt = if discretize_dt > 0
+        discretize_dt
+    else
+        t_start = minimum(first_event_time(tr) for tr in chains.traces)
+        t_end = maximum(last_event_time(tr) for tr in chains.traces)
+        (t_end - t_start) / 1000
+    end
+    all_draws = [Matrix(PDMPDiscretize(chains.traces[i], dt)) for i in 1:n_ch]
+    min_rows = minimum(size(m, 1) for m in all_draws)
     for chain_idx in 1:n_ch
-        trace = chains.traces[chain_idx]
-        dt = if discretize_dt > 0
-            discretize_dt
-        else
-            t_start = first_event_time(trace)
-            t_end = last_event_time(trace)
-            (t_end - t_start) / 1000
-        end
-        draws_unc = Matrix(PDMPDiscretize(trace, dt))
+        draws_unc = all_draws[chain_idx][1:min_rows, :]
         csv_path = n_ch == 1 ? output_csv : replace(output_csv, r"\.csv$" => "_chain$(chain_idx).csv")
         r_constrain_and_write_csv(sm_constrain, draws_unc, csv_path; chain_id=chain_idx, compute_lp)
         push!(csv_paths, csv_path)
@@ -683,16 +684,17 @@ function r_pdmp_stan_for_brms(
 
     n_ch = length(chains.traces)
     csv_paths = String[]
+    dt = if discretize_dt > 0
+        discretize_dt
+    else
+        t_start = minimum(first_event_time(tr) for tr in chains.traces)
+        t_end = maximum(last_event_time(tr) for tr in chains.traces)
+        (t_end - t_start) / 1000
+    end
+    all_draws = [Matrix(PDMPDiscretize(chains.traces[i], dt)) for i in 1:n_ch]
+    min_rows = minimum(size(m, 1) for m in all_draws)
     for chain_idx in 1:n_ch
-        trace = chains.traces[chain_idx]
-        dt = if discretize_dt > 0
-            discretize_dt
-        else
-            t_start = first_event_time(trace)
-            t_end = last_event_time(trace)
-            (t_end - t_start) / 1000
-        end
-        draws_unc = Matrix(PDMPDiscretize(trace, dt))
+        draws_unc = all_draws[chain_idx][1:min_rows, :]
         csv_path = n_ch == 1 ? output_csv : replace(output_csv, r"\.csv$" => "_chain$(chain_idx).csv")
         r_constrain_and_write_csv(sm, draws_unc, csv_path; chain_id = chain_idx, compute_lp)
         push!(csv_paths, csv_path)

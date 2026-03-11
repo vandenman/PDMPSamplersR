@@ -413,31 +413,25 @@ function r_constrain_and_write_csv(sm::BridgeStan.StanModel, draws_unc::Matrix{F
 end
 
 # ──────────────────────────────────────────────────────────────────────────────
-# BridgeStan subsampling for brms models
+# BridgeStan subsampling for brms models (external C++ index swapping)
 # ──────────────────────────────────────────────────────────────────────────────
 
 mutable struct BridgeStanSubsamplingContext
     sm_full::BridgeStan.StanModel
     sm_sub::BridgeStan.StanModel
     sm_prior::BridgeStan.StanModel
-    lib_path::String
-    Y_full::Vector{Float64}
-    X_full::Matrix{Float64}
-    means_X::Vector{Float64}
-    K::Int
-    Kc::Int
-    Y_is_int::Bool
+    set_fn::Ptr{Nothing}
+    idx_buf::Vector{Int32}
     correction::Vector{Float64}
     N::Int
     m::Int
     perm::Vector{Int}
     grad_buf1::Vector{Float64}
     grad_buf2::Vector{Float64}
-    io_buf::IOBuffer
     g_full_buf::Vector{Float64}
-    next_sm_task::Union{Nothing, Task}
-    fetch_time_ns::Int64
-    n_resamples::Int
+    hvp_buf::Vector{Float64}
+    anchor::Vector{Float64}
+    H_full_anchor::Matrix{Float64}
 end
 
 function _partial_shuffle!(perm::Vector{Int}, m::Int)
@@ -448,77 +442,18 @@ function _partial_shuffle!(perm::Vector{Int}, m::Int)
     end
 end
 
-function _bss_json_array(io::IO, v::AbstractVector{<:Real}, as_int::Bool)
-    print(io, '[')
-    for i in eachindex(v)
-        i > firstindex(v) && print(io, ',')
-        xi = v[i]
-        if as_int
-            print(io, round(Int, xi))
-        elseif isinteger(xi) && isfinite(xi)
-            print(io, round(Int, xi))
-        else
-            print(io, xi)
-        end
+function _ccall_set_indices!(ctx::BridgeStanSubsamplingContext)
+    @inbounds for i in 1:ctx.m
+        ctx.idx_buf[i] = Int32(ctx.perm[i] - 1)
     end
-    print(io, ']')
-end
-
-function _bss_json_matrix(io::IO, M::AbstractMatrix{<:Real})
-    nr, nc = size(M)
-    print(io, '[')
-    for i in 1:nr
-        i > 1 && print(io, ',')
-        print(io, '[')
-        for j in 1:nc
-            j > 1 && print(io, ',')
-            v = M[i, j]
-            if isinteger(v) && isfinite(v)
-                print(io, round(Int, v))
-            else
-                print(io, v)
-            end
-        end
-        print(io, ']')
-    end
-    print(io, ']')
-end
-
-function _bss_subsample_json(io::IOBuffer, Y_full::AbstractVector{Float64}, X_full::AbstractMatrix{Float64},
-                             means_X::AbstractVector{Float64}, K::Int, Kc::Int,
-                             Y_is_int::Bool, idxs::AbstractVector{Int})
-    truncate(io, 0)
-    print(io, "{\"N\":", length(idxs), ",\"Y\":")
-    _bss_json_array(io, view(Y_full, idxs), Y_is_int)
-    print(io, ",\"K\":", K, ",\"Kc\":", Kc, ",\"X\":")
-    _bss_json_matrix(io, view(X_full, idxs, :))
-    print(io, ",\"means_X\":")
-    _bss_json_array(io, means_X, false)
-    print(io, ",\"prior_only\":0}")
-    String(take!(io))
-end
-
-function _spawn_next_sm(ctx::BridgeStanSubsamplingContext)
-    _partial_shuffle!(ctx.perm, ctx.m)
-    idxs = ctx.perm[1:ctx.m]
-    lib = ctx.lib_path
-    Y = ctx.Y_full
-    X = ctx.X_full
-    mx = ctx.means_X
-    K = ctx.K
-    Kc = ctx.Kc
-    Y_is_int = ctx.Y_is_int
-    ctx.next_sm_task = Threads.@spawn begin
-        io = IOBuffer()
-        json = _bss_subsample_json(io, Y, X, mx, K, Kc, Y_is_int, idxs)
-        BridgeStan.StanModel(lib, json; warn=false)
-    end
+    ccall(ctx.set_fn, Cvoid, (Ptr{Int32}, Int32), ctx.idx_buf, Int32(ctx.m))
 end
 
 function _build_bss_model(ctx::BridgeStanSubsamplingContext, n_anchor_updates::Int;
-                          resample_dt::Float64=0.0, async_prebuild::Bool=false)
+                          resample_dt::Float64=0.0, hvp_mode::String="scaled")
     s = ctx.N / ctx.m
     d = Int(BridgeStan.param_unc_num(ctx.sm_full))
+    anchor_set = Ref(false)
 
     function neg_grad_cv!(out::Vector{Float64}, θ::Vector{Float64})
         BridgeStan.log_density_gradient!(ctx.sm_sub, θ, ctx.grad_buf1)
@@ -527,41 +462,25 @@ function _build_bss_model(ctx::BridgeStanSubsamplingContext, n_anchor_updates::I
         return out
     end
 
-    resample! = if async_prebuild
-        function (nsub)
-            ctx.n_resamples += 1
-            if ctx.next_sm_task !== nothing
-                t0 = time_ns()
-                next_sm = fetch(ctx.next_sm_task)
-                ctx.fetch_time_ns += time_ns() - t0
-                finalize(ctx.sm_sub)
-                ctx.sm_sub = next_sm
-            else
-                _partial_shuffle!(ctx.perm, ctx.m)
-                json = _bss_subsample_json(ctx.io_buf, ctx.Y_full, ctx.X_full, ctx.means_X, ctx.K, ctx.Kc,
-                                           ctx.Y_is_int, view(ctx.perm, 1:ctx.m))
-                finalize(ctx.sm_sub)
-                ctx.sm_sub = BridgeStan.StanModel(ctx.lib_path, json; warn=false)
-            end
-            _spawn_next_sm(ctx)
-        end
-    else
-        function (nsub)
-            ctx.n_resamples += 1
-            _partial_shuffle!(ctx.perm, ctx.m)
-            json = _bss_subsample_json(ctx.io_buf, ctx.Y_full, ctx.X_full, ctx.means_X, ctx.K, ctx.Kc,
-                                       ctx.Y_is_int, view(ctx.perm, 1:ctx.m))
-            finalize(ctx.sm_sub)
-            ctx.sm_sub = BridgeStan.StanModel(ctx.lib_path, json; warn=false)
+    function _recompute_correction!()
+        BridgeStan.log_density_gradient!(ctx.sm_sub, ctx.anchor, ctx.grad_buf1)
+        BridgeStan.log_density_gradient!(ctx.sm_prior, ctx.anchor, ctx.grad_buf2)
+        @. ctx.correction = (s - 1) * ctx.grad_buf2 - s * ctx.grad_buf1 + ctx.g_full_buf
+    end
+
+    function resample!(nsub)
+        _partial_shuffle!(ctx.perm, ctx.m)
+        _ccall_set_indices!(ctx)
+        if anchor_set[]
+            _recompute_correction!()
         end
     end
 
     function update_anchor!(trace)
-        θ_a = Vector{Float64}(vec(Statistics.mean(trace)))
-        BridgeStan.log_density_gradient!(ctx.sm_full, θ_a, ctx.g_full_buf)
-        BridgeStan.log_density_gradient!(ctx.sm_sub, θ_a, ctx.grad_buf1)
-        BridgeStan.log_density_gradient!(ctx.sm_prior, θ_a, ctx.grad_buf2)
-        @. ctx.correction = (s - 1) * ctx.grad_buf2 - s * ctx.grad_buf1 + ctx.g_full_buf
+        ctx.anchor .= Vector{Float64}(vec(Statistics.mean(trace)))
+        BridgeStan.log_density_gradient!(ctx.sm_full, ctx.anchor, ctx.g_full_buf)
+        _recompute_correction!()
+        anchor_set[] = true
     end
 
     function neg_grad_full!(out::Vector{Float64}, θ::Vector{Float64})
@@ -570,9 +489,10 @@ function _build_bss_model(ctx::BridgeStanSubsamplingContext, n_anchor_updates::I
         return out
     end
 
-    function neg_hvp_sub!(out::Vector{Float64}, θ::Vector{Float64}, v::Vector{Float64})
+    function neg_hvp_cv!(out::Vector{Float64}, θ::Vector{Float64}, v::Vector{Float64})
         BridgeStan.log_density_hessian_vector_product!(ctx.sm_sub, θ, v, out)
-        out .= .-out
+        BridgeStan.log_density_hessian_vector_product!(ctx.sm_prior, θ, v, ctx.hvp_buf)
+        @. out = -s * out - (1 - s) * ctx.hvp_buf
         return out
     end
 
@@ -582,36 +502,45 @@ function _build_bss_model(ctx::BridgeStanSubsamplingContext, n_anchor_updates::I
         ctx.m, n_anchor_updates, true;
         resample_dt
     )
-    return PDMPModel(d, grad, neg_hvp_sub!), d
+    hvp = if hvp_mode == "scaled"
+        neg_hvp_cv!
+    elseif hvp_mode == "none"
+        nothing
+    else
+        error("Unknown hvp_mode: $hvp_mode. Use \"scaled\" or \"none\".")
+    end
+    return PDMPModel(d, grad, hvp), d
 end
 
-function _new_bss_context(lib_path::String, data_full_file::String, data_prior_file::String,
-                          Y_full::Vector{Float64}, X_full::Matrix{Float64}, means_X::Vector{Float64},
-                          K::Int, Kc::Int, Y_is_int::Bool, N::Int, m::Int, d::Int)
-    sm_full = BridgeStan.StanModel(lib_path, data_full_file; warn=false)
-    sm_prior = BridgeStan.StanModel(lib_path, data_prior_file; warn=false)
+function _resolve_set_fn(lib_path::String)
+    lib = Libc.Libdl.dlopen(lib_path, Libc.Libdl.RTLD_NOLOAD | Libc.Libdl.RTLD_GLOBAL)
+    Libc.Libdl.dlsym(lib, :pdmp_set_subsample_indices)
+end
+
+function _new_bss_context(lib_path_std::String, lib_path_ext::String, set_fn::Ptr{Nothing},
+                          data_full_file::String, data_prior_file::String,
+                          N::Int, m::Int, d::Int)
+    sm_full = BridgeStan.StanModel(lib_path_std, data_full_file; warn=false)
+    sm_prior = BridgeStan.StanModel(lib_path_std, data_prior_file; warn=false)
+    sm_sub = BridgeStan.StanModel(lib_path_ext, data_full_file; warn=false)
     perm = collect(1:N)
     _partial_shuffle!(perm, m)
-    io_buf = IOBuffer()
-    json = _bss_subsample_json(io_buf, Y_full, X_full, means_X, K, Kc, Y_is_int, view(perm, 1:m))
-    sm_sub = BridgeStan.StanModel(lib_path, json; warn=false)
-    BridgeStanSubsamplingContext(
-        sm_full, sm_sub, sm_prior, lib_path,
-        Y_full, X_full, means_X, K, Kc, Y_is_int,
-        zeros(d), N, m, perm, zeros(d), zeros(d),
-        io_buf, zeros(d),
-        nothing, 0, 0
+    idx_buf = Vector{Int32}(undef, m)
+    ctx = BridgeStanSubsamplingContext(
+        sm_full, sm_sub, sm_prior, set_fn, idx_buf,
+        zeros(d), N, m, perm, zeros(d), zeros(d), zeros(d), zeros(d),
+        zeros(d), zeros(d, d)
     )
+    _ccall_set_indices!(ctx)
+    ctx
 end
 
 function r_pdmp_brms_subsampled(
         stan_file::String,
+        stan_file_ext::String,
+        hpp_path::String,
         data_full_file::String,
         data_prior_file::String,
-        data_sub_file::String,
-        Y_full::AbstractVector,
-        X_full::AbstractMatrix,
-        means_X,
         N::Integer,
         subsample_size::Integer,
         flow_type::String,
@@ -633,39 +562,44 @@ function r_pdmp_brms_subsampled(
         threaded::Bool = false,
         compute_lp::Bool = false,
         resample_dt::Float64 = 0.0,
-        async_prebuild::Bool = false
+        hvp_mode::String = "scaled"
     )
-    lib_path = if endswith(stan_file, ".stan")
+    lib_path_std = if endswith(stan_file, ".stan")
         BridgeStan.compile_model(stan_file)
     else
         stan_file
     end
 
-    Y_vec = Vector{Float64}(Y_full)
-    X_mat = Matrix{Float64}(X_full)
-    mx = means_X isa AbstractVector ? Vector{Float64}(means_X) : [Float64(means_X)]
+    lib_path_ext = if endswith(stan_file_ext, ".stan")
+        BridgeStan.compile_model(stan_file_ext;
+            stanc_args=["--allow-undefined"],
+            make_args=["USER_HEADER=$(hpp_path)"])
+    else
+        stan_file_ext
+    end
+
     N_int = Int(N)
     m = Int(subsample_size)
-    K = size(X_mat, 2)
-    Kc = K - 1
-    Y_is_int = all(x -> x == round(x), Y_vec)
 
-    sm_full = BridgeStan.StanModel(lib_path, data_full_file; warn=false)
-    sm_prior = BridgeStan.StanModel(lib_path, data_prior_file; warn=false)
-    sm_sub = BridgeStan.StanModel(lib_path, data_sub_file; warn=false)
+    sm_full = BridgeStan.StanModel(lib_path_std, data_full_file; warn=false)
+    sm_prior = BridgeStan.StanModel(lib_path_std, data_prior_file; warn=false)
+    sm_sub = BridgeStan.StanModel(lib_path_ext, data_full_file; warn=false)
     d = Int(BridgeStan.param_unc_num(sm_full))
 
-    ctx = BridgeStanSubsamplingContext(
-        sm_full, sm_sub, sm_prior, lib_path,
-        Y_vec, X_mat, mx, K, Kc, Y_is_int,
-        zeros(d), N_int, m,
-        collect(1:N_int),
-        zeros(d), zeros(d),
-        IOBuffer(), zeros(d),
-        nothing, 0, 0
-    )
+    set_fn = _resolve_set_fn(lib_path_ext)
 
-    model, _ = _build_bss_model(ctx, n_anchor_updates; resample_dt, async_prebuild)
+    perm = collect(1:N_int)
+    _partial_shuffle!(perm, m)
+    idx_buf = Vector{Int32}(undef, m)
+
+    ctx = BridgeStanSubsamplingContext(
+        sm_full, sm_sub, sm_prior, set_fn, idx_buf,
+        zeros(d), N_int, m, perm, zeros(d), zeros(d), zeros(d), zeros(d),
+        zeros(d), zeros(d, d)
+    )
+    _ccall_set_indices!(ctx)
+
+    model, _ = _build_bss_model(ctx, n_anchor_updates; resample_dt, hvp_mode)
 
     fmean = isempty(flow_mean) ? zeros(d) : Vector{Float64}(flow_mean)
     prec = isempty(flow_cov) ? Matrix{Float64}(I, d, d) : inv(Symmetric(Matrix{Float64}(flow_cov)))
@@ -680,9 +614,10 @@ function r_pdmp_brms_subsampled(
             if chain_idx == 1
                 model_i = model
             else
-                ctx_i = _new_bss_context(lib_path, data_full_file, data_prior_file,
-                                         Y_vec, X_mat, mx, K, Kc, Y_is_int, N_int, m, d)
-                model_i, _ = _build_bss_model(ctx_i, n_anchor_updates; resample_dt, async_prebuild)
+                ctx_i = _new_bss_context(lib_path_std, lib_path_ext, set_fn,
+                                         data_full_file, data_prior_file,
+                                         N_int, m, d)
+                model_i, _ = _build_bss_model(ctx_i, n_anchor_updates; resample_dt, hvp_mode)
             end
             chains_i = pdmp_sample(d, flow, model_i, alg, t0, T, t_warmup;
                                    progress=(show_progress && chain_idx == 1), n_chains=1, threaded=false)
@@ -707,12 +642,6 @@ function r_pdmp_brms_subsampled(
         csv_path = n_ch == 1 ? output_csv : replace(output_csv, r"\.csv$" => "_chain$(chain_idx).csv")
         r_constrain_and_write_csv(sm_constrain, draws_unc, csv_path; chain_id=chain_idx, compute_lp)
         push!(csv_paths, csv_path)
-    end
-
-    if ctx.n_resamples > 0
-        fetch_ms = ctx.fetch_time_ns / 1e6
-        avg_fetch_ms = ctx.n_resamples > 0 ? fetch_ms / ctx.n_resamples : 0.0
-        @info "Resample stats" n_resamples=ctx.n_resamples total_fetch_ms=round(fetch_ms; digits=1) avg_fetch_ms=round(avg_fetch_ms; digits=3) async=async_prebuild
     end
 
     return csv_paths

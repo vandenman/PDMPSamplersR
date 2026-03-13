@@ -57,6 +57,15 @@ jobs:
         if: matrix.config.julia
         uses: julia-actions/cache@v2
 
+      - name: Cache PDMPSamplersR artifacts
+        if: matrix.config.julia
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/PDMPSamplersR
+          key: ${{ runner.os }}-pdmpsamplersr-cache-${{ hashFiles('DESCRIPTION', '.github/workflows/R-CMD-check.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-pdmpsamplersr-cache-
+
       - name: Configure RCall Julia preferences
         if: matrix.config.julia
         shell: Rscript {0}
@@ -118,7 +127,6 @@ jobs:
             import Pkg
             Pkg.add(url="https://github.com/vandenman/PDMPSamplers.jl")
             Pkg.add("BridgeStan")
-            Pkg.update()
             Pkg.precompile()
             using PDMPSamplers, LinearAlgebra, BridgeStan
             @info "Pre-compilation and loading successful"

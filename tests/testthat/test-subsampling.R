@@ -1,11 +1,3 @@
-skip_if_no_julia <- function() {
-  julia_available <- tryCatch({
-    JuliaCall::julia_setup(verbose = FALSE)
-    TRUE
-  }, error = function(e) FALSE)
-  testthat::skip_if_not(julia_available, "Julia is not available")
-}
-
 # R-side logistic regression gradient (no control variate)
 # Matches the Julia LogisticRegressionTarget interface:
 #   neg gradient = Λ0 (β - μ0)  +  (n/m) X_S' (σ(X_S β) - y_S)

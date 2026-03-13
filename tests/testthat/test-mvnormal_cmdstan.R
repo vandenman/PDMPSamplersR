@@ -1,14 +1,6 @@
 # Integration tests based on examples/mvnormal_cmdstan.R
 # These tests exercise Stan-based sampling with various configurations.
 
-skip_if_no_julia <- function() {
-  julia_available <- tryCatch({
-    JuliaCall::julia_setup(verbose = FALSE)
-    TRUE
-  }, error = function(e) FALSE)
-  testthat::skip_if_not(julia_available, "Julia is not available")
-}
-
 get_stan_paths <- function() {
   stan_model_dir <- system.file("stan", "models", package = "PDMPSamplersR")
   stan_data_dir  <- system.file("stan", "data",   package = "PDMPSamplersR")
@@ -24,8 +16,7 @@ get_stan_paths <- function() {
 
 test_that("mvnormal ZigZag with known mean and covariance recovers parameters", {
   skip_on_cran()
-  skip_if_no_julia()
-  PDMPSamplersR:::check_for_julia_setup()
+  skip_if_no_pdmp_julia_backend()
 
   paths <- get_stan_paths()
   model_path <- file.path(paths$models, "mvnormal.stan")
@@ -60,8 +51,7 @@ test_that("mvnormal ZigZag with known mean and covariance recovers parameters", 
 
 test_that("mvnormal ZigZag GridThinningStrategy recovers parameters", {
   skip_on_cran()
-  skip_if_no_julia()
-  PDMPSamplersR:::check_for_julia_setup()
+  skip_if_no_pdmp_julia_backend()
 
   paths <- get_stan_paths()
   model_path <- file.path(paths$models, "mvnormal.stan")
@@ -96,8 +86,7 @@ test_that("mvnormal ZigZag GridThinningStrategy recovers parameters", {
 
 test_that("spike-and-slab with diagonal covariance recovers inclusion probabilities", {
   skip_on_cran()
-  skip_if_no_julia()
-  PDMPSamplersR:::check_for_julia_setup()
+  skip_if_no_pdmp_julia_backend()
 
   paths <- get_stan_paths()
   model_path <- file.path(paths$models, "mvnormal.stan")
@@ -139,8 +128,7 @@ test_that("spike-and-slab with diagonal covariance recovers inclusion probabilit
 
 test_that("spike-and-slab with beta-binomial prior recovers model probabilities", {
   skip_on_cran()
-  skip_if_no_julia()
-  PDMPSamplersR:::check_for_julia_setup()
+  skip_if_no_pdmp_julia_backend()
 
   paths <- get_stan_paths()
   model_path <- file.path(paths$models, "mvnormal.stan")
@@ -202,8 +190,7 @@ test_that("spike-and-slab with beta-binomial prior recovers model probabilities"
 
 test_that("logistic regression with spike-and-slab recovers parameters", {
   skip_on_cran()
-  skip_if_no_julia()
-  PDMPSamplersR:::check_for_julia_setup()
+  skip_if_no_pdmp_julia_backend()
 
   paths <- get_stan_paths()
   model_path <- file.path(paths$models, "logistic_regression.stan")
@@ -259,9 +246,8 @@ test_that("logistic regression with spike-and-slab recovers parameters", {
 
 test_that("t-test Bayes factor is close to analytic result", {
   skip_on_cran()
-  skip_if_no_julia()
+  skip_if_no_pdmp_julia_backend()
   skip_if_not_installed("BayesFactor")
-  PDMPSamplersR:::check_for_julia_setup()
 
   paths <- get_stan_paths()
   model_path <- file.path(paths$models, "ttest.stan")

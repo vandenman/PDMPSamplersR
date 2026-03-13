@@ -37,12 +37,19 @@
 #'   supported for subsampling.
 #' @param n_anchor_updates Integer number of anchor updates during warmup
 #'   (default: 10). Only used when `subsample_size` is non-NULL.
+#' @param resample_dt Numeric time step for resampling, or NULL (default)
+#'   for no resampling. Only used when `subsample_size` is non-NULL.
+#' @param hvp_mode Character string controlling Hessian-vector product
+#'   scaling in subsampled gradients. One of `"scaled"` (default) or
+#'   `"none"`.
 #' @param stanvars Optional `stanvar` object for custom Stan code.
 #' @param sample_prior Currently only `"no"` is supported.
 #' @param save_model Optional file path to save the generated Stan code.
 #' @param ... Additional arguments passed to [brms::brm()] for model setup.
 #'
 #' @return A `brmsfit` object.
+#'
+#' @importFrom stats gaussian
 #'
 #' @details
 #' PDMP samplers do not produce NUTS-style diagnostics. The `lp__`,

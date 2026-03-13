@@ -26,7 +26,7 @@ jobs:
 
       - uses: r-lib/actions/setup-r-dependencies@v2
         with:
-          extra-packages: any::covr, any::xml2, github::Non-Contradiction/JuliaCall, local::.
+          extra-packages: any::covr, any::xml2, any::BH, github::Non-Contradiction/JuliaCall, local::.
           needs: coverage
 
       - name: Install Julia

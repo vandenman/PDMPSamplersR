@@ -37,27 +37,39 @@ fix_brms_stancode <- function(stancode) {
 }
 
 subset_standata <- function(sdata, indices, means_X) {
-  sub <- sdata
-  sub$N <- length(indices)
-  Y_sub <- sdata$Y[indices]
-  if (length(Y_sub) == 1L) Y_sub <- array(Y_sub)
-  sub$Y <- Y_sub
-  sub$X <- sdata$X[indices, , drop = FALSE]
+  N_orig  <- sdata$N
+  non_obs <- c("N", "K", "Kc", "prior_only", "means_X")
+  sub     <- sdata
+  sub$N   <- length(indices)
+  for (nm in setdiff(names(sdata), non_obs)) {
+    val <- sdata[[nm]]
+    if (is.matrix(val) && nrow(val) == N_orig) {
+      sub[[nm]] <- val[indices, , drop = FALSE]
+    } else if (!is.matrix(val) && is.atomic(val) && length(val) == N_orig) {
+      sub_val <- val[indices]
+      if (length(sub_val) == 1L) sub_val <- array(sub_val)
+      sub[[nm]] <- sub_val
+    }
+  }
   sub$means_X <- means_X
   sub
 }
 
 make_prior_standata <- function(sdata, means_X) {
-  K <- sdata$K
-  prior <- list(
-    N = 1L,
-    Y = array(if (is.integer(sdata$Y)) 0L else 0.0),
-    K = K,
-    Kc = sdata$Kc,
-    X = matrix(0, nrow = 1, ncol = K),
-    means_X = means_X,
-    prior_only = 1L
-  )
+  N_orig  <- sdata$N
+  non_obs <- c("N", "K", "Kc", "prior_only", "means_X")
+  prior   <- sdata
+  prior$N <- 1L
+  for (nm in setdiff(names(sdata), non_obs)) {
+    val <- sdata[[nm]]
+    if (is.matrix(val) && nrow(val) == N_orig) {
+      prior[[nm]] <- val[1L, , drop = FALSE]
+    } else if (!is.matrix(val) && is.atomic(val) && length(val) == N_orig) {
+      prior[[nm]] <- array(val[1L])
+    }
+  }
+  prior$means_X  <- means_X
+  prior$prior_only <- 1L
   prior
 }
 
@@ -116,7 +128,7 @@ hpp_path <- function() {
 #' @return A character string when `subsample_size` is NULL, or a
 #'   named list with elements `standard` and `ext_cpp`.
 #' @export
-pdmp_stancode <- function(
+brm_stancode <- function(
     formula, data, family = gaussian(),
     prior = NULL,
     subsample_size = NULL,
@@ -124,7 +136,7 @@ pdmp_stancode <- function(
     ...
 ) {
   if (!requireNamespace("brms", quietly = TRUE))
-    cli::cli_abort("Package {.pkg brms} is required for {.fn pdmp_stancode}.")
+    cli::cli_abort("Package {.pkg brms} is required for {.fn brm_stancode}.")
 
   scode <- brms::stancode(formula, data = data, family = family,
                           prior = prior, stanvars = stanvars,
@@ -157,7 +169,7 @@ pdmp_stancode <- function(
 #' @return A list (Stan data) when `subsample_size` is NULL, or a
 #'   named list with elements `full`, `prior`, and `subsample`.
 #' @export
-pdmp_standata <- function(
+brm_standata <- function(
     formula, data, family = gaussian(),
     prior = NULL,
     subsample_size = NULL,
@@ -166,7 +178,7 @@ pdmp_standata <- function(
     ...
 ) {
   if (!requireNamespace("brms", quietly = TRUE))
-    cli::cli_abort("Package {.pkg brms} is required for {.fn pdmp_standata}.")
+    cli::cli_abort("Package {.pkg brms} is required for {.fn brm_standata}.")
 
   sdata <- brms::standata(formula, data = data, family = family,
                           prior = prior, stanvars = stanvars,

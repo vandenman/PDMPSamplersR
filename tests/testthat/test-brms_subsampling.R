@@ -107,7 +107,7 @@ test_that("make_prior_standata creates valid prior data", {
   expect_equal(prior$prior_only, 1L)
   expect_equal(prior$means_X, means_X)
   expect_true(is.integer(prior$Y))
-  expect_equal(as.integer(prior$Y), 0L)
+  expect_equal(length(prior$Y), 1L)
   expect_true(!is.null(dim(prior$Y)))
   expect_equal(nrow(prior$X), 1L)
   expect_equal(ncol(prior$X), 3L)
@@ -124,8 +124,40 @@ test_that("make_prior_standata handles double Y", {
   prior <- make_prior_standata(sdata, means_X)
 
   expect_true(is.double(prior$Y))
-  expect_equal(as.double(prior$Y), 0.0)
+  expect_equal(length(prior$Y), 1L)
   expect_true(!is.null(dim(prior$Y)))
+})
+
+test_that("subset_standata subsets extra observation fields", {
+  sdata <- list(
+    N = 5L, Y = 1:5, K = 2L, Kc = 1L,
+    X       = matrix(seq_len(10), nrow = 5, ncol = 2),
+    offsets = c(0.1, 0.2, 0.3, 0.4, 0.5),
+    trials  = c(10L, 20L, 30L, 40L, 50L)
+  )
+  means_X <- 1.5
+  indices <- c(2L, 4L)
+
+  sub <- PDMPSamplersR:::subset_standata(sdata, indices, means_X)
+
+  expect_equal(sub$offsets, c(0.2, 0.4))
+  expect_equal(sub$trials, c(20L, 40L))
+})
+
+test_that("make_prior_standata includes extra observation fields at N=1", {
+  sdata <- list(
+    N = 5L, Y = 1:5, K = 2L, Kc = 1L,
+    X       = matrix(seq_len(10), nrow = 5, ncol = 2),
+    offsets = c(0.1, 0.2, 0.3, 0.4, 0.5),
+    trials  = c(10L, 20L, 30L, 40L, 50L)
+  )
+  means_X <- 1.5
+
+  prior <- PDMPSamplersR:::make_prior_standata(sdata, means_X)
+
+  expect_equal(prior$N, 1L)
+  expect_equal(length(prior$offsets), 1L)
+  expect_equal(length(prior$trials), 1L)
 })
 
 # ── Validation tests ─────────────────────────────────────────────────────────

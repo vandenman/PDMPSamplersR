@@ -44,7 +44,7 @@ jobs:
           # see https://github.com/quarto-dev/quarto-r/issues/217
           # JuliaCall dev version needed for libunwind fix (PR #265)
           # that prevents segfaults on Ubuntu 24.04; CRAN 0.17.6 predates this
-          extra-packages: any::rcmdcheck, any::BH, github::Non-Contradiction/JuliaCall, local::.
+          extra-packages: any::rcmdcheck, any::BH, any::RcppEigen, github::Non-Contradiction/JuliaCall, local::.
           needs: check
 
       - name: Install Julia

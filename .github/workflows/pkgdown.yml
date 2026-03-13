@@ -37,7 +37,7 @@ jobs:
         with:
           # JuliaCall dev version needed for libunwind fix (PR #265)
           # that prevents segfaults on Ubuntu 24.04; CRAN 0.17.6 predates this
-          extra-packages: any::pkgdown, github::Non-Contradiction/JuliaCall, local::.
+          extra-packages: any::pkgdown, any::BH, any::RcppEigen, github::Non-Contradiction/JuliaCall, local::.
           needs: website
 
       - name: Configure RCall Julia preferences

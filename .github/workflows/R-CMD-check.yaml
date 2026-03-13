@@ -140,6 +140,14 @@ jobs:
           pdmpsamplers_setup()
 
       - uses: r-lib/actions/check-r-package@v2
+        if: matrix.config.os == 'macOS-latest'
+        with:
+          upload-snapshots: true
+          build_args: 'c("--no-manual", "--no-build-vignettes", "--compact-vignettes=gs+qpdf")'
+          args: 'c("--no-manual", "--as-cran", "--ignore-vignettes")'
+
+      - uses: r-lib/actions/check-r-package@v2
+        if: matrix.config.os != 'macOS-latest'
         with:
           upload-snapshots: true
           build_args: 'c("--no-manual", "--compact-vignettes=gs+qpdf")'

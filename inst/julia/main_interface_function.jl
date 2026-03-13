@@ -571,9 +571,10 @@ function r_pdmp_brms_subsampled(
     end
 
     lib_path_ext = if endswith(stan_file_ext, ".stan")
+        hpp_path_for_make = replace(normpath(hpp_path), "\\" => "/")
         BridgeStan.compile_model(stan_file_ext;
             stanc_args=["--allow-undefined"],
-            make_args=["USER_HEADER=$(hpp_path)"])
+            make_args=["USER_HEADER=$(hpp_path_for_make)"])
     else
         stan_file_ext
     end

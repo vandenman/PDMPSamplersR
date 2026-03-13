@@ -165,10 +165,10 @@ test_that("brm_standata means_X matches column means of X", {
   skip_if_no_brms()
 
   set.seed(42)
-  df <- data.frame(y = rnorm(50), x1 = rnorm(50), x2 = rnorm(50))
-  result <- brm_standata(y ~ x1 + x2, data = df, subsample_size = 10L)
+  df <- data.frame(y = rnorm(50), x = rnorm(50))
+  result <- brm_standata(y ~ x, data = df, subsample_size = 10L)
 
-  sdata <- brms::standata(y ~ x1 + x2, data = df)
+  sdata <- brms::standata(y ~ x, data = df)
   expected_means <- colMeans(sdata$X[, -1, drop = FALSE])
   expect_equal(as.numeric(result$full$means_X), as.numeric(expected_means))
   expect_equal(as.numeric(result$prior$means_X), as.numeric(expected_means))

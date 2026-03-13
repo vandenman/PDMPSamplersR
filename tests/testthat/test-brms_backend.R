@@ -1,17 +1,6 @@
 # Integration tests for brms backend.
 # Skipped if brms, rstan, or Julia are not available.
 
-skip_if_no_brms_setup <- function() {
-  testthat::skip_if_not_installed("brms")
-  testthat::skip_if_not_installed("rstan")
-
-  julia_available <- tryCatch({
-    PDMPSamplersR:::check_for_julia_setup()
-    JuliaCall::julia_eval("hasmethod(PDMPModel, Tuple{String, String})")
-  }, error = function(e) FALSE)
-  testthat::skip_if_not(julia_available, "Julia + BridgeStan not available")
-}
-
 test_that("brm_pdmp rejects sample_prior != 'no'", {
   skip_if_no_brms_setup()
   expect_error(
@@ -286,7 +275,7 @@ test_that("brm_pdmp: Beta family", {
   expect_true("x" %in% rownames(s$fixed))
 })
 
-test_that("brm_pdmp: pp_check works", {
+test_that("brm_pdmp: pp_check and loo work", {
   skip_if_no_brms_setup()
 
   set.seed(42)
@@ -301,20 +290,6 @@ test_that("brm_pdmp: pp_check works", {
 
   pp <- brms::pp_check(fit, ndraws = 50)
   expect_s3_class(pp, "gg")
-})
-
-test_that("brm_pdmp: loo works", {
-  skip_if_no_brms_setup()
-
-  set.seed(42)
-  n <- 50
-  x <- rnorm(n)
-  y <- 2 + 0.5 * x + rnorm(n, sd = 0.5)
-  df <- data.frame(y = y, x = x)
-
-  fit <- brm_pdmp(y ~ x, data = df, family = gaussian(),
-                  flow = "PreconditionedZigZag", algorithm = "GridThinningStrategy",
-                  T = 20000, show_progress = FALSE)
 
   loo_result <- suppressWarnings(brms::loo(fit))
   expect_s3_class(loo_result, "loo")

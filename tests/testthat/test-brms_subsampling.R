@@ -1,16 +1,5 @@
 # Tests for brms subsampling: helper functions and integration tests.
 
-skip_if_no_brms_setup <- function() {
-  testthat::skip_if_not_installed("brms")
-  testthat::skip_if_not_installed("rstan")
-
-  julia_available <- tryCatch({
-    PDMPSamplersR:::check_for_julia_setup()
-    JuliaCall::julia_eval("hasmethod(PDMPModel, Tuple{String, String})")
-  }, error = function(e) FALSE)
-  testthat::skip_if_not(julia_available, "Julia + BridgeStan not available")
-}
-
 # ── Unit tests for helper functions (no Julia needed) ─────────────────────────
 
 test_that("fix_brms_stancode moves means_X from transformed data to data", {

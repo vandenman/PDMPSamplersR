@@ -244,8 +244,14 @@ cached_stan_model <- function(scode) {
   cache_dir <- file.path(rappdirs::user_cache_dir("PDMPSamplersR"), "stan_cache")
   dir.create(cache_dir, showWarnings = FALSE, recursive = TRUE)
   hash <- rlang::hash(scode)
-  so_path <- file.path(cache_dir, paste0(hash, "_model.so"))
-  if (file.exists(so_path)) return(so_path)
+  model_base <- file.path(cache_dir, paste0(hash, "_model"))
+  lib_candidates <- c(
+    paste0(model_base, ".so"),
+    paste0(model_base, ".dylib"),
+    paste0(model_base, ".dll")
+  )
+  existing_lib <- lib_candidates[file.exists(lib_candidates)]
+  if (length(existing_lib) > 0) return(existing_lib[[1]])
   stan_path <- file.path(cache_dir, paste0(hash, ".stan"))
   writeLines(scode, stan_path)
   stan_path

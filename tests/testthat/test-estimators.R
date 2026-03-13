@@ -1,13 +1,5 @@
 # Tests for continuous-time estimators and parameter transforms.
 
-skip_if_no_julia <- function() {
-  julia_available <- tryCatch({
-    JuliaCall::julia_setup(verbose = FALSE)
-    TRUE
-  }, error = function(e) FALSE)
-  testthat::skip_if_not(julia_available, "Julia is not available")
-}
-
 # ─── S3 generic fallback tests (no Julia needed) ─────────────────────────────
 
 test_that("var.default falls back to stats::var", {

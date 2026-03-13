@@ -26,6 +26,7 @@ Imports:
     stats
 Suggests:
     BayesFactor,
+    BH,
     brms,
     ggplot2,
     jsonlite,

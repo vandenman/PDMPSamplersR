@@ -92,6 +92,13 @@ supported for subsampling.}
 \item{n_anchor_updates}{Integer number of anchor updates during warmup
 (default: 10). Only used when `subsample_size` is non-NULL.}
 
+\item{resample_dt}{Numeric time step for resampling, or NULL (default)
+for no resampling. Only used when `subsample_size` is non-NULL.}
+
+\item{hvp_mode}{Character string controlling Hessian-vector product
+scaling in subsampled gradients. One of `"scaled"` (default) or
+`"none"`.}
+
 \item{stanvars}{Optional `stanvar` object for custom Stan code.}
 
 \item{sample_prior}{Currently only `"no"` is supported.}

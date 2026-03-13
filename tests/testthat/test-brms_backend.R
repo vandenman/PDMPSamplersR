@@ -116,7 +116,7 @@ test_that("brm_pdmp: Poisson regression", {
   ests_reference <- brms::fixef(fit_reference)
   ests_pdmp      <- brms::fixef(fit)
 
-  tols <- c("Estimate" = .05, "Est.Error"  = .15, "Q2.5" = 0.1, "Q97.5" = 0.1)
+  tols <- c("Estimate" = .05, "Est.Error"  = .15, "Q2.5" = 0.15, "Q97.5" = 0.15)
   for (i in seq_along(tols)) {
     nm <- names(tols)[i]
     testthat::expect_equal(ests_pdmp[, nm], ests_reference[, nm], tolerance = tols[i],

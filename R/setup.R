@@ -79,6 +79,30 @@ load_julia_project <- function() {
   JuliaCall::julia_command(sprintf('Base.active_project() == joinpath("%1$s", "Project.toml") || Pkg.activate("%1$s");', project_dir))
 }
 
+.pdmp_env <- new.env(parent = emptyenv())
+.pdmp_env$version_printed <- FALSE
+
+print_pdmpsamplers_version <- function() {
+  if (.pdmp_env$version_printed) return(invisible(NULL))
+  version_str <- tryCatch(
+    JuliaCall::julia_eval('
+      let deps = Pkg.dependencies()
+        entry = [dep for (_, dep) in deps if dep.name == "PDMPSamplers"]
+        if isempty(entry)
+          "unknown"
+        else
+          d = first(entry)
+          d.is_tracking_path || d.is_tracking_repo ? "$(d.version) (dev)" : string(d.version)
+        end
+      end
+    '),
+    error = function(e) "unknown"
+  )
+  cli::cli_inform("Using PDMPSamplers.jl v{version_str}")
+  .pdmp_env$version_printed <- TRUE
+  invisible(NULL)
+}
+
 #' Update the Julia project for PDMPSamplers.jl
 #'
 #' Updates the Julia package dependencies used by PDMPSamplersR. If the
@@ -155,6 +179,7 @@ check_for_julia_setup <- function(error_if_not_exists = FALSE, setup_if_not_exis
     load_julia_project()
     load_required_julia_packages()
     load_interface_function()
+    print_pdmpsamplers_version()
     return(TRUE)
   } else if (!error_if_not_exists) {
     if (setup_if_not_exists) {

@@ -606,25 +606,16 @@ function r_pdmp_brms_subsampled(
     flow = build_flow(flow_type, prec, fmean; adaptive_scheme)
     alg = build_algorithm(algorithm_type; c0, d, grid_n, grid_t_max)
 
-    if n_chains == 1
-        chains = pdmp_sample(d, flow, model, alg, t0, T, t_warmup;
-                             progress=show_progress, n_chains=1, threaded=false)
-    else
-        results = map(1:n_chains) do chain_idx
-            if chain_idx == 1
-                model_i = model
-            else
-                ctx_i = _new_bss_context(lib_path_std, lib_path_ext, set_fn,
-                                         data_full_file, data_prior_file,
-                                         N_int, m, d)
-                model_i, _ = _build_bss_model(ctx_i, n_anchor_updates; resample_dt, hvp_mode)
-            end
-            chains_i = pdmp_sample(d, flow, model_i, alg, t0, T, t_warmup;
-                                   progress=(show_progress && chain_idx == 1), n_chains=1, threaded=false)
-            (chains_i.traces[1], chains_i.stats[1])
-        end
-        chains = PDMPChains([r[1] for r in results], [r[2] for r in results])
+    models = typeof(model)[model]
+    for i in 2:n_chains
+        ctx_i = _new_bss_context(lib_path_std, lib_path_ext, set_fn,
+                                 data_full_file, data_prior_file,
+                                 N_int, m, d)
+        model_i, _ = _build_bss_model(ctx_i, n_anchor_updates; resample_dt, hvp_mode)
+        push!(models, model_i)
     end
+    chains = pdmp_sample(d, flow, models, alg, t0, T, t_warmup;
+                         progress=show_progress, threaded)
 
     sm_constrain = sm_full
     n_ch = length(chains.traces)

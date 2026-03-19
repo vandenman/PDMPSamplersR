@@ -156,6 +156,7 @@ use_local_pdmpsamplers <- function(path = NULL) {
 }
 
 load_interface_function <- function() {
+  if (isTRUE(JuliaCall::julia_eval("isdefined(Main, :PDMPSamplersRBridge)"))) return(invisible(NULL))
   interface_file <- system.file("julia", "main_interface_function.jl", package = "PDMPSamplersR")
   if (fs::file_exists(interface_file)) {
     JuliaCall::julia_source(interface_file)

@@ -1,4 +1,13 @@
-using PDMPSamplers, LinearAlgebra, BridgeStan, Random
+module PDMPSamplersRBridge
+
+using PDMPSamplers, LinearAlgebra, BridgeStan, Random, Statistics
+
+export build_flow, build_algorithm, wrap_sticky
+export r_discretize, r_mean, r_var, r_std, r_cov, r_cor, r_quantile, r_median, r_cdf, r_ess, r_summary_all
+export r_inclusion_probs, extract_stats
+export r_pdmp_stan, r_pdmp_custom, r_pdmp_custom_subsampled
+export write_cmdstan_csv, r_constrain_and_write_csv
+export r_pdmp_brms_subsampled, r_pdmp_stan_for_brms
 
 function build_flow(flow_type::String, prec::AbstractMatrix{Float64}, flow_mean::AbstractVector{Float64};
                     adaptive_scheme::String="diagonal")
@@ -45,6 +54,13 @@ function wrap_sticky(alg::PDMPSamplers.PoissonTimeStrategy, sticky::Bool, model_
     end
 
     return Sticky(alg, κ, BitVector(can_stick))
+end
+
+function _to_precision(flow_cov::AbstractMatrix{Float64}, d::Int)
+    if isdiag(flow_cov) && all(i -> @inbounds(flow_cov[i, i]) ≈ 1.0, 1:d)
+        return Diagonal(ones(d))
+    end
+    return inv(Symmetric(flow_cov))
 end
 
 function _pack_result(chains::PDMPChains)
@@ -97,6 +113,17 @@ function r_ess(chains::PDMPChains; chain::Int = 1, n_batches::Int = 0)
     else
         ess(chains; chain)
     end
+end
+
+function r_summary_all(chains::PDMPChains; chain::Int = 1)
+    Dict{String,Any}(
+        "mean"   => Statistics.mean(chains; chain),
+        "var"    => Statistics.var(chains; chain),
+        "std"    => Statistics.std(chains; chain),
+        "cov"    => Statistics.cov(chains; chain),
+        "cor"    => Statistics.cor(chains; chain),
+        "median" => Statistics.median(chains.traces[chain])
+    )
 end
 
 r_inclusion_probs(chains::PDMPChains; chain::Int = 1) = inclusion_probs(chains; chain)
@@ -212,10 +239,10 @@ function r_pdmp_stan(
 
     d = model.d
 
-    prec = inv(Symmetric(flow_cov))
+    prec = _to_precision(flow_cov, d)
     flow = build_flow(flow_type, prec, flow_mean; adaptive_scheme)
-    alg = build_algorithm(algorithm_type; c0, d, grid_n, grid_t_max)
-    alg = wrap_sticky(alg, sticky, model_prior, parameter_prior, can_stick)
+    alg0 = build_algorithm(algorithm_type; c0, d, grid_n, grid_t_max)
+    alg = wrap_sticky(alg0, sticky, model_prior, parameter_prior, can_stick)
 
     chains = pdmp_sample(x0, flow, model, alg, t0, T, t_warmup;
                          progress = show_progress, n_chains = n_chains, threaded = threaded)
@@ -266,10 +293,10 @@ function r_pdmp_custom(
     end
     model = PDMPModel(d, FullGradient(grad!), hvp)
 
-    prec = inv(Symmetric(flow_cov))
+    prec = _to_precision(flow_cov, d)
     flow = build_flow(flow_type, prec, flow_mean; adaptive_scheme)
-    alg = build_algorithm(algorithm_type; c0, d, grid_n, grid_t_max)
-    alg = wrap_sticky(alg, sticky, model_prior, parameter_prior, can_stick)
+    alg0 = build_algorithm(algorithm_type; c0, d, grid_n, grid_t_max)
+    alg = wrap_sticky(alg0, sticky, model_prior, parameter_prior, can_stick)
 
     chains = pdmp_sample(x0, flow, model, alg, t0, T, t_warmup;
                          progress = show_progress, n_chains = n_chains, threaded = threaded)
@@ -347,10 +374,11 @@ function r_pdmp_custom_subsampled(
 
     model = PDMPModel(d, grad, hvp)
 
-    prec = isempty(flow_cov) ? Matrix{Float64}(I, d, d) : inv(Symmetric(flow_cov))
+    prec = isempty(flow_cov) ? Diagonal(ones(d)) : _to_precision(flow_cov, d)
     fmean = isempty(flow_mean) ? zeros(d) : flow_mean
     flow = build_flow(flow_type, prec, fmean; adaptive_scheme)
-    alg = build_algorithm(algorithm_type; c0, d, grid_n, grid_t_max)
+    alg0 = build_algorithm(algorithm_type; c0, d, grid_n, grid_t_max)
+    alg = wrap_sticky(alg0, sticky, model_prior, parameter_prior, can_stick)
 
     chains = pdmp_sample(x0, flow, model, alg, t0, T, t_warmup;
                          progress = show_progress, n_chains, threaded)
@@ -363,34 +391,48 @@ end
 
 function write_cmdstan_csv(path::String, draws::Matrix{Float64}, param_names::Vector{String};
                            chain_id::Int=1, lp_values::Union{Vector{Float64}, Nothing}=nothing)
-    n_samples = size(draws, 1)
-    open(path, "w") do io
-        println(io, "# model = PDMPSamplers_model")
-        println(io, "# method = sample (adapt engaged=0)")
-        println(io, "#   sample")
-        println(io, "#     num_samples = ", n_samples)
-        println(io, "#     num_warmup = 0")
-        println(io, "#     save_warmup = 0")
-        println(io, "#     thin = 1")
-        println(io, "# id = ", chain_id)
-        println(io, "# Adaptation terminated")
-        println(io, "#  Elapsed Time: 0 seconds (Warm-up)")
-        println(io, "#                0 seconds (Sampling)")
-        println(io, "#                0 seconds (Total)")
-        diag_cols = ["lp__", "accept_stat__", "stepsize__", "treedepth__",
-                     "n_leapfrog__", "divergent__", "energy__"]
-        header = join(vcat(diag_cols, param_names), ",")
-        println(io, header)
-        for i in 1:n_samples
-            lp = isnothing(lp_values) ? 0.0 : lp_values[i]
-            print(io, lp, ",0,0,0,0,0,0")
-            for j in axes(draws, 2)
-                print(io, ",", draws[i, j])
-            end
-            println(io)
+    n_samples, n_params = size(draws)
+    lp_col = isnothing(lp_values) ? zeros(n_samples) : lp_values
+    buf = IOBuffer(; sizehint = n_samples * (n_params + 7) * 12)
+    _write_cmdstan_header(buf, n_samples, chain_id, param_names)
+    for i in 1:n_samples
+        print(buf, lp_col[i])
+        for _ in 1:6
+            write(buf, ",0.0")
         end
+        @inbounds for j in 1:n_params
+            write(buf, UInt8(','))
+            print(buf, draws[i, j])
+        end
+        write(buf, UInt8('\n'))
+    end
+    open(path, "w") do io
+        write(io, take!(buf))
     end
     return path
+end
+
+function _write_cmdstan_header(io::IO, n_samples::Int, chain_id::Int, param_names::Vector{String})
+    println(io, "# model = PDMPSamplers_model")
+    println(io, "# method = sample (adapt engaged=0)")
+    println(io, "#   sample")
+    println(io, "#     num_samples = ", n_samples)
+    println(io, "#     num_warmup = 0")
+    println(io, "#     save_warmup = 0")
+    println(io, "#     thin = 1")
+    println(io, "# id = ", chain_id)
+    println(io, "# Adaptation terminated")
+    println(io, "#  Elapsed Time: 0 seconds (Warm-up)")
+    println(io, "#                0 seconds (Sampling)")
+    println(io, "#                0 seconds (Total)")
+    diag_cols = ("lp__", "accept_stat__", "stepsize__", "treedepth__",
+                 "n_leapfrog__", "divergent__", "energy__")
+    join(io, diag_cols, ",")
+    for name in param_names
+        write(io, UInt8(','))
+        write(io, name)
+    end
+    write(io, UInt8('\n'))
 end
 
 function r_constrain_and_write_csv(sm::BridgeStan.StanModel, draws_unc::Matrix{Float64},
@@ -398,17 +440,31 @@ function r_constrain_and_write_csv(sm::BridgeStan.StanModel, draws_unc::Matrix{F
     param_names_c = BridgeStan.param_names(sm; include_tp=true, include_gq=true)
     rng = BridgeStan.StanRNG(sm, chain_id)
     n = size(draws_unc, 1)
+    d_unc = size(draws_unc, 2)
     n_c = length(param_names_c)
-    draws_con = Matrix{Float64}(undef, n, n_c)
-    lp_values = compute_lp ? Vector{Float64}(undef, n) : nothing
+    row_buf = Vector{Float64}(undef, d_unc)
+    out_buf = Vector{Float64}(undef, n_c)
+    buf = IOBuffer(; sizehint = n * (n_c + 7) * 12)
+    _write_cmdstan_header(buf, n, chain_id, param_names_c)
     for i in 1:n
-        row = Vector(draws_unc[i, :])
-        draws_con[i, :] .= BridgeStan.param_constrain(sm, row; include_tp=true, include_gq=true, rng)
-        if compute_lp
-            lp_values[i] = BridgeStan.log_density(sm, row)
+        @inbounds for j in 1:d_unc
+            row_buf[j] = draws_unc[i, j]
         end
+        BridgeStan.param_constrain!(sm, row_buf, out_buf; include_tp=true, include_gq=true, rng)
+        lp = compute_lp ? BridgeStan.log_density(sm, row_buf) : 0.0
+        print(buf, lp)
+        for _ in 1:6
+            write(buf, ",0.0")
+        end
+        @inbounds for j in 1:n_c
+            write(buf, UInt8(','))
+            print(buf, out_buf[j])
+        end
+        write(buf, UInt8('\n'))
     end
-    write_cmdstan_csv(output_csv, draws_con, param_names_c; chain_id, lp_values)
+    open(output_csv, "w") do io
+        write(io, take!(buf))
+    end
     return output_csv
 end
 
@@ -667,7 +723,7 @@ function r_pdmp_stan_for_brms(
     d = model.d
 
     fmean = isempty(flow_mean) ? zeros(d) : flow_mean
-    prec = isempty(flow_cov) ? Matrix{Float64}(I, d, d) : inv(Symmetric(flow_cov))
+    prec = isempty(flow_cov) ? Diagonal(ones(d)) : _to_precision(flow_cov, d)
 
     flow = build_flow(flow_type, prec, fmean; adaptive_scheme)
     alg = build_algorithm(algorithm_type; c0, d, grid_n, grid_t_max)
@@ -696,3 +752,8 @@ function r_pdmp_stan_for_brms(
 
     return Dict{String, Any}("csv_paths" => csv_paths, "stats" => stats)
 end
+
+end # module PDMPSamplersRBridge
+
+using PDMPSamplers, LinearAlgebra, BridgeStan, Random
+using .PDMPSamplersRBridge

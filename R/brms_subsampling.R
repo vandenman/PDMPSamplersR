@@ -143,9 +143,10 @@ brm_stancode <- function(
                           sample_prior = sample_prior, ...)
   if (is.null(subsample_size)) return(scode)
 
+  scode <- fix_brms_stancode(scode)
   list(
-    standard = fix_brms_stancode(scode),
-    ext_cpp  = inject_ext_cpp_stancode(fix_brms_stancode(scode))
+    standard = scode,
+    ext_cpp  = inject_ext_cpp_stancode(scode)
   )
 }
 
@@ -197,7 +198,11 @@ brm_standata <- function(
       "i" = "Remove random effects from the formula, or omit {.arg subsample_size} to use full-data gradients."
     ))
 
-  means_X <- array(colMeans(sdata$X[, -1, drop = FALSE]))
+  if (!is.null(sdata$means_X)) {
+    means_X <- sdata$means_X
+  } else {
+    means_X <- array(colMeans(sdata$X[, -1, drop = FALSE]))
+  }
   sdata_full <- sdata
   sdata_full$means_X <- means_X
   sdata_prior <- make_prior_standata(sdata, means_X)

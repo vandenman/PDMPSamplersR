@@ -153,22 +153,22 @@ function r_cdf(chains::PDMPChains, q::Float64, specs::AbstractVector; chain::Int
 end
 
 function extract_stats(chains::PDMPChains)
-    s = chains.stats[1]
+    all = chains.stats
     return Dict{String, Any}(
-        "reflections_events"    => s.reflections_events,
-        "reflections_accepted"  => s.reflections_accepted,
-        "refreshment_events"    => s.refreshment_events,
-        "sticky_events"         => s.sticky_events,
-        "gradient_calls"        => s.∇f_calls,
-        "hessian_calls"         => s.∇²f_calls,
-        "elapsed_time"          => s.elapsed_time,
-        "grid_builds"           => s.grid_builds,
-        "grid_shrinks"          => s.grid_shrinks,
-        "grid_grows"            => s.grid_grows,
-        "grid_early_stops"      => s.grid_early_stops,
-        "grid_points_evaluated" => s.grid_points_evaluated,
-        "grid_points_skipped"   => s.grid_points_skipped,
-        "grid_N_current"        => s.grid_N_current
+        "reflections_events"    => sum(s -> s.reflections_events, all),
+        "reflections_accepted"  => sum(s -> s.reflections_accepted, all),
+        "refreshment_events"    => sum(s -> s.refreshment_events, all),
+        "sticky_events"         => sum(s -> s.sticky_events, all),
+        "gradient_calls"        => sum(s -> s.∇f_calls, all),
+        "hessian_calls"         => sum(s -> s.∇²f_calls, all),
+        "elapsed_time"          => sum(s -> s.elapsed_time, all),
+        "grid_builds"           => sum(s -> s.grid_builds, all),
+        "grid_shrinks"          => sum(s -> s.grid_shrinks, all),
+        "grid_grows"            => sum(s -> s.grid_grows, all),
+        "grid_early_stops"      => sum(s -> s.grid_early_stops, all),
+        "grid_points_evaluated" => sum(s -> s.grid_points_evaluated, all),
+        "grid_points_skipped"   => sum(s -> s.grid_points_skipped, all),
+        "grid_N_current"        => sum(s -> s.grid_N_current, all)
     )
 end
 
@@ -618,6 +618,7 @@ function r_pdmp_brms_subsampled(
     chains = pdmp_sample(d, flow, models, alg, t0, T, t_warmup;
                          progress=show_progress, threaded)
 
+    stats = extract_stats(chains)
     sm_constrain = sm_full
     n_ch = length(chains.traces)
     csv_paths = String[]
@@ -637,7 +638,7 @@ function r_pdmp_brms_subsampled(
         push!(csv_paths, csv_path)
     end
 
-    return csv_paths
+    return Dict{String, Any}("csv_paths" => csv_paths, "stats" => stats)
 end
 
 function r_pdmp_stan_for_brms(
@@ -674,6 +675,7 @@ function r_pdmp_stan_for_brms(
     chains = pdmp_sample(d, flow, model, alg, t0, T, t_warmup;
                          progress = show_progress, n_chains, threaded)
 
+    stats = extract_stats(chains)
     n_ch = length(chains.traces)
     csv_paths = String[]
     dt = if discretize_dt > 0
@@ -692,5 +694,5 @@ function r_pdmp_stan_for_brms(
         push!(csv_paths, csv_path)
     end
 
-    return csv_paths
+    return Dict{String, Any}("csv_paths" => csv_paths, "stats" => stats)
 end

@@ -152,7 +152,11 @@ brm_pdmp <- function(
       ))
     scode <- fix_brms_stancode(scode)
     scode_ext <- inject_ext_cpp_stancode(scode)
-    means_X <- array(colMeans(sdata$X[, -1, drop = FALSE]))
+    if (!is.null(sdata$means_X)) {
+      means_X <- sdata$means_X
+    } else {
+      means_X <- array(colMeans(sdata$X[, -1, drop = FALSE]))
+    }
     Y_full <- as.numeric(sdata$Y)
     X_full <- sdata$X
     sdata_full <- sdata
@@ -188,7 +192,7 @@ brm_pdmp <- function(
   jl_resample_dt <- if (is.null(resample_dt)) 0.0 else resample_dt
 
   if (subsampled) {
-    csv_paths <- JuliaCall::julia_call(
+    jl_result <- JuliaCall::julia_call(
       "r_pdmp_brms_subsampled",
       normalizePath(stan_file, mustWork = TRUE),
       normalizePath(stan_file_ext, mustWork = TRUE),
@@ -214,7 +218,7 @@ brm_pdmp <- function(
       hvp_mode = hvp_mode
     )
   } else {
-    csv_paths <- JuliaCall::julia_call(
+    jl_result <- JuliaCall::julia_call(
       "r_pdmp_stan_for_brms",
       normalizePath(stan_file, mustWork = TRUE),
       normalizePath(data_file, mustWork = TRUE),
@@ -234,9 +238,16 @@ brm_pdmp <- function(
     )
   }
 
+  if (is.environment(jl_result)) jl_result <- as.list(jl_result)
+  csv_paths <- jl_result$csv_paths
+  pdmp_stats <- jl_result$stats
+  sampling_time <- pdmp_stats$elapsed_time
+
   stanfit <- rstan::read_stan_csv(csv_paths)
   empty_fit$fit <- stanfit
   empty_fit <- brms::rename_pars(empty_fit)
+  attr(empty_fit, "sampling_time") <- sampling_time
+  attr(empty_fit, "pdmp_stats") <- pdmp_stats
   empty_fit
 }
 

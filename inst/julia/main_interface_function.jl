@@ -181,6 +181,12 @@ end
 
 function extract_stats(chains::PDMPChains)
     all = chains.stats
+    ct_ess_per_chain = try
+        [minimum(ess(chains; chain=i)) for i in 1:length(chains.traces)]
+    catch
+        Float64[]
+    end
+    ct_ess_min = isempty(ct_ess_per_chain) ? NaN : sum(ct_ess_per_chain)
     return Dict{String, Any}(
         "reflections_events"    => sum(s -> s.reflections_events, all),
         "reflections_accepted"  => sum(s -> s.reflections_accepted, all),
@@ -195,7 +201,9 @@ function extract_stats(chains::PDMPChains)
         "grid_early_stops"      => sum(s -> s.grid_early_stops, all),
         "grid_points_evaluated" => sum(s -> s.grid_points_evaluated, all),
         "grid_points_skipped"   => sum(s -> s.grid_points_skipped, all),
-        "grid_N_current"        => sum(s -> s.grid_N_current, all)
+        "grid_N_current"        => sum(s -> s.grid_N_current, all),
+        "ct_ess_min"            => ct_ess_min,
+        "ct_ess_per_chain"      => ct_ess_per_chain,
     )
 end
 

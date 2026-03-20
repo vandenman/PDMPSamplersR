@@ -14,7 +14,8 @@ discretize(x, ...)
 
 \item{...}{Passed to methods.}
 
-\item{dt}{Numeric time step, or NULL to use mean inter-event time (default: NULL).}
+\item{dt}{Numeric time step, or NULL to use adaptive discretization based on
+continuous-time ESS (default: NULL).}
 
 \item{chain}{Integer, which chain to use (default: 1).}
 }
@@ -23,4 +24,7 @@ Numeric matrix (samples x dimensions).
 }
 \description{
 Convert the continuous-time trace to a matrix of equally-spaced samples.
+When \code{dt = NULL} (default), the number of discretization points is set
+to the continuous-time ESS, preserving the full information content of the
+trace.
 }

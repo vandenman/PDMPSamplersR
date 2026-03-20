@@ -13,6 +13,9 @@
 namespace pdmp_subsample {
     static std::vector<int> indices_;
     static int m_ = 0;
+    static Eigen::MatrixXd Xc_buf_;
+    static Eigen::VectorXd Y_real_buf_;
+    static std::vector<int> Y_int_buf_;
 }
 
 extern "C" {
@@ -27,34 +30,34 @@ extern "C" {
 }
 
 template <typename T>
-inline Eigen::VectorXd get_subsampled_Y_real(const T& Y_full, std::ostream* pstream__) {
+inline const Eigen::VectorXd& get_subsampled_Y_real(const T& Y_full, std::ostream* pstream__) {
     int m = pdmp_subsample::m_;
-    Eigen::VectorXd Y_sub(m);
+    pdmp_subsample::Y_real_buf_.resize(m);
     for (int i = 0; i < m; ++i) {
-        Y_sub(i) = Y_full(pdmp_subsample::indices_[i]);
+        pdmp_subsample::Y_real_buf_(i) = Y_full(pdmp_subsample::indices_[i]);
     }
-    return Y_sub;
+    return pdmp_subsample::Y_real_buf_;
 }
 
 template <typename T>
-inline std::vector<int> get_subsampled_Y_int(const T& Y_full, std::ostream* pstream__) {
+inline const std::vector<int>& get_subsampled_Y_int(const T& Y_full, std::ostream* pstream__) {
     int m = pdmp_subsample::m_;
-    std::vector<int> Y_sub(m);
+    pdmp_subsample::Y_int_buf_.resize(m);
     for (int i = 0; i < m; ++i) {
-        Y_sub[i] = Y_full[pdmp_subsample::indices_[i]];
+        pdmp_subsample::Y_int_buf_[i] = Y_full[pdmp_subsample::indices_[i]];
     }
-    return Y_sub;
+    return pdmp_subsample::Y_int_buf_;
 }
 
 template <typename T>
-inline Eigen::MatrixXd get_subsampled_Xc(const T& Xc_full, std::ostream* pstream__) {
+inline const Eigen::MatrixXd& get_subsampled_Xc(const T& Xc_full, std::ostream* pstream__) {
     int m = pdmp_subsample::m_;
     int p = Xc_full.cols();
-    Eigen::MatrixXd Xc_sub(m, p);
+    pdmp_subsample::Xc_buf_.resize(m, p);
     for (int i = 0; i < m; ++i) {
-        Xc_sub.row(i) = Xc_full.row(pdmp_subsample::indices_[i]);
+        pdmp_subsample::Xc_buf_.row(i) = Xc_full.row(pdmp_subsample::indices_[i]);
     }
-    return Xc_sub;
+    return pdmp_subsample::Xc_buf_;
 }
 
 #endif

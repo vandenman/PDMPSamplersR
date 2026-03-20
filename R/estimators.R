@@ -253,6 +253,9 @@ inclusion_probs.pdmp_result <- function(x, chain = 1L, ...) {
 #' Discretize a PDMP trace
 #'
 #' Convert the continuous-time trace to a matrix of equally-spaced samples.
+#' When \code{dt = NULL} (default), the number of discretization points is set
+#' to the continuous-time ESS, preserving the full information content of the
+#' trace.
 #'
 #' @param x A \code{pdmp_result} object.
 #' @param ... Passed to methods.
@@ -262,7 +265,8 @@ inclusion_probs.pdmp_result <- function(x, chain = 1L, ...) {
 discretize <- function(x, ...) UseMethod("discretize")
 
 #' @rdname discretize
-#' @param dt Numeric time step, or NULL to use mean inter-event time (default: NULL).
+#' @param dt Numeric time step, or NULL to use adaptive discretization based on
+#'   continuous-time ESS (default: NULL).
 #' @param chain Integer, which chain to use (default: 1).
 #' @export
 discretize.pdmp_result <- function(x, dt = NULL, chain = 1L, ...) {

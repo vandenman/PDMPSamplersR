@@ -81,10 +81,7 @@ end
 function r_discretize(chains::PDMPChains; dt::Union{Float64, Nothing} = nothing, chain::Int = 1)
     trace = chains.traces[chain]
     if isnothing(dt)
-        t_start = first_event_time(trace)
-        t_end = last_event_time(trace)
-        n = length(trace)
-        dt = (t_end - t_start) / max(n - 1, 1)
+        dt, _, _ = adaptive_dt(trace)
     end
     return Matrix(PDMPDiscretize(trace, dt))
 end
@@ -686,14 +683,11 @@ function r_pdmp_brms_subsampled(
     sm_constrain = sm_full
     n_ch = length(chains.traces)
     csv_paths = String[]
-    dt = if discretize_dt > 0
-        discretize_dt
+    all_draws = if discretize_dt > 0
+        [Matrix(PDMPDiscretize(chains.traces[i], discretize_dt)) for i in 1:n_ch]
     else
-        t_start = minimum(first_event_time(tr) for tr in chains.traces)
-        t_end = maximum(last_event_time(tr) for tr in chains.traces)
-        (t_end - t_start) / 1000
+        [adaptive_discretize(chains; chain=i)[1] for i in 1:n_ch]
     end
-    all_draws = [Matrix(PDMPDiscretize(chains.traces[i], dt)) for i in 1:n_ch]
     min_rows = minimum(size(m, 1) for m in all_draws)
     for chain_idx in 1:n_ch
         draws_unc = all_draws[chain_idx][1:min_rows, :]
@@ -742,14 +736,11 @@ function r_pdmp_stan_for_brms(
     stats = extract_stats(chains)
     n_ch = length(chains.traces)
     csv_paths = String[]
-    dt = if discretize_dt > 0
-        discretize_dt
+    all_draws = if discretize_dt > 0
+        [Matrix(PDMPDiscretize(chains.traces[i], discretize_dt)) for i in 1:n_ch]
     else
-        t_start = minimum(first_event_time(tr) for tr in chains.traces)
-        t_end = maximum(last_event_time(tr) for tr in chains.traces)
-        (t_end - t_start) / 1000
+        [adaptive_discretize(chains; chain=i)[1] for i in 1:n_ch]
     end
-    all_draws = [Matrix(PDMPDiscretize(chains.traces[i], dt)) for i in 1:n_ch]
     min_rows = minimum(size(m, 1) for m in all_draws)
     for chain_idx in 1:n_ch
         draws_unc = all_draws[chain_idx][1:min_rows, :]

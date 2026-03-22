@@ -30,6 +30,11 @@ brm_pdmp(
   n_anchor_updates = 10L,
   resample_dt = NULL,
   hvp_mode = c("scaled", "none"),
+  use_hcv = FALSE,
+  use_anchor_bank = FALSE,
+  bank_capacity = 20L,
+  use_fd_hvp = FALSE,
+  post_warmup_simplify = FALSE,
   stanvars = NULL,
   sample_prior = "no",
   save_model = NULL,
@@ -98,6 +103,29 @@ for no resampling. Only used when `subsample_size` is non-NULL.}
 \item{hvp_mode}{Character string controlling Hessian-vector product
 scaling in subsampled gradients. One of `"scaled"` (default) or
 `"none"`.}
+
+\item{use_hcv}{Logical; enable damped Hessian control variate (HCV)
+correction for subsampled gradients (default: FALSE). Requires
+`subsample_size` to be set. Adds a second-order correction that
+reduces gradient variance near the anchor.}
+
+\item{use_anchor_bank}{Logical; enable anchor bank with LRU eviction
+for subsampled gradients (default: FALSE). Requires `subsample_size`
+to be set. Maintains multiple cached anchor points and selects the
+nearest one at each trajectory step.}
+
+\item{bank_capacity}{Integer capacity of the anchor bank (default: 20).
+Only used when `use_anchor_bank` is TRUE.}
+
+\item{use_fd_hvp}{Logical; use finite-difference directional curvature
+instead of BridgeStan's Hessian-vector product (default: FALSE).
+Replaces each HVP call (2-3x gradient cost) with one extra gradient
+call, giving ~30-50\% per-grid-point savings.}
+
+\item{post_warmup_simplify}{Logical; switch to a fast constant-bound
+thinning mode after warmup when the sampler is well-adapted
+(default: FALSE). Activates when the reflection ratio is below 30\%
+and at least 10 events have been observed.}
 
 \item{stanvars}{Optional `stanvar` object for custom Stan code.}
 

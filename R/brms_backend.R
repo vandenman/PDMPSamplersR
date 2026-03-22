@@ -42,6 +42,24 @@
 #' @param hvp_mode Character string controlling Hessian-vector product
 #'   scaling in subsampled gradients. One of `"scaled"` (default) or
 #'   `"none"`.
+#' @param use_hcv Logical; enable damped Hessian control variate (HCV)
+#'   correction for subsampled gradients (default: FALSE). Requires
+#'   `subsample_size` to be set. Adds a second-order correction that
+#'   reduces gradient variance near the anchor.
+#' @param use_anchor_bank Logical; enable anchor bank with LRU eviction
+#'   for subsampled gradients (default: FALSE). Requires `subsample_size`
+#'   to be set. Maintains multiple cached anchor points and selects the
+#'   nearest one at each trajectory step.
+#' @param bank_capacity Integer capacity of the anchor bank (default: 20).
+#'   Only used when `use_anchor_bank` is TRUE.
+#' @param use_fd_hvp Logical; use finite-difference directional curvature
+#'   instead of BridgeStan's Hessian-vector product (default: FALSE).
+#'   Replaces each HVP call (2-3x gradient cost) with one extra gradient
+#'   call, giving ~30-50\% per-grid-point savings.
+#' @param post_warmup_simplify Logical; switch to a fast constant-bound
+#'   thinning mode after warmup when the sampler is well-adapted
+#'   (default: FALSE). Activates when the reflection ratio is below 30\%
+#'   and at least 10 events have been observed.
 #' @param stanvars Optional `stanvar` object for custom Stan code.
 #' @param sample_prior Currently only `"no"` is supported.
 #' @param save_model Optional file path to save the generated Stan code.
@@ -88,6 +106,11 @@ brm_pdmp <- function(
     n_anchor_updates = 10L,
     resample_dt = NULL,
     hvp_mode = c("scaled", "none"),
+    use_hcv = FALSE,
+    use_anchor_bank = FALSE,
+    bank_capacity = 20L,
+    use_fd_hvp = FALSE,
+    post_warmup_simplify = FALSE,
     stanvars = NULL, sample_prior = "no",
     save_model = NULL,
     ...
@@ -107,7 +130,11 @@ brm_pdmp <- function(
   subsampled <- !is.null(subsample_size)
   N <- nrow(data)
 
+  if (!subsampled && (use_hcv || use_anchor_bank))
+    cli::cli_abort("{.arg use_hcv} and {.arg use_anchor_bank} require {.arg subsample_size} to be set.")
+
   if (subsampled) {
+    bank_capacity <- as.integer(bank_capacity)
     subsample_size <- as.integer(subsample_size)
     if (subsample_size >= N)
       cli::cli_abort("{.arg subsample_size} ({subsample_size}) must be less than {.code nrow(data)} ({N}).")
@@ -215,7 +242,12 @@ brm_pdmp <- function(
       threaded = threaded,
       compute_lp = compute_lp,
       resample_dt = jl_resample_dt,
-      hvp_mode = hvp_mode
+      hvp_mode = hvp_mode,
+      use_hcv = use_hcv,
+      use_anchor_bank = use_anchor_bank,
+      bank_capacity = as.integer(bank_capacity),
+      use_fd_hvp = use_fd_hvp,
+      post_warmup_simplify = post_warmup_simplify
     )
   } else {
     jl_result <- JuliaCall::julia_call(
@@ -234,7 +266,9 @@ brm_pdmp <- function(
       show_progress = show_progress,
       n_chains = as.integer(n_chains),
       threaded = threaded,
-      compute_lp = compute_lp
+      compute_lp = compute_lp,
+      use_fd_hvp = use_fd_hvp,
+      post_warmup_simplify = post_warmup_simplify
     )
   }
 

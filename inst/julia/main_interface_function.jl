@@ -31,11 +31,13 @@ function build_flow(flow_type::String, prec::AbstractMatrix{Float64}, flow_mean:
     end
 end
 
-function build_algorithm(algorithm_type::String; c0::Float64, d::Integer, grid_n::Int, grid_t_max::Float64)
+function build_algorithm(algorithm_type::String; c0::Float64, d::Integer, grid_n::Int, grid_t_max::Float64,
+        use_fd_hvp::Bool=false, post_warmup_simplify::Bool=false)
     if algorithm_type == "ThinningStrategy"
         return ThinningStrategy(GlobalBounds(c0 / d, d))
     elseif algorithm_type == "GridThinningStrategy"
-        return GridThinningStrategy(; N = grid_n, t_max = grid_t_max)
+        return GridThinningStrategy(; N = grid_n, t_max = grid_t_max,
+            use_fd_hvp = use_fd_hvp, post_warmup_simplify = post_warmup_simplify)
     elseif algorithm_type == "RootsPoissonStrategy"
         return RootsPoissonTimeStrategy()
     else
@@ -331,10 +333,6 @@ function r_pdmp_custom_subsampled(
         t0::Float64 = 0.0,
         T::Float64 = 10000.0,
         t_warmup::Float64 = 0.0,
-        sticky::Bool = false,
-        can_stick::Union{AbstractVector{Bool}, Nothing} = nothing,
-        model_prior = nothing,
-        parameter_prior::Union{AbstractVector{Float64}, Nothing} = nothing,
         show_progress::Bool = true,
         n_chains::Int = 1,
         threaded::Bool = false,
@@ -577,6 +575,278 @@ function _build_bss_model(ctx::BridgeStanSubsamplingContext, n_anchor_updates::I
     return PDMPModel(d, grad, hvp), d
 end
 
+function _build_bss_model_hcv(ctx::BridgeStanSubsamplingContext, n_anchor_updates::Int;
+                              resample_dt::Float64=0.0, hvp_mode::String="scaled")
+    s = ctx.N / ctx.m
+    d = Int(BridgeStan.param_unc_num(ctx.sm_full))
+    anchor_set = Ref(false)
+    hcv = HCVState(d)
+    hvp_buf_hcv = zeros(d)
+    hess_buf = zeros(d * d)
+    hess_grad_buf = zeros(d)
+    hess_buf_prior = zeros(d * d)
+
+    function neg_grad_cv!(out::Vector{Float64}, θ::Vector{Float64})
+        BridgeStan.log_density_gradient!(ctx.sm_sub, θ, ctx.grad_buf1)
+        BridgeStan.log_density_gradient!(ctx.sm_prior, θ, ctx.grad_buf2)
+        @. out = -((1 - s) * ctx.grad_buf2 + s * ctx.grad_buf1 + ctx.correction)
+
+        if hcv.enabled
+            hvp_at_anchor! = (hvp_out, v) -> begin
+                BridgeStan.log_density_hessian_vector_product!(ctx.sm_sub, ctx.anchor, v, hvp_out)
+            end
+            apply_hcv_correction!(out, hcv, θ, ctx.anchor, hvp_at_anchor!, s, hvp_buf_hcv)
+        end
+        return out
+    end
+
+    function _recompute_correction!()
+        BridgeStan.log_density_gradient!(ctx.sm_sub, ctx.anchor, ctx.grad_buf1)
+        BridgeStan.log_density_gradient!(ctx.sm_prior, ctx.anchor, ctx.grad_buf2)
+        @. ctx.correction = (s - 1) * ctx.grad_buf2 - s * ctx.grad_buf1 + ctx.g_full_buf
+    end
+
+    function resample!(nsub)
+        _partial_shuffle!(ctx.perm, ctx.m)
+        _ccall_set_indices!(ctx)
+        if anchor_set[]
+            _recompute_correction!()
+        end
+    end
+
+    function update_anchor!(trace)
+        ctx.anchor .= Vector{Float64}(vec(Statistics.mean(trace)))
+        BridgeStan.log_density_hessian!(ctx.sm_full, ctx.anchor, ctx.g_full_buf, hess_buf)
+        _recompute_correction!()
+        anchor_set[] = true
+
+        BridgeStan.log_density_hessian!(ctx.sm_prior, ctx.anchor, hess_grad_buf, hess_buf_prior)
+        update_hcv!(hcv, hess_buf, hess_buf_prior, s, d)
+    end
+
+    function neg_grad_full!(out::Vector{Float64}, θ::Vector{Float64})
+        BridgeStan.log_density_gradient!(ctx.sm_full, θ, out)
+        out .= .-out
+        return out
+    end
+
+    function neg_hvp_cv!(out::Vector{Float64}, θ::Vector{Float64}, v::Vector{Float64})
+        BridgeStan.log_density_hessian_vector_product!(ctx.sm_sub, θ, v, out)
+        BridgeStan.log_density_hessian_vector_product!(ctx.sm_prior, θ, v, ctx.hvp_buf)
+        @. out = -s * out - (1 - s) * ctx.hvp_buf
+        return out
+    end
+
+    grad = SubsampledGradient(
+        neg_grad_cv!, resample!, update_anchor!,
+        neg_grad_full!,
+        ctx.m, n_anchor_updates, true;
+        resample_dt
+    )
+    hvp = if hvp_mode == "scaled"
+        neg_hvp_cv!
+    elseif hvp_mode == "none"
+        nothing
+    else
+        error("Unknown hvp_mode: $hvp_mode. Use \"scaled\" or \"none\".")
+    end
+    return PDMPModel(d, grad, hvp), d
+end
+
+function _build_bss_model_bank(ctx::BridgeStanSubsamplingContext, n_anchor_updates::Int;
+                               resample_dt::Float64=0.0, hvp_mode::String="scaled",
+                               bank_capacity::Int=20)
+    s = ctx.N / ctx.m
+    d = Int(BridgeStan.param_unc_num(ctx.sm_full))
+    bank = AnchorBank(d; capacity=bank_capacity)
+
+    function neg_grad_cv!(out::Vector{Float64}, θ::Vector{Float64})
+        BridgeStan.log_density_gradient!(ctx.sm_sub, θ, ctx.grad_buf1)
+        BridgeStan.log_density_gradient!(ctx.sm_prior, θ, ctx.grad_buf2)
+        @. out = -((1 - s) * ctx.grad_buf2 + s * ctx.grad_buf1 + ctx.correction)
+        return out
+    end
+
+    function _recompute_correction_from_active!()
+        entry = active_entry(bank)
+        copyto!(ctx.anchor, entry.position)
+        copyto!(ctx.g_full_buf, entry.full_gradient)
+        BridgeStan.log_density_gradient!(ctx.sm_sub, ctx.anchor, ctx.grad_buf1)
+        BridgeStan.log_density_gradient!(ctx.sm_prior, ctx.anchor, ctx.grad_buf2)
+        @. ctx.correction = (s - 1) * ctx.grad_buf2 - s * ctx.grad_buf1 + ctx.g_full_buf
+    end
+
+    function resample!(nsub)
+        _partial_shuffle!(ctx.perm, ctx.m)
+        _ccall_set_indices!(ctx)
+        if has_active_anchor(bank)
+            _recompute_correction_from_active!()
+        end
+    end
+
+    function update_anchor!(trace)
+        new_pos = Vector{Float64}(vec(Statistics.mean(trace)))
+        BridgeStan.log_density_gradient!(ctx.sm_full, new_pos, ctx.g_full_buf)
+
+        copyto!(ctx.anchor, new_pos)
+        BridgeStan.log_density_gradient!(ctx.sm_sub, ctx.anchor, ctx.grad_buf1)
+        BridgeStan.log_density_gradient!(ctx.sm_prior, ctx.anchor, ctx.grad_buf2)
+        correction = (s - 1) .* ctx.grad_buf2 .- s .* ctx.grad_buf1 .+ ctx.g_full_buf
+
+        add_anchor!(bank;
+            position=copy(new_pos),
+            full_gradient=copy(ctx.g_full_buf))
+
+        copyto!(ctx.correction, correction)
+    end
+
+    function select_fn!(x)
+        has_active_anchor(bank) || return
+        prev_idx = bank.active_idx
+        select_nearest!(bank, x)
+        if bank.active_idx != prev_idx
+            _recompute_correction_from_active!()
+        end
+    end
+
+    function neg_grad_full!(out::Vector{Float64}, θ::Vector{Float64})
+        BridgeStan.log_density_gradient!(ctx.sm_full, θ, out)
+        out .= .-out
+        return out
+    end
+
+    function neg_hvp_cv!(out::Vector{Float64}, θ::Vector{Float64}, v::Vector{Float64})
+        BridgeStan.log_density_hessian_vector_product!(ctx.sm_sub, θ, v, out)
+        BridgeStan.log_density_hessian_vector_product!(ctx.sm_prior, θ, v, ctx.hvp_buf)
+        @. out = -s * out - (1 - s) * ctx.hvp_buf
+        return out
+    end
+
+    grad = SubsampledGradient(
+        neg_grad_cv!, resample!, update_anchor!,
+        neg_grad_full!,
+        ctx.m, n_anchor_updates, true;
+        resample_dt
+    )
+    hvp = if hvp_mode == "scaled"
+        neg_hvp_cv!
+    elseif hvp_mode == "none"
+        nothing
+    else
+        error("Unknown hvp_mode: $hvp_mode. Use \"scaled\" or \"none\".")
+    end
+
+    adapter = AnchorBankAdapter(select_fn!, update_anchor!, 0.0, 0.0, true)
+    return PDMPModel(d, grad, hvp), d, adapter, bank
+end
+
+function _build_bss_model_bank_hcv(ctx::BridgeStanSubsamplingContext, n_anchor_updates::Int;
+                                   resample_dt::Float64=0.0, hvp_mode::String="scaled",
+                                   bank_capacity::Int=20)
+    s = ctx.N / ctx.m
+    d = Int(BridgeStan.param_unc_num(ctx.sm_full))
+    bank = AnchorBank(d; capacity=bank_capacity, use_hcv=true)
+    hvp_buf_hcv = zeros(d)
+    hess_buf = zeros(d * d)
+    hess_grad_buf = zeros(d)
+    hess_buf_prior = zeros(d * d)
+
+    function neg_grad_cv!(out::Vector{Float64}, θ::Vector{Float64})
+        BridgeStan.log_density_gradient!(ctx.sm_sub, θ, ctx.grad_buf1)
+        BridgeStan.log_density_gradient!(ctx.sm_prior, θ, ctx.grad_buf2)
+        @. out = -((1 - s) * ctx.grad_buf2 + s * ctx.grad_buf1 + ctx.correction)
+
+        if has_active_anchor(bank)
+            entry = active_entry(bank)
+            hcv = entry.hcv
+            if hcv !== nothing && hcv.enabled
+                hvp_at_anchor! = (hvp_out, v) -> begin
+                    BridgeStan.log_density_hessian_vector_product!(ctx.sm_sub, ctx.anchor, v, hvp_out)
+                end
+                apply_hcv_correction!(out, hcv, θ, ctx.anchor, hvp_at_anchor!, s, hvp_buf_hcv)
+            end
+        end
+        return out
+    end
+
+    function _recompute_correction_from_active!()
+        entry = active_entry(bank)
+        copyto!(ctx.anchor, entry.position)
+        copyto!(ctx.g_full_buf, entry.full_gradient)
+        BridgeStan.log_density_gradient!(ctx.sm_sub, ctx.anchor, ctx.grad_buf1)
+        BridgeStan.log_density_gradient!(ctx.sm_prior, ctx.anchor, ctx.grad_buf2)
+        @. ctx.correction = (s - 1) * ctx.grad_buf2 - s * ctx.grad_buf1 + ctx.g_full_buf
+    end
+
+    function resample!(nsub)
+        _partial_shuffle!(ctx.perm, ctx.m)
+        _ccall_set_indices!(ctx)
+        if has_active_anchor(bank)
+            _recompute_correction_from_active!()
+        end
+    end
+
+    function update_anchor!(trace)
+        new_pos = Vector{Float64}(vec(Statistics.mean(trace)))
+        BridgeStan.log_density_hessian!(ctx.sm_full, new_pos, ctx.g_full_buf, hess_buf)
+        copyto!(ctx.anchor, new_pos)
+        BridgeStan.log_density_gradient!(ctx.sm_sub, ctx.anchor, ctx.grad_buf1)
+        BridgeStan.log_density_gradient!(ctx.sm_prior, ctx.anchor, ctx.grad_buf2)
+        correction = (s - 1) .* ctx.grad_buf2 .- s .* ctx.grad_buf1 .+ ctx.g_full_buf
+
+        idx = add_anchor!(bank;
+            position=copy(new_pos),
+            full_gradient=copy(ctx.g_full_buf))
+
+        copyto!(ctx.correction, correction)
+
+        entry = bank.entries[idx]
+        if entry.hcv !== nothing
+            BridgeStan.log_density_hessian!(ctx.sm_prior, new_pos, hess_grad_buf, hess_buf_prior)
+            update_hcv!(entry.hcv, hess_buf, hess_buf_prior, s, d)
+        end
+    end
+
+    function select_fn!(x)
+        has_active_anchor(bank) || return
+        prev_idx = bank.active_idx
+        select_nearest!(bank, x)
+        if bank.active_idx != prev_idx
+            _recompute_correction_from_active!()
+        end
+    end
+
+    function neg_grad_full!(out::Vector{Float64}, θ::Vector{Float64})
+        BridgeStan.log_density_gradient!(ctx.sm_full, θ, out)
+        out .= .-out
+        return out
+    end
+
+    function neg_hvp_cv!(out::Vector{Float64}, θ::Vector{Float64}, v::Vector{Float64})
+        BridgeStan.log_density_hessian_vector_product!(ctx.sm_sub, θ, v, out)
+        BridgeStan.log_density_hessian_vector_product!(ctx.sm_prior, θ, v, ctx.hvp_buf)
+        @. out = -s * out - (1 - s) * ctx.hvp_buf
+        return out
+    end
+
+    grad = SubsampledGradient(
+        neg_grad_cv!, resample!, update_anchor!,
+        neg_grad_full!,
+        ctx.m, n_anchor_updates, true;
+        resample_dt
+    )
+    hvp = if hvp_mode == "scaled"
+        neg_hvp_cv!
+    elseif hvp_mode == "none"
+        nothing
+    else
+        error("Unknown hvp_mode: $hvp_mode. Use \"scaled\" or \"none\".")
+    end
+
+    adapter = AnchorBankAdapter(select_fn!, update_anchor!, 0.0, 0.0, true)
+    return PDMPModel(d, grad, hvp), d, adapter, bank
+end
+
 function _resolve_set_fn(lib_path::String)
     lib = Libc.Libdl.dlopen(lib_path, Libc.Libdl.RTLD_NOLOAD | Libc.Libdl.RTLD_GLOBAL)
     Libc.Libdl.dlsym(lib, :pdmp_set_subsample_indices)
@@ -627,7 +897,12 @@ function r_pdmp_brms_subsampled(
         threaded::Bool = false,
         compute_lp::Bool = false,
         resample_dt::Float64 = 0.0,
-        hvp_mode::String = "scaled"
+        hvp_mode::String = "scaled",
+        use_hcv::Bool = false,
+        use_anchor_bank::Bool = false,
+        bank_capacity::Int = 20,
+        use_fd_hvp::Bool = false,
+        post_warmup_simplify::Bool = false
     )
     lib_path_std = if endswith(stan_file, ".stan")
         BridgeStan.compile_model(stan_file)
@@ -665,23 +940,81 @@ function r_pdmp_brms_subsampled(
     )
     _ccall_set_indices!(ctx)
 
-    model, _ = _build_bss_model(ctx, n_anchor_updates; resample_dt, hvp_mode)
+    bank_adapter = nothing
+    bank = nothing
+    if use_anchor_bank && use_hcv
+        model, _, bank_adapter, bank = _build_bss_model_bank_hcv(ctx, n_anchor_updates;
+            resample_dt, hvp_mode, bank_capacity)
+    elseif use_anchor_bank
+        model, _, bank_adapter, bank = _build_bss_model_bank(ctx, n_anchor_updates;
+            resample_dt, hvp_mode, bank_capacity)
+    elseif use_hcv
+        model, _ = _build_bss_model_hcv(ctx, n_anchor_updates; resample_dt, hvp_mode)
+    else
+        model, _ = _build_bss_model(ctx, n_anchor_updates; resample_dt, hvp_mode)
+    end
 
     fmean = isempty(flow_mean) ? zeros(d) : Vector{Float64}(flow_mean)
     prec = isempty(flow_cov) ? Matrix{Float64}(I, d, d) : inv(Symmetric(Matrix{Float64}(flow_cov)))
     flow = build_flow(flow_type, prec, fmean; adaptive_scheme)
-    alg = build_algorithm(algorithm_type; c0, d, grid_n, grid_t_max)
+    alg = build_algorithm(algorithm_type; c0, d, grid_n, grid_t_max, use_fd_hvp, post_warmup_simplify)
 
-    models = typeof(model)[model]
-    for i in 2:n_chains
-        ctx_i = _new_bss_context(lib_path_std, lib_path_ext, set_fn,
-                                 data_full_file, data_prior_file,
-                                 N_int, m, d)
-        model_i, _ = _build_bss_model(ctx_i, n_anchor_updates; resample_dt, hvp_mode)
-        push!(models, model_i)
+    adapter = if bank_adapter !== nothing
+        PDMPSamplers.default_adapter(flow, model.grad, bank_adapter, t_warmup / 10, t_warmup, t0)
+    else
+        nothing
     end
-    chains = pdmp_sample(d, flow, models, alg, t0, T, t_warmup;
-                         progress=show_progress, threaded)
+
+    function _build_chain_model(ctx_i)
+        if use_anchor_bank && use_hcv
+            return _build_bss_model_bank_hcv(ctx_i, n_anchor_updates;
+                resample_dt, hvp_mode, bank_capacity)
+        elseif use_anchor_bank
+            return _build_bss_model_bank(ctx_i, n_anchor_updates;
+                resample_dt, hvp_mode, bank_capacity)
+        elseif use_hcv
+            m_i, d_i = _build_bss_model_hcv(ctx_i, n_anchor_updates; resample_dt, hvp_mode)
+            return m_i, d_i, nothing, nothing
+        else
+            m_i, d_i = _build_bss_model(ctx_i, n_anchor_updates; resample_dt, hvp_mode)
+            return m_i, d_i, nothing, nothing
+        end
+    end
+
+    if !use_anchor_bank
+        models = typeof(model)[model]
+        for i in 2:n_chains
+            ctx_i = _new_bss_context(lib_path_std, lib_path_ext, set_fn,
+                                     data_full_file, data_prior_file,
+                                     N_int, m, d)
+            model_i, _ = _build_chain_model(ctx_i)
+            push!(models, model_i)
+        end
+        chains = pdmp_sample(d, flow, models, alg, t0, T, t_warmup;
+                             progress=show_progress, threaded)
+    elseif n_chains == 1
+        chains = pdmp_sample(d, flow, [model], alg, t0, T, t_warmup;
+                             progress=show_progress, adapter)
+    else
+        all_traces = []
+        all_stats = []
+        for i in 1:n_chains
+            if i == 1
+                m_i, a_i = model, adapter
+            else
+                ctx_i = _new_bss_context(lib_path_std, lib_path_ext, set_fn,
+                                         data_full_file, data_prior_file,
+                                         N_int, m, d)
+                m_i, _, ba_i, _ = _build_chain_model(ctx_i)
+                a_i = PDMPSamplers.default_adapter(flow, m_i.grad, ba_i, t_warmup / 10, t_warmup, t0)
+            end
+            ch_i = pdmp_sample(d, deepcopy(flow), [m_i], alg, t0, T, t_warmup;
+                               progress=(i == 1 && show_progress), adapter=a_i)
+            push!(all_traces, ch_i.traces[1])
+            push!(all_stats, ch_i.stats[1])
+        end
+        chains = PDMPChains(all_traces, all_stats)
+    end
 
     stats = extract_stats(chains)
     sm_constrain = sm_full
@@ -722,17 +1055,19 @@ function r_pdmp_stan_for_brms(
         show_progress::Bool = true,
         n_chains::Int = 1,
         threaded::Bool = false,
-        compute_lp::Bool = false
+        compute_lp::Bool = false,
+        use_fd_hvp::Bool = false,
+        post_warmup_simplify::Bool = false
     )
     sm = BridgeStan.StanModel(path_to_stan_model, path_to_stan_data; warn=false)
-    model = PDMPModel(sm)
+    model = PDMPModel(sm; hvp = !use_fd_hvp)
     d = model.d
 
     fmean = isempty(flow_mean) ? zeros(d) : flow_mean
     prec = isempty(flow_cov) ? Diagonal(ones(d)) : _to_precision(flow_cov, d)
 
     flow = build_flow(flow_type, prec, fmean; adaptive_scheme)
-    alg = build_algorithm(algorithm_type; c0, d, grid_n, grid_t_max)
+    alg = build_algorithm(algorithm_type; c0, d, grid_n, grid_t_max, use_fd_hvp, post_warmup_simplify)
 
     chains = pdmp_sample(d, flow, model, alg, t0, T, t_warmup;
                          progress = show_progress, n_chains, threaded)

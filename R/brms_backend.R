@@ -60,6 +60,11 @@
 #'   thinning mode after warmup when the sampler is well-adapted
 #'   (default: FALSE). Activates when the reflection ratio is below 30\%
 #'   and at least 10 events have been observed.
+#' @param use_fd_hcv Logical; use finite-difference approximation for the
+#'   HVP inside the HCV correction (default: FALSE). Replaces the exact
+#'   BridgeStan HVP at the anchor with a cheaper gradient-based FD
+#'   approximation. Also disables HVP for grid thinning. Only used when
+#'   `use_hcv` is TRUE.
 #' @param stanvars Optional `stanvar` object for custom Stan code.
 #' @param sample_prior Currently only `"no"` is supported.
 #' @param save_model Optional file path to save the generated Stan code.
@@ -111,6 +116,7 @@ brm_pdmp <- function(
     bank_capacity = 20L,
     use_fd_hvp = FALSE,
     post_warmup_simplify = FALSE,
+    use_fd_hcv = FALSE,
     stanvars = NULL, sample_prior = "no",
     save_model = NULL,
     ...
@@ -247,7 +253,8 @@ brm_pdmp <- function(
       use_anchor_bank = use_anchor_bank,
       bank_capacity = as.integer(bank_capacity),
       use_fd_hvp = use_fd_hvp,
-      post_warmup_simplify = post_warmup_simplify
+      post_warmup_simplify = post_warmup_simplify,
+      use_fd_hcv = use_fd_hcv
     )
   } else {
     jl_result <- JuliaCall::julia_call(

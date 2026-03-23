@@ -576,7 +576,8 @@ function _build_bss_model(ctx::BridgeStanSubsamplingContext, n_anchor_updates::I
 end
 
 function _build_bss_model_hcv(ctx::BridgeStanSubsamplingContext, n_anchor_updates::Int;
-                              resample_dt::Float64=0.0, hvp_mode::String="scaled")
+                              resample_dt::Float64=0.0, hvp_mode::String="scaled",
+                              use_fd_hcv::Bool=false)
     s = ctx.N / ctx.m
     d = Int(BridgeStan.param_unc_num(ctx.sm_full))
     anchor_set = Ref(false)
@@ -585,6 +586,9 @@ function _build_bss_model_hcv(ctx::BridgeStanSubsamplingContext, n_anchor_update
     hess_buf = zeros(d * d)
     hess_grad_buf = zeros(d)
     hess_buf_prior = zeros(d * d)
+    grad_sub_anchor = zeros(d)
+    fd_buf = zeros(d)
+    h_fd = 1e-5
 
     function neg_grad_cv!(out::Vector{Float64}, θ::Vector{Float64})
         BridgeStan.log_density_gradient!(ctx.sm_sub, θ, ctx.grad_buf1)
@@ -592,8 +596,19 @@ function _build_bss_model_hcv(ctx::BridgeStanSubsamplingContext, n_anchor_update
         @. out = -((1 - s) * ctx.grad_buf2 + s * ctx.grad_buf1 + ctx.correction)
 
         if hcv.enabled
-            hvp_at_anchor! = (hvp_out, v) -> begin
-                BridgeStan.log_density_hessian_vector_product!(ctx.sm_sub, ctx.anchor, v, hvp_out)
+            hvp_at_anchor! = if use_fd_hcv
+                (hvp_out, v) -> begin
+                    vnorm = norm(v)
+                    iszero(vnorm) && (hvp_out .= 0.0; return)
+                    h_scaled = h_fd * max(1.0, vnorm)
+                    @. fd_buf = ctx.anchor + (h_scaled / vnorm) * v
+                    BridgeStan.log_density_gradient!(ctx.sm_sub, fd_buf, hvp_out)
+                    @. hvp_out = (hvp_out - grad_sub_anchor) * (vnorm / h_scaled)
+                end
+            else
+                (hvp_out, v) -> begin
+                    BridgeStan.log_density_hessian_vector_product!(ctx.sm_sub, ctx.anchor, v, hvp_out)
+                end
             end
             apply_hcv_correction!(out, hcv, θ, ctx.anchor, hvp_at_anchor!, s, hvp_buf_hcv)
         end
@@ -602,6 +617,7 @@ function _build_bss_model_hcv(ctx::BridgeStanSubsamplingContext, n_anchor_update
 
     function _recompute_correction!()
         BridgeStan.log_density_gradient!(ctx.sm_sub, ctx.anchor, ctx.grad_buf1)
+        copyto!(grad_sub_anchor, ctx.grad_buf1)
         BridgeStan.log_density_gradient!(ctx.sm_prior, ctx.anchor, ctx.grad_buf2)
         @. ctx.correction = (s - 1) * ctx.grad_buf2 - s * ctx.grad_buf1 + ctx.g_full_buf
     end
@@ -643,7 +659,9 @@ function _build_bss_model_hcv(ctx::BridgeStanSubsamplingContext, n_anchor_update
         ctx.m, n_anchor_updates, true;
         resample_dt
     )
-    hvp = if hvp_mode == "scaled"
+    hvp = if use_fd_hcv
+        nothing
+    elseif hvp_mode == "scaled"
         neg_hvp_cv!
     elseif hvp_mode == "none"
         nothing
@@ -742,7 +760,7 @@ end
 
 function _build_bss_model_bank_hcv(ctx::BridgeStanSubsamplingContext, n_anchor_updates::Int;
                                    resample_dt::Float64=0.0, hvp_mode::String="scaled",
-                                   bank_capacity::Int=20)
+                                   bank_capacity::Int=20, use_fd_hcv::Bool=false)
     s = ctx.N / ctx.m
     d = Int(BridgeStan.param_unc_num(ctx.sm_full))
     bank = AnchorBank(d; capacity=bank_capacity, use_hcv=true)
@@ -750,6 +768,9 @@ function _build_bss_model_bank_hcv(ctx::BridgeStanSubsamplingContext, n_anchor_u
     hess_buf = zeros(d * d)
     hess_grad_buf = zeros(d)
     hess_buf_prior = zeros(d * d)
+    grad_sub_anchor = zeros(d)
+    fd_buf = zeros(d)
+    h_fd = 1e-5
 
     function neg_grad_cv!(out::Vector{Float64}, θ::Vector{Float64})
         BridgeStan.log_density_gradient!(ctx.sm_sub, θ, ctx.grad_buf1)
@@ -760,8 +781,19 @@ function _build_bss_model_bank_hcv(ctx::BridgeStanSubsamplingContext, n_anchor_u
             entry = active_entry(bank)
             hcv = entry.hcv
             if hcv !== nothing && hcv.enabled
-                hvp_at_anchor! = (hvp_out, v) -> begin
-                    BridgeStan.log_density_hessian_vector_product!(ctx.sm_sub, ctx.anchor, v, hvp_out)
+                hvp_at_anchor! = if use_fd_hcv
+                    (hvp_out, v) -> begin
+                        vnorm = norm(v)
+                        iszero(vnorm) && (hvp_out .= 0.0; return)
+                        h_scaled = h_fd * max(1.0, vnorm)
+                        @. fd_buf = ctx.anchor + (h_scaled / vnorm) * v
+                        BridgeStan.log_density_gradient!(ctx.sm_sub, fd_buf, hvp_out)
+                        @. hvp_out = (hvp_out - grad_sub_anchor) * (vnorm / h_scaled)
+                    end
+                else
+                    (hvp_out, v) -> begin
+                        BridgeStan.log_density_hessian_vector_product!(ctx.sm_sub, ctx.anchor, v, hvp_out)
+                    end
                 end
                 apply_hcv_correction!(out, hcv, θ, ctx.anchor, hvp_at_anchor!, s, hvp_buf_hcv)
             end
@@ -774,6 +806,7 @@ function _build_bss_model_bank_hcv(ctx::BridgeStanSubsamplingContext, n_anchor_u
         copyto!(ctx.anchor, entry.position)
         copyto!(ctx.g_full_buf, entry.full_gradient)
         BridgeStan.log_density_gradient!(ctx.sm_sub, ctx.anchor, ctx.grad_buf1)
+        copyto!(grad_sub_anchor, ctx.grad_buf1)
         BridgeStan.log_density_gradient!(ctx.sm_prior, ctx.anchor, ctx.grad_buf2)
         @. ctx.correction = (s - 1) * ctx.grad_buf2 - s * ctx.grad_buf1 + ctx.g_full_buf
     end
@@ -791,6 +824,7 @@ function _build_bss_model_bank_hcv(ctx::BridgeStanSubsamplingContext, n_anchor_u
         BridgeStan.log_density_hessian!(ctx.sm_full, new_pos, ctx.g_full_buf, hess_buf)
         copyto!(ctx.anchor, new_pos)
         BridgeStan.log_density_gradient!(ctx.sm_sub, ctx.anchor, ctx.grad_buf1)
+        copyto!(grad_sub_anchor, ctx.grad_buf1)
         BridgeStan.log_density_gradient!(ctx.sm_prior, ctx.anchor, ctx.grad_buf2)
         correction = (s - 1) .* ctx.grad_buf2 .- s .* ctx.grad_buf1 .+ ctx.g_full_buf
 
@@ -835,7 +869,9 @@ function _build_bss_model_bank_hcv(ctx::BridgeStanSubsamplingContext, n_anchor_u
         ctx.m, n_anchor_updates, true;
         resample_dt
     )
-    hvp = if hvp_mode == "scaled"
+    hvp = if use_fd_hcv
+        nothing
+    elseif hvp_mode == "scaled"
         neg_hvp_cv!
     elseif hvp_mode == "none"
         nothing
@@ -902,7 +938,8 @@ function r_pdmp_brms_subsampled(
         use_anchor_bank::Bool = false,
         bank_capacity::Int = 20,
         use_fd_hvp::Bool = false,
-        post_warmup_simplify::Bool = false
+        post_warmup_simplify::Bool = false,
+        use_fd_hcv::Bool = false
     )
     lib_path_std = if endswith(stan_file, ".stan")
         BridgeStan.compile_model(stan_file)
@@ -944,12 +981,12 @@ function r_pdmp_brms_subsampled(
     bank = nothing
     if use_anchor_bank && use_hcv
         model, _, bank_adapter, bank = _build_bss_model_bank_hcv(ctx, n_anchor_updates;
-            resample_dt, hvp_mode, bank_capacity)
+            resample_dt, hvp_mode, bank_capacity, use_fd_hcv)
     elseif use_anchor_bank
         model, _, bank_adapter, bank = _build_bss_model_bank(ctx, n_anchor_updates;
             resample_dt, hvp_mode, bank_capacity)
     elseif use_hcv
-        model, _ = _build_bss_model_hcv(ctx, n_anchor_updates; resample_dt, hvp_mode)
+        model, _ = _build_bss_model_hcv(ctx, n_anchor_updates; resample_dt, hvp_mode, use_fd_hcv)
     else
         model, _ = _build_bss_model(ctx, n_anchor_updates; resample_dt, hvp_mode)
     end
@@ -968,12 +1005,12 @@ function r_pdmp_brms_subsampled(
     function _build_chain_model(ctx_i)
         if use_anchor_bank && use_hcv
             return _build_bss_model_bank_hcv(ctx_i, n_anchor_updates;
-                resample_dt, hvp_mode, bank_capacity)
+                resample_dt, hvp_mode, bank_capacity, use_fd_hcv)
         elseif use_anchor_bank
             return _build_bss_model_bank(ctx_i, n_anchor_updates;
                 resample_dt, hvp_mode, bank_capacity)
         elseif use_hcv
-            m_i, d_i = _build_bss_model_hcv(ctx_i, n_anchor_updates; resample_dt, hvp_mode)
+            m_i, d_i = _build_bss_model_hcv(ctx_i, n_anchor_updates; resample_dt, hvp_mode, use_fd_hcv)
             return m_i, d_i, nothing, nothing
         else
             m_i, d_i = _build_bss_model(ctx_i, n_anchor_updates; resample_dt, hvp_mode)

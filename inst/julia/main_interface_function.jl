@@ -540,7 +540,7 @@ function _build_bss_model(ctx::BridgeStanSubsamplingContext, n_anchor_updates::I
     end
 
     function update_anchor!(trace)
-        ctx.anchor .= Vector{Float64}(vec(Statistics.mean(trace)))
+        Statistics.mean!(ctx.anchor, trace)
         BridgeStan.log_density_gradient!(ctx.sm_full, ctx.anchor, ctx.g_full_buf)
         _recompute_correction!()
         anchor_set[] = true
@@ -590,27 +590,30 @@ function _build_bss_model_hcv(ctx::BridgeStanSubsamplingContext, n_anchor_update
     fd_buf = zeros(d)
     h_fd = 1e-5
 
+    function hvp_at_anchor_fd!(hvp_out::Vector{Float64}, v::Vector{Float64})
+        vnorm = norm(v)
+        iszero(vnorm) && (hvp_out .= 0.0; return)
+        h_scaled = h_fd * max(1.0, vnorm)
+        @. fd_buf = ctx.anchor + (h_scaled / vnorm) * v
+        BridgeStan.log_density_gradient!(ctx.sm_sub, fd_buf, hvp_out)
+        @. hvp_out = (hvp_out - grad_sub_anchor) * (vnorm / h_scaled)
+    end
+
+    function hvp_at_anchor_exact!(hvp_out::Vector{Float64}, v::Vector{Float64})
+        BridgeStan.log_density_hessian_vector_product!(ctx.sm_sub, ctx.anchor, v, hvp_out)
+    end
+
     function neg_grad_cv!(out::Vector{Float64}, θ::Vector{Float64})
         BridgeStan.log_density_gradient!(ctx.sm_sub, θ, ctx.grad_buf1)
         BridgeStan.log_density_gradient!(ctx.sm_prior, θ, ctx.grad_buf2)
         @. out = -((1 - s) * ctx.grad_buf2 + s * ctx.grad_buf1 + ctx.correction)
 
         if hcv.enabled
-            hvp_at_anchor! = if use_fd_hcv
-                (hvp_out, v) -> begin
-                    vnorm = norm(v)
-                    iszero(vnorm) && (hvp_out .= 0.0; return)
-                    h_scaled = h_fd * max(1.0, vnorm)
-                    @. fd_buf = ctx.anchor + (h_scaled / vnorm) * v
-                    BridgeStan.log_density_gradient!(ctx.sm_sub, fd_buf, hvp_out)
-                    @. hvp_out = (hvp_out - grad_sub_anchor) * (vnorm / h_scaled)
-                end
+            if use_fd_hcv
+                apply_hcv_correction!(out, hcv, θ, ctx.anchor, hvp_at_anchor_fd!, s, hvp_buf_hcv)
             else
-                (hvp_out, v) -> begin
-                    BridgeStan.log_density_hessian_vector_product!(ctx.sm_sub, ctx.anchor, v, hvp_out)
-                end
+                apply_hcv_correction!(out, hcv, θ, ctx.anchor, hvp_at_anchor_exact!, s, hvp_buf_hcv)
             end
-            apply_hcv_correction!(out, hcv, θ, ctx.anchor, hvp_at_anchor!, s, hvp_buf_hcv)
         end
         return out
     end
@@ -631,7 +634,7 @@ function _build_bss_model_hcv(ctx::BridgeStanSubsamplingContext, n_anchor_update
     end
 
     function update_anchor!(trace)
-        ctx.anchor .= Vector{Float64}(vec(Statistics.mean(trace)))
+        Statistics.mean!(ctx.anchor, trace)
         BridgeStan.log_density_hessian!(ctx.sm_full, ctx.anchor, ctx.g_full_buf, hess_buf)
         _recompute_correction!()
         anchor_set[] = true
@@ -703,16 +706,15 @@ function _build_bss_model_bank(ctx::BridgeStanSubsamplingContext, n_anchor_updat
     end
 
     function update_anchor!(trace)
-        new_pos = Vector{Float64}(vec(Statistics.mean(trace)))
-        BridgeStan.log_density_gradient!(ctx.sm_full, new_pos, ctx.g_full_buf)
+        Statistics.mean!(ctx.anchor, trace)
+        BridgeStan.log_density_gradient!(ctx.sm_full, ctx.anchor, ctx.g_full_buf)
 
-        copyto!(ctx.anchor, new_pos)
         BridgeStan.log_density_gradient!(ctx.sm_sub, ctx.anchor, ctx.grad_buf1)
         BridgeStan.log_density_gradient!(ctx.sm_prior, ctx.anchor, ctx.grad_buf2)
         correction = (s - 1) .* ctx.grad_buf2 .- s .* ctx.grad_buf1 .+ ctx.g_full_buf
 
         add_anchor!(bank;
-            position=copy(new_pos),
+            position=copy(ctx.anchor),
             full_gradient=copy(ctx.g_full_buf))
 
         copyto!(ctx.correction, correction)
@@ -772,6 +774,19 @@ function _build_bss_model_bank_hcv(ctx::BridgeStanSubsamplingContext, n_anchor_u
     fd_buf = zeros(d)
     h_fd = 1e-5
 
+    function hvp_at_anchor_fd!(hvp_out::Vector{Float64}, v::Vector{Float64})
+        vnorm = norm(v)
+        iszero(vnorm) && (hvp_out .= 0.0; return)
+        h_scaled = h_fd * max(1.0, vnorm)
+        @. fd_buf = ctx.anchor + (h_scaled / vnorm) * v
+        BridgeStan.log_density_gradient!(ctx.sm_sub, fd_buf, hvp_out)
+        @. hvp_out = (hvp_out - grad_sub_anchor) * (vnorm / h_scaled)
+    end
+
+    function hvp_at_anchor_exact!(hvp_out::Vector{Float64}, v::Vector{Float64})
+        BridgeStan.log_density_hessian_vector_product!(ctx.sm_sub, ctx.anchor, v, hvp_out)
+    end
+
     function neg_grad_cv!(out::Vector{Float64}, θ::Vector{Float64})
         BridgeStan.log_density_gradient!(ctx.sm_sub, θ, ctx.grad_buf1)
         BridgeStan.log_density_gradient!(ctx.sm_prior, θ, ctx.grad_buf2)
@@ -781,21 +796,11 @@ function _build_bss_model_bank_hcv(ctx::BridgeStanSubsamplingContext, n_anchor_u
             entry = active_entry(bank)
             hcv = entry.hcv
             if hcv !== nothing && hcv.enabled
-                hvp_at_anchor! = if use_fd_hcv
-                    (hvp_out, v) -> begin
-                        vnorm = norm(v)
-                        iszero(vnorm) && (hvp_out .= 0.0; return)
-                        h_scaled = h_fd * max(1.0, vnorm)
-                        @. fd_buf = ctx.anchor + (h_scaled / vnorm) * v
-                        BridgeStan.log_density_gradient!(ctx.sm_sub, fd_buf, hvp_out)
-                        @. hvp_out = (hvp_out - grad_sub_anchor) * (vnorm / h_scaled)
-                    end
+                if use_fd_hcv
+                    apply_hcv_correction!(out, hcv, θ, ctx.anchor, hvp_at_anchor_fd!, s, hvp_buf_hcv)
                 else
-                    (hvp_out, v) -> begin
-                        BridgeStan.log_density_hessian_vector_product!(ctx.sm_sub, ctx.anchor, v, hvp_out)
-                    end
+                    apply_hcv_correction!(out, hcv, θ, ctx.anchor, hvp_at_anchor_exact!, s, hvp_buf_hcv)
                 end
-                apply_hcv_correction!(out, hcv, θ, ctx.anchor, hvp_at_anchor!, s, hvp_buf_hcv)
             end
         end
         return out
@@ -820,23 +825,22 @@ function _build_bss_model_bank_hcv(ctx::BridgeStanSubsamplingContext, n_anchor_u
     end
 
     function update_anchor!(trace)
-        new_pos = Vector{Float64}(vec(Statistics.mean(trace)))
-        BridgeStan.log_density_hessian!(ctx.sm_full, new_pos, ctx.g_full_buf, hess_buf)
-        copyto!(ctx.anchor, new_pos)
+        Statistics.mean!(ctx.anchor, trace)
+        BridgeStan.log_density_hessian!(ctx.sm_full, ctx.anchor, ctx.g_full_buf, hess_buf)
         BridgeStan.log_density_gradient!(ctx.sm_sub, ctx.anchor, ctx.grad_buf1)
         copyto!(grad_sub_anchor, ctx.grad_buf1)
         BridgeStan.log_density_gradient!(ctx.sm_prior, ctx.anchor, ctx.grad_buf2)
         correction = (s - 1) .* ctx.grad_buf2 .- s .* ctx.grad_buf1 .+ ctx.g_full_buf
 
         idx = add_anchor!(bank;
-            position=copy(new_pos),
+            position=copy(ctx.anchor),
             full_gradient=copy(ctx.g_full_buf))
 
         copyto!(ctx.correction, correction)
 
         entry = bank.entries[idx]
         if entry.hcv !== nothing
-            BridgeStan.log_density_hessian!(ctx.sm_prior, new_pos, hess_grad_buf, hess_buf_prior)
+            BridgeStan.log_density_hessian!(ctx.sm_prior, ctx.anchor, hess_grad_buf, hess_buf_prior)
             update_hcv!(entry.hcv, hess_buf, hess_buf_prior, s, d)
         end
     end

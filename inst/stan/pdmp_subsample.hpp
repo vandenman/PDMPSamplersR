@@ -29,6 +29,14 @@ extern "C" {
     }
 }
 
+inline int pdmp_get_subsample_size(std::ostream* pstream__) {
+    return pdmp_subsample::m_;
+}
+
+inline int pdmp_get_subsample_index(int n, std::ostream* pstream__) {
+    return pdmp_subsample::indices_[n - 1] + 1;
+}
+
 template <typename T>
 inline const Eigen::VectorXd& get_subsampled_Y_real(const T& Y_full, std::ostream* pstream__) {
     int m = pdmp_subsample::m_;
@@ -58,6 +66,16 @@ inline const Eigen::MatrixXd& get_subsampled_Xc(const T& Xc_full, std::ostream* 
         pdmp_subsample::Xc_buf_.row(i) = Xc_full.row(pdmp_subsample::indices_[i]);
     }
     return pdmp_subsample::Xc_buf_;
+}
+
+template <typename T>
+inline auto get_subsampled_vector(const T& v_full, std::ostream* pstream__) {
+    int m = pdmp_subsample::m_;
+    Eigen::Matrix<typename T::Scalar, Eigen::Dynamic, 1> v_sub(m);
+    for (int i = 0; i < m; ++i) {
+        v_sub(i) = v_full(pdmp_subsample::indices_[i]);
+    }
+    return v_sub;
 }
 
 #endif

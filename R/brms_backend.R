@@ -178,23 +178,11 @@ brm_pdmp <- function(
                           sample_prior = sample_prior, ...)
 
   if (subsampled) {
-    if (any(grepl("^(J|Z)_", names(sdata))))
-      cli::cli_abort(c(
-        "Subsampled gradients currently support fixed-effects models only.",
-        "i" = "Remove random effects from the formula, or omit {.arg subsample_size} to use full-data gradients."
-      ))
-    scode <- fix_brms_stancode(scode)
-    scode_ext <- inject_ext_cpp_stancode(scode)
-    if (!is.null(sdata$means_X)) {
-      means_X <- sdata$means_X
-    } else {
-      means_X <- array(colMeans(sdata$X[, -1, drop = FALSE]))
-    }
+    scode_ext <- make_ext_cpp_stancode(scode, formula, data, family,
+                                       prior, stanvars, sample_prior, ...)
     Y_full <- as.numeric(sdata$Y)
     X_full <- sdata$X
-    sdata_full <- sdata
-    sdata_full$means_X <- means_X
-    sdata_prior <- make_prior_standata(sdata, means_X)
+    sdata_prior <- make_prior_standata(sdata)
   }
 
   empty_fit <- brms::brm(formula, data = data, family = family,
@@ -207,7 +195,7 @@ brm_pdmp <- function(
   if (subsampled) {
     stan_file_ext <- cached_stan_model(scode_ext)
     data_full_file <- tempfile(fileext = ".json")
-    write_stan_json(sdata_full, data_full_file)
+    write_stan_json(sdata, data_full_file)
     data_prior_file <- tempfile(fileext = ".json")
     write_stan_json(sdata_prior, data_prior_file)
   } else {

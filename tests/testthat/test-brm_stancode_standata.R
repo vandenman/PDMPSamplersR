@@ -28,25 +28,15 @@ test_that("brm_stancode with subsampling returns a list with standard and ext_cp
   expect_true(is.character(result$ext_cpp))
 })
 
-test_that("brm_stancode standard variant moves means_X to data block", {
+test_that("brm_stancode standard variant is identical to brms::stancode", {
   skip_if_no_brms()
 
   df <- data.frame(y = rnorm(50), x = rnorm(50))
   original <- brms::stancode(y ~ x, data = df)
   result <- brm_stancode(y ~ x, data = df, subsample_size = 10L)
-  modified <- result$standard
 
-  expect_false(identical(original, modified))
-
-  lines <- strsplit(modified, "\n")[[1]]
-  data_start <- grep("^data\\s*\\{", lines)
-  td_start <- grep("^transformed data\\s*\\{", lines)
-
-  decl_line <- grep("vector\\[Kc\\] means_X", lines)
-  expect_length(decl_line, 1)
-  expect_true(decl_line > data_start & decl_line < td_start)
-
-  expect_false(any(grepl("means_X\\[i - 1\\] = mean\\(X", modified)))
+  expect_identical(result$standard, original)
+  expect_false(identical(result$ext_cpp, original))
 })
 
 test_that("brm_stancode with subsampling works for bernoulli", {
@@ -151,14 +141,13 @@ test_that("brm_standata rejects subsample_size >= nrow(data)", {
   )
 })
 
-test_that("brm_standata rejects random effects with subsampling", {
+test_that("brm_standata accepts random effects with subsampling", {
   skip_if_no_brms()
 
   df <- data.frame(y = rnorm(20), x = rnorm(20), g = rep(1:4, each = 5))
-  expect_error(
-    brm_standata(y ~ x + (1 | g), data = df, subsample_size = 5L),
-    "fixed-effects"
-  )
+  result <- brm_standata(y ~ x + (1 | g), data = df, subsample_size = 5L)
+  expect_true(is.list(result))
+  expect_named(result, c("full", "prior", "subsample"))
 })
 
 test_that("brm_standata means_X matches column means of X", {

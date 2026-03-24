@@ -44,7 +44,7 @@ jobs:
           # see https://github.com/quarto-dev/quarto-r/issues/217
           # JuliaCall dev version needed for libunwind fix (PR #265)
           # that prevents segfaults on Ubuntu 24.04; CRAN 0.17.6 predates this
-          extra-packages: any::rcmdcheck, github::Non-Contradiction/JuliaCall, local::.
+          extra-packages: any::rcmdcheck, any::BH, any::RcppEigen, github::Non-Contradiction/JuliaCall, local::.
           needs: check
 
       - name: Install Julia
@@ -56,6 +56,15 @@ jobs:
       - name: Cache Julia packages
         if: matrix.config.julia
         uses: julia-actions/cache@v2
+
+      - name: Cache PDMPSamplersR artifacts
+        if: matrix.config.julia
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/PDMPSamplersR
+          key: ${{ runner.os }}-pdmpsamplersr-cache-${{ hashFiles('DESCRIPTION', '.github/workflows/R-CMD-check.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-pdmpsamplersr-cache-
 
       - name: Configure RCall Julia preferences
         if: matrix.config.julia
@@ -118,7 +127,6 @@ jobs:
             import Pkg
             Pkg.add(url="https://github.com/vandenman/PDMPSamplers.jl")
             Pkg.add("BridgeStan")
-            Pkg.update()
             Pkg.precompile()
             using PDMPSamplers, LinearAlgebra, BridgeStan
             @info "Pre-compilation and loading successful"
@@ -132,6 +140,14 @@ jobs:
           pdmpsamplers_setup()
 
       - uses: r-lib/actions/check-r-package@v2
+        if: matrix.config.os == 'macOS-latest'
+        with:
+          upload-snapshots: true
+          build_args: 'c("--no-manual", "--no-build-vignettes", "--compact-vignettes=gs+qpdf")'
+          args: 'c("--no-manual", "--as-cran", "--ignore-vignettes")'
+
+      - uses: r-lib/actions/check-r-package@v2
+        if: matrix.config.os != 'macOS-latest'
         with:
           upload-snapshots: true
           build_args: 'c("--no-manual", "--compact-vignettes=gs+qpdf")'

@@ -1,42 +1,4 @@
-fix_brms_stancode <- function(stancode) {
-  lines <- strsplit(stancode, "\n")[[1]]
-  n <- length(lines)
-
-  td_start <- grep("^transformed data\\s*\\{", lines)
-  if (length(td_start) == 0) return(stancode)
-
-  means_decl <- grep("^\\s*vector\\[Kc\\] means_X;", lines)
-  means_assign <- grep("means_X\\[i - 1\\] = mean\\(X\\[, i\\]\\);", lines)
-  if (length(means_decl) == 0 || length(means_assign) == 0) return(stancode)
-
-  data_close <- grep("^\\s*int prior_only;", lines)
-  if (length(data_close) == 0) {
-    data_close <- grep("^\\}", lines)
-    data_close <- data_close[data_close < td_start[1]]
-    if (length(data_close) == 0) return(stancode)
-    data_close <- max(data_close)
-  } else {
-    data_close <- data_close[1]
-  }
-
-  new_lines <- character(0)
-  skip <- integer(0)
-  skip <- c(means_decl[1], means_assign[1])
-  inserted <- FALSE
-
-  for (i in seq_len(n)) {
-    if (i %in% skip) next
-    new_lines <- c(new_lines, lines[i])
-    if (i == data_close && !inserted) {
-      new_lines <- c(new_lines, "  vector[Kc] means_X;  // column means of X (fixed for subsampling)")
-      inserted <- TRUE
-    }
-  }
-
-  paste(new_lines, collapse = "\n")
-}
-
-subset_standata <- function(sdata, indices, means_X) {
+subset_standata <- function(sdata, indices) {
   N_orig  <- sdata$N
   non_obs <- c("N", "K", "Kc", "prior_only", "means_X")
   sub     <- sdata
@@ -51,11 +13,10 @@ subset_standata <- function(sdata, indices, means_X) {
       sub[[nm]] <- sub_val
     }
   }
-  sub$means_X <- means_X
   sub
 }
 
-make_prior_standata <- function(sdata, means_X) {
+make_prior_standata <- function(sdata) {
   N_orig  <- sdata$N
   non_obs <- c("N", "K", "Kc", "prior_only", "means_X")
   prior   <- sdata
@@ -68,7 +29,6 @@ make_prior_standata <- function(sdata, means_X) {
       prior[[nm]] <- array(val[1L])
     }
   }
-  prior$means_X  <- means_X
   prior$prior_only <- 1L
   prior
 }
@@ -98,16 +58,61 @@ inject_ext_cpp_stancode <- function(stancode) {
     stancode
   )
 
-  stancode <- gsub(
+  gsub(
     "(_glm_lp[dm]f\\()([^|]+)(\\|\\s*)Xc,",
     paste0("\\1", y_getter, "(\\2) \\3get_subsampled_Xc(Xc),"),
     stancode
   )
-  stancode
 }
 
 hpp_path <- function() {
   system.file("stan", "pdmp_subsample.hpp", package = "PDMPSamplersR")
+}
+
+brms_has_subsample <- function() {
+  "subsample" %in% names(formals(brms:::stancode.default))
+}
+
+pdmp_subsampling <- function(stancode) {
+  y_is_int <- grepl("array\\[N\\] int Y;", stancode)
+  y_getter <- if (y_is_int) "get_subsampled_Y_int" else "get_subsampled_Y_real"
+  brms::subsampling(
+    size_fn = "pdmp_get_subsample_size",
+    index_fn = "pdmp_get_subsample_index",
+    wrap = list(Y = y_getter, Xc = "get_subsampled_Xc")
+  )
+}
+
+pdmp_function_decls <- function(stancode) {
+  y_is_int <- grepl("array\\[N\\] int Y;", stancode)
+  y_decl <- if (y_is_int) {
+    "  array[] int get_subsampled_Y_int(array[] int Y_full);"
+  } else {
+    "  vector get_subsampled_Y_real(vector Y_full);"
+  }
+  paste(
+    "  int pdmp_get_subsample_size();",
+    "  int pdmp_get_subsample_index(int n);",
+    y_decl,
+    "  matrix get_subsampled_Xc(matrix Xc_full);",
+    sep = "\n"
+  )
+}
+
+make_ext_cpp_stancode <- function(standard_code, formula, data, family,
+                                  prior, stanvars, sample_prior, ...) {
+  if (brms_has_subsample()) {
+    sub <- pdmp_subsampling(standard_code)
+    decls <- pdmp_function_decls(standard_code)
+    sv <- brms::stanvar(scode = decls, block = "functions")
+    stanvars <- if (is.null(stanvars)) sv else stanvars + sv
+    brms::stancode(formula, data = data, family = family,
+                   prior = prior, stanvars = stanvars,
+                   sample_prior = sample_prior,
+                   subsample = sub, ...)
+  } else {
+    inject_ext_cpp_stancode(standard_code)
+  }
 }
 
 #' Show the Stan code used by brm_pdmp
@@ -117,10 +122,11 @@ hpp_path <- function() {
 #' identical to `brms::stancode()`. With `subsample_size`, two
 #' variants are returned:
 #' \describe{
-#'   \item{standard}{The standard model with `means_X` moved to data
-#'     (used for the full-data and prior-only models).}
-#'   \item{ext_cpp}{The model with external C++ subsetting functions
-#'     injected (used for the subsampled-gradient model).}
+#'   \item{standard}{The standard model (used for the full-data and
+#'     prior-only models).}
+#'   \item{ext_cpp}{The model with likelihood rewritten to use
+#'     external C++ subsetting functions (used for the
+#'     subsampled-gradient model).}
 #' }
 #'
 #' @inheritParams brm_pdmp
@@ -143,10 +149,10 @@ brm_stancode <- function(
                           sample_prior = sample_prior, ...)
   if (is.null(subsample_size)) return(scode)
 
-  scode <- fix_brms_stancode(scode)
   list(
     standard = scode,
-    ext_cpp  = inject_ext_cpp_stancode(scode)
+    ext_cpp  = make_ext_cpp_stancode(scode, formula, data, family,
+                                     prior, stanvars, sample_prior, ...)
   )
 }
 
@@ -157,7 +163,7 @@ brm_stancode <- function(
 #' is identical to `brms::standata()`. With `subsample_size`, returns
 #' a named list with three elements:
 #' \describe{
-#'   \item{full}{Full dataset with `means_X` added.}
+#'   \item{full}{Full dataset.}
 #'   \item{prior}{Prior-only dummy data (`N=1`, `prior_only=1`).}
 #'   \item{subsample}{An initial subsample of `subsample_size` rows.}
 #' }
@@ -192,20 +198,7 @@ brm_standata <- function(
   if (subsample_size >= N)
     cli::cli_abort("{.arg subsample_size} ({subsample_size}) must be less than {.code nrow(data)} ({N}).")
 
-  if (any(grepl("^(J|Z)_", names(sdata))))
-    cli::cli_abort(c(
-      "Subsampled gradients currently support fixed-effects models only.",
-      "i" = "Remove random effects from the formula, or omit {.arg subsample_size} to use full-data gradients."
-    ))
-
-  if (!is.null(sdata$means_X)) {
-    means_X <- sdata$means_X
-  } else {
-    means_X <- array(colMeans(sdata$X[, -1, drop = FALSE]))
-  }
-  sdata_full <- sdata
-  sdata_full$means_X <- means_X
-  sdata_prior <- make_prior_standata(sdata, means_X)
+  sdata_prior <- make_prior_standata(sdata)
 
   if (is.null(indices)) {
     indices <- sample.int(N, subsample_size)
@@ -213,7 +206,7 @@ brm_standata <- function(
     if (length(indices) != subsample_size)
       cli::cli_abort("{.arg indices} length ({length(indices)}) must equal {.arg subsample_size} ({subsample_size}).")
   }
-  sdata_sub <- subset_standata(sdata, indices, means_X)
+  sdata_sub <- subset_standata(sdata, indices)
 
-  list(full = sdata_full, prior = sdata_prior, subsample = sdata_sub)
+  list(full = sdata, prior = sdata_prior, subsample = sdata_sub)
 }

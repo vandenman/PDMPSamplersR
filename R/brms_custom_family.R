@@ -5,7 +5,9 @@
 
 .default_dpar_links <- list(
   sigma = "log",
-  shape = "log"
+  shape = "log",
+  nu    = "logm1",
+  phi   = "log"
 )
 
 .baked_in_links <- list(
@@ -38,6 +40,33 @@
     dist_suffix   = "lpmf",
     response_type = "int",
     extra_dpars   = "shape"
+  ),
+  student = list(
+    stan_dist     = "student_t",
+    dist_suffix   = "lpdf",
+    response_type = "real",
+    extra_dpars   = c("sigma", "nu"),
+    stan_call_args = function(dp) paste(c(dp[["nu"]], dp[["mu"]], dp[["sigma"]]), collapse = ", ")
+  ),
+  gamma = list(
+    stan_dist     = "gamma",
+    dist_suffix   = "lpdf",
+    response_type = "real",
+    extra_dpars   = "shape",
+    mu_link       = "log",
+    stan_call_args = function(dp) paste(c(dp[["shape"]], paste0(dp[["shape"]], " / ", dp[["mu"]])), collapse = ", ")
+  ),
+  beta = list(
+    stan_dist     = "beta",
+    dist_suffix   = "lpdf",
+    response_type = "real",
+    extra_dpars   = "phi",
+    mu_link       = "logit",
+    stan_call_args = function(dp) {
+      mu <- dp[["mu"]]
+      phi <- dp[["phi"]]
+      paste(c(paste0(mu, " * ", phi), paste0("(1 - ", mu, ") * ", phi)), collapse = ", ")
+    }
   )
 )
 
@@ -75,11 +104,14 @@ get_subsampled_family_links <- function(family) {
     family <- brms::brmsfamily(family$family, link = family$link)
   dpars <- family$dpars
   links <- vapply(dpars, function(dp) get_original_dpar_link(family, dp), character(1))
-  links[dpars == "mu"] <- "identity"
+  fam_key <- subsampled_family_key(family$family, family$link)
+  config  <- .family_configs[[fam_key]]
+  mu_link_override <- config$mu_link %||% "identity"
+  links[dpars == "mu"] <- mu_link_override
   unname(links)
 }
 
-.dpar_lower_bounds <- c(sigma = 0, shape = 0)
+.dpar_lower_bounds <- c(sigma = 0, shape = 0, nu = 1, phi = 0)
 
 get_subsampled_family_bounds <- function(dpars) {
   vapply(dpars, function(dp) {
@@ -173,20 +205,25 @@ make_subsampled_stan_functions <- function(family, codegen_info) {
   y_arg <- if (config$response_type == "int") "array[] int y" else "vector y"
 
   sig_parts  <- character(0)
-  call_parts <- character(0)
+  dp_calls   <- list(mu = "mu[i]")
   for (dp in config$extra_dpars) {
     shape <- codegen_info$dpar_shapes[[dp]] %||% "scalar"
     if (shape == "scalar") {
-      sig_parts  <- c(sig_parts, paste0("real ", dp))
-      call_parts <- c(call_parts, dp)
+      sig_parts    <- c(sig_parts, paste0("real ", dp))
+      dp_calls[[dp]] <- dp
     } else {
-      sig_parts  <- c(sig_parts, paste0("vector ", dp))
-      call_parts <- c(call_parts, paste0(dp, "[i]"))
+      sig_parts    <- c(sig_parts, paste0("vector ", dp))
+      dp_calls[[dp]] <- paste0(dp, "[i]")
     }
   }
 
-  all_sig  <- paste(c("vector mu", sig_parts, "int N_total"), collapse = ", ")
-  all_call <- paste(c("mu[i]", call_parts), collapse = ", ")
+  all_sig <- paste(c("vector mu", sig_parts, "int N_total"), collapse = ", ")
+  if (!is.null(config$stan_call_args)) {
+    all_call <- config$stan_call_args(dp_calls)
+  } else {
+    call_parts <- vapply(config$extra_dpars, function(dp) dp_calls[[dp]], character(1))
+    all_call <- paste(c("mu[i]", call_parts), collapse = ", ")
+  }
 
   lines <- c(
     sprintf("  real %s_%s(%s, %s) {", func_name, suffix, y_arg, all_sig),
@@ -232,6 +269,17 @@ make_pdmp_stanvars <- function(formula, data, family, user_stanvars = NULL,
   )
 
   out <- sv_decls + sv_fns
+  if (family$family == "student") {
+    sv_helpers <- brms::stanvar(
+      scode = paste(
+        "  real logm1(real x) { return log(x - 1); }",
+        "  real expp1(real x) { return exp(x) + 1; }",
+        sep = "\n"
+      ),
+      block = "functions"
+    )
+    out <- out + sv_helpers
+  }
   if (!is.null(user_stanvars)) out <- out + user_stanvars
   out
 }
@@ -316,4 +364,66 @@ posterior_predict_subsampled_negbinomial_log <- function(i, prep, ...) {
 posterior_epred_subsampled_negbinomial_log <- function(prep) {
   mu <- brms::get_dpar(prep, "mu")
   exp(mu)
+}
+
+#' @export
+log_lik_subsampled_student <- function(i, prep) {
+  mu    <- brms::get_dpar(prep, "mu", i = i)
+  sigma <- brms::get_dpar(prep, "sigma", i = i)
+  nu    <- brms::get_dpar(prep, "nu", i = i)
+  y     <- prep$data$Y[i]
+  brms::dstudent_t(y, df = nu, mu = mu, sigma = sigma, log = TRUE)
+}
+
+#' @export
+posterior_predict_subsampled_student <- function(i, prep, ...) {
+  mu    <- brms::get_dpar(prep, "mu", i = i)
+  sigma <- brms::get_dpar(prep, "sigma", i = i)
+  nu    <- brms::get_dpar(prep, "nu", i = i)
+  brms::rstudent_t(length(mu), df = nu, mu = mu, sigma = sigma)
+}
+
+#' @export
+posterior_epred_subsampled_student <- function(prep) {
+  brms::get_dpar(prep, "mu")
+}
+
+#' @export
+log_lik_subsampled_gamma <- function(i, prep) {
+  mu    <- brms::get_dpar(prep, "mu", i = i)
+  shape <- brms::get_dpar(prep, "shape", i = i)
+  y     <- prep$data$Y[i]
+  dgamma(y, shape = shape, rate = shape / mu, log = TRUE)
+}
+
+#' @export
+posterior_predict_subsampled_gamma <- function(i, prep, ...) {
+  mu    <- brms::get_dpar(prep, "mu", i = i)
+  shape <- brms::get_dpar(prep, "shape", i = i)
+  rgamma(length(mu), shape = shape, rate = shape / mu)
+}
+
+#' @export
+posterior_epred_subsampled_gamma <- function(prep) {
+  brms::get_dpar(prep, "mu")
+}
+
+#' @export
+log_lik_subsampled_beta <- function(i, prep) {
+  mu  <- brms::get_dpar(prep, "mu", i = i)
+  phi <- brms::get_dpar(prep, "phi", i = i)
+  y   <- prep$data$Y[i]
+  dbeta(y, shape1 = mu * phi, shape2 = (1 - mu) * phi, log = TRUE)
+}
+
+#' @export
+posterior_predict_subsampled_beta <- function(i, prep, ...) {
+  mu  <- brms::get_dpar(prep, "mu", i = i)
+  phi <- brms::get_dpar(prep, "phi", i = i)
+  rbeta(length(mu), shape1 = mu * phi, shape2 = (1 - mu) * phi)
+}
+
+#' @export
+posterior_epred_subsampled_beta <- function(prep) {
+  brms::get_dpar(prep, "mu")
 }

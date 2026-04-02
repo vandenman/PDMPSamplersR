@@ -57,12 +57,72 @@ test_that("make_subsampled_family returns custom_family object", {
   expect_equal(sub_fam$type, "int")
 })
 
-test_that("make_subsampled_family rejects unsupported families", {
+test_that("make_subsampled_family accepts student family", {
   skip_if_no_brms()
 
-  expect_error(
-    PDMPSamplersR:::make_subsampled_family(brms::student()),
-    "Unsupported family"
+  sub_fam <- PDMPSamplersR:::make_subsampled_family(brms::student())
+  expect_equal(sub_fam$name, "subsampled_student")
+  expect_equal(sub_fam$dpars, c("mu", "sigma", "nu"))
+  expect_false(sub_fam$loop)
+  expect_equal(sub_fam$type, "real")
+})
+
+test_that("make_subsampled_family accepts Gamma family", {
+  skip_if_no_brms()
+
+  sub_fam <- PDMPSamplersR:::make_subsampled_family(brms::brmsfamily("Gamma"))
+  expect_equal(sub_fam$name, "subsampled_gamma")
+  expect_equal(sub_fam$dpars, c("mu", "shape"))
+  expect_false(sub_fam$loop)
+  expect_equal(sub_fam$type, "real")
+})
+
+test_that("make_subsampled_family accepts Beta family", {
+  skip_if_no_brms()
+
+  sub_fam <- PDMPSamplersR:::make_subsampled_family(brms::brmsfamily("Beta"))
+  expect_equal(sub_fam$name, "subsampled_beta")
+  expect_equal(sub_fam$dpars, c("mu", "phi"))
+  expect_false(sub_fam$loop)
+  expect_equal(sub_fam$type, "real")
+})
+
+test_that("get_subsampled_family_links preserves log link for Gamma mu", {
+  skip_if_no_brms()
+
+  fam <- brms::brmsfamily("Gamma")
+  links <- PDMPSamplersR:::get_subsampled_family_links(fam)
+  expect_equal(links[1], "log")
+  expect_equal(links[2], "log")
+})
+
+test_that("get_subsampled_family_links preserves logit link for Beta mu", {
+  skip_if_no_brms()
+
+  fam <- brms::brmsfamily("Beta")
+  links <- PDMPSamplersR:::get_subsampled_family_links(fam)
+  expect_equal(links[1], "logit")
+  expect_equal(links[2], "log")
+})
+
+test_that("get_subsampled_family_links uses identity for student mu", {
+  skip_if_no_brms()
+
+  fam <- brms::student()
+  links <- PDMPSamplersR:::get_subsampled_family_links(fam)
+  expect_equal(links[1], "identity")
+  expect_equal(links[2], "log")
+  expect_equal(links[3], "logm1")
+})
+
+test_that("get_subsampled_family_bounds includes nu and phi", {
+  expect_equal(
+    PDMPSamplersR:::get_subsampled_family_bounds(c("mu", "sigma", "nu")),
+    c(NA, 0, 1)
+  )
+  expect_equal(
+    PDMPSamplersR:::get_subsampled_family_bounds(c("mu", "phi")),
+    c(NA, 0)
   )
 })
 
@@ -123,6 +183,58 @@ test_that("subsampled negbinomial_log function includes scalar shape", {
   expect_match(code, "neg_binomial_2_log_lpmf")
   expect_match(code, "real shape")
   expect_match(code, "mu\\[i\\], shape\\b")
+})
+
+test_that("subsampled student function has correct call pattern", {
+  codegen_info <- list(dpar_shapes = list(sigma = "scalar", nu = "scalar"))
+  code <- PDMPSamplersR:::make_subsampled_stan_functions(
+    brms::student(), codegen_info
+  )
+  expect_match(code, "subsampled_student_lpdf")
+  expect_match(code, "student_t_lpdf")
+  expect_match(code, "real sigma")
+  expect_match(code, "real nu")
+  expect_match(code, "nu, mu\\[i\\], sigma")
+})
+
+test_that("subsampled student function handles vector sigma", {
+  codegen_info <- list(dpar_shapes = list(sigma = "vector", nu = "scalar"))
+  code <- PDMPSamplersR:::make_subsampled_stan_functions(
+    brms::student(), codegen_info
+  )
+  expect_match(code, "vector sigma")
+  expect_match(code, "nu, mu\\[i\\], sigma\\[i\\]")
+})
+
+test_that("subsampled gamma function has correct call pattern", {
+  codegen_info <- list(dpar_shapes = list(shape = "scalar"))
+  code <- PDMPSamplersR:::make_subsampled_stan_functions(
+    brms::brmsfamily("Gamma"), codegen_info
+  )
+  expect_match(code, "subsampled_gamma_lpdf")
+  expect_match(code, "gamma_lpdf")
+  expect_match(code, "real shape")
+  expect_match(code, "shape, shape / mu\\[i\\]")
+})
+
+test_that("subsampled gamma function handles vector shape", {
+  codegen_info <- list(dpar_shapes = list(shape = "vector"))
+  code <- PDMPSamplersR:::make_subsampled_stan_functions(
+    brms::brmsfamily("Gamma"), codegen_info
+  )
+  expect_match(code, "vector shape")
+  expect_match(code, "shape\\[i\\], shape\\[i\\] / mu\\[i\\]")
+})
+
+test_that("subsampled beta function has correct call pattern", {
+  codegen_info <- list(dpar_shapes = list(phi = "scalar"))
+  code <- PDMPSamplersR:::make_subsampled_stan_functions(
+    brms::brmsfamily("Beta"), codegen_info
+  )
+  expect_match(code, "subsampled_beta_lpdf")
+  expect_match(code, "beta_lpdf")
+  expect_match(code, "real phi")
+  expect_match(code, "mu\\[i\\] \\* phi, \\(1 - mu\\[i\\]\\) \\* phi")
 })
 
 # -- Brace-aware block extraction ----------------------------------------------
@@ -1186,4 +1298,78 @@ test_that("brm_stancode works for gaussian sigma ~ 1 + (1|g)", {
   expect_match(result$ext_cpp, "vector\\[m_sub\\] sigma")
   expect_match(result$ext_cpp, "for \\(i in 1:m_sub\\)")
   expect_match(result$ext_cpp, "sigma\\[i\\]")
+})
+
+# -- Phase 4: brm_stancode with new families -----------------------------------
+
+test_that("brm_stancode works for student y ~ x", {
+  skip_if_no_brms()
+
+  set.seed(42)
+  df <- data.frame(y = brms::rstudent_t(50, df = 3, mu = 1, sigma = 2),
+                   x = rnorm(50))
+  result <- brm_stancode(y ~ x, data = df, family = brms::student(),
+                          subsample_size = 10L)
+
+  expect_match(result$ext_cpp, "subsampled_student_lpdf")
+  expect_match(result$ext_cpp, "student_t_lpdf")
+  expect_match(result$ext_cpp, "nu, mu\\[i\\], sigma")
+  expect_match(result$ext_cpp, "logm1")
+  expect_match(result$ext_cpp, "expp1")
+})
+
+test_that("brm_stancode works for Gamma y ~ x", {
+  skip_if_no_brms()
+
+  set.seed(42)
+  df <- data.frame(y = rgamma(50, shape = 2, rate = 1), x = rnorm(50))
+  result <- brm_stancode(y ~ x, data = df, family = brms::brmsfamily("Gamma"),
+                          subsample_size = 10L)
+
+  expect_match(result$ext_cpp, "subsampled_gamma_lpdf")
+  expect_match(result$ext_cpp, "gamma_lpdf")
+  expect_match(result$ext_cpp, "shape, shape / mu\\[i\\]")
+  expect_match(result$ext_cpp, "mu = exp\\(mu\\)")
+})
+
+test_that("brm_stancode works for Beta y ~ x", {
+  skip_if_no_brms()
+
+  set.seed(42)
+  df <- data.frame(y = rbeta(50, 2, 3), x = rnorm(50))
+  result <- brm_stancode(y ~ x, data = df, family = brms::brmsfamily("Beta"),
+                          subsample_size = 10L)
+
+  expect_match(result$ext_cpp, "subsampled_beta_lpdf")
+  expect_match(result$ext_cpp, "beta_lpdf")
+  expect_match(result$ext_cpp, "mu\\[i\\] \\* phi")
+  expect_match(result$ext_cpp, "mu = inv_logit\\(mu\\)")
+})
+
+test_that("brm_stancode works for student bf(y ~ x, sigma ~ z)", {
+  skip_if_no_brms()
+
+  set.seed(42)
+  df <- data.frame(y = brms::rstudent_t(50, df = 3, mu = 1, sigma = 2),
+                   x = rnorm(50), z = rnorm(50))
+  result <- brm_stancode(brms::bf(y ~ x, sigma ~ z), data = df,
+                          family = brms::student(), subsample_size = 10L)
+
+  expect_match(result$ext_cpp, "vector\\[m_sub\\] sigma")
+  expect_match(result$ext_cpp, "get_subsampled_Xc\\(Xc_sigma\\)")
+  expect_match(result$ext_cpp, "sigma\\[i\\]")
+})
+
+test_that("brm_stancode works for Gamma bf(y ~ x, shape ~ z)", {
+  skip_if_no_brms()
+
+  set.seed(42)
+  df <- data.frame(y = rgamma(50, shape = 2, rate = 1),
+                   x = rnorm(50), z = rnorm(50))
+  result <- brm_stancode(brms::bf(y ~ x, shape ~ z), data = df,
+                          family = brms::brmsfamily("Gamma"), subsample_size = 10L)
+
+  expect_match(result$ext_cpp, "vector\\[m_sub\\] shape")
+  expect_match(result$ext_cpp, "get_subsampled_Xc\\(Xc_shape\\)")
+  expect_match(result$ext_cpp, "shape\\[i\\]")
 })

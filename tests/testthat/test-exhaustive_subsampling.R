@@ -248,213 +248,137 @@ make_gaussian_multi_spline_data <- function(n = 100, seed = 177) {
   data.frame(y = y, x = x, z = z)
 }
 
-# ==============================================================================
-# Testset 1a: Gradient equivalence tests (m = N, full data)
-# ==============================================================================
-# When all observations are included in the subsample, the ext_cpp model
-# gradient must exactly match the standard model gradient (the N/m scaling
-# cancels to 1).
+make_student_fe_data <- function(n = 50, seed = 200) {
+  set.seed(seed)
+  x <- rnorm(n)
+  y <- brms::rstudent_t(n, df = 5, mu = 1 + 0.5 * x, sigma = 1)
+  data.frame(y = y, x = x)
+}
 
-test_that("gradient fulldata: gaussian y ~ x", {
-  skip_if_no_exhaustive_tests()
-  df <- make_gaussian_fe_data()
-  setup <- setup_gradient_test(y ~ x, df, gaussian())
-  run_fulldata_gradient_test(setup)
-})
+make_gamma_fe_data <- function(n = 50, seed = 210) {
+  set.seed(seed)
+  x <- rnorm(n)
+  mu <- exp(0.5 + 0.3 * x)
+  shape <- 2
+  y <- rgamma(n, shape = shape, rate = shape / mu)
+  data.frame(y = y, x = x)
+}
 
-test_that("gradient fulldata: bernoulli y ~ x", {
-  skip_if_no_exhaustive_tests()
-  df <- make_bernoulli_fe_data()
-  setup <- setup_gradient_test(y ~ x, df, brms::bernoulli())
-  run_fulldata_gradient_test(setup)
-})
+make_beta_fe_data <- function(n = 50, seed = 220) {
+  set.seed(seed)
+  x <- rnorm(n)
+  mu <- plogis(0.2 + 0.5 * x)
+  phi <- 10
+  y <- rbeta(n, shape1 = mu * phi, shape2 = (1 - mu) * phi)
+  data.frame(y = y, x = x)
+}
 
-test_that("gradient fulldata: poisson y ~ x", {
-  skip_if_no_exhaustive_tests()
-  df <- make_poisson_fe_data()
-  setup <- setup_gradient_test(y ~ x, df, poisson())
-  run_fulldata_gradient_test(setup)
-})
+make_student_sigma_fe_data <- function(n = 50, seed = 230) {
+  set.seed(seed)
+  x <- rnorm(n)
+  z <- rnorm(n)
+  sigma <- exp(0.5 + 0.3 * z)
+  y <- brms::rstudent_t(n, df = 5, mu = 1 + 0.5 * x, sigma = sigma)
+  data.frame(y = y, x = x, z = z)
+}
 
-test_that("gradient fulldata: negbinomial y ~ x", {
-  skip_if_no_exhaustive_tests()
-  df <- make_negbinomial_fe_data()
-  setup <- setup_gradient_test(y ~ x, df, brms::negbinomial())
-  run_fulldata_gradient_test(setup)
-})
-
-test_that("gradient fulldata: gaussian y ~ s(x)", {
-  skip_if_no_exhaustive_tests()
-  df <- make_gaussian_spline_data()
-  setup <- setup_gradient_test(y ~ s(x, k = 5), df, gaussian())
-  run_fulldata_gradient_test(setup)
-})
-
-test_that("gradient fulldata: bernoulli y ~ s(x)", {
-  skip_if_no_exhaustive_tests()
-  df <- make_bernoulli_spline_data()
-  setup <- setup_gradient_test(y ~ s(x, k = 5), df, brms::bernoulli())
-  run_fulldata_gradient_test(setup)
-})
-
-test_that("gradient fulldata: poisson y ~ s(x)", {
-  skip_if_no_exhaustive_tests()
-  df <- make_poisson_spline_data()
-  setup <- setup_gradient_test(y ~ s(x, k = 5), df, poisson())
-  run_fulldata_gradient_test(setup)
-})
-
-test_that("gradient fulldata: gaussian y ~ gp(x)", {
-  skip_if_no_exhaustive_tests()
-  df <- make_gaussian_gp_data()
-  setup <- setup_gradient_test(y ~ gp(x), df, gaussian())
-  run_fulldata_gradient_test(setup)
-})
-
-test_that("gradient fulldata: bernoulli y ~ gp(x)", {
-  skip_if_no_exhaustive_tests()
-  df <- make_bernoulli_gp_data()
-  setup <- setup_gradient_test(y ~ gp(x), df, brms::bernoulli())
-  run_fulldata_gradient_test(setup, tol = 1e-3)
-})
-
-test_that("gradient fulldata: gaussian y ~ x + s(z)", {
-  skip_if_no_exhaustive_tests()
-  df <- make_gaussian_fe_spline_data()
-  setup <- setup_gradient_test(y ~ x + s(z, k = 5), df, gaussian())
-  run_fulldata_gradient_test(setup)
-})
-
-test_that("gradient fulldata: poisson y ~ x + s(z)", {
-  skip_if_no_exhaustive_tests()
-  df <- make_poisson_fe_spline_data()
-  setup <- setup_gradient_test(y ~ x + s(z, k = 5), df, poisson())
-  run_fulldata_gradient_test(setup)
-})
-
-test_that("gradient fulldata: gaussian y ~ x + gp(z)", {
-  skip_if_no_exhaustive_tests()
-  df <- make_gaussian_fe_gp_data()
-  setup <- setup_gradient_test(y ~ x + gp(z), df, gaussian())
-  run_fulldata_gradient_test(setup, tol = 1e-3)
-})
-
-test_that("gradient fulldata: gaussian y ~ x + s(z) + gp(w)", {
-  skip_if_no_exhaustive_tests()
-  df <- make_gaussian_fe_spline_gp_data()
-  setup <- setup_gradient_test(y ~ x + s(z, k = 5) + gp(w), df, gaussian())
-  run_fulldata_gradient_test(setup, tol = 1e-3)
-})
-
-test_that("gradient fulldata: gaussian y ~ s(x, k=5) + s(z, k=5)", {
-  skip_if_no_exhaustive_tests()
-  df <- make_gaussian_multi_spline_data()
-  setup <- setup_gradient_test(y ~ s(x, k = 5) + s(z, k = 5), df, gaussian())
-  run_fulldata_gradient_test(setup)
-})
+make_gamma_shape_fe_data <- function(n = 50, seed = 240) {
+  set.seed(seed)
+  x <- rnorm(n)
+  z <- rnorm(n)
+  mu <- exp(0.5 + 0.3 * x)
+  shape <- exp(0.7 + 0.2 * z)
+  y <- rgamma(n, shape = shape, rate = shape / mu)
+  data.frame(y = y, x = x, z = z)
+}
 
 # ==============================================================================
-# Testset 1b: Gradient subsample scaling tests (m < N)
+# Gradient test specs (table-driven)
 # ==============================================================================
-# With a strict subset, verify: grad_ext = (1-s)*grad_prior + s*grad_std_sub
+# Each spec defines a gradient test case. The fulldata and subsample loops
+# iterate over these specs to generate test_that blocks automatically.
+#
+# Fields:
+#   label    - test description (shown in testthat output)
+#   data_fn  - function() returning a data.frame
+#   formula  - brms formula
+#   family   - brms family object
+#   tol      - (optional) tolerance for fulldata test (default 1e-6)
+#   m        - subsample size for subsample test (N must be divisible by m)
 
-test_that("gradient subsample: gaussian y ~ x", {
-  skip_if_no_exhaustive_tests()
-  df <- make_gaussian_fe_data()
-  setup <- setup_gradient_test(y ~ x, df, gaussian())
-  run_subsample_gradient_test(setup, m = 20)
-})
+gradient_specs_fe <- list(
+  list(label = "gaussian y ~ x",
+       data_fn = make_gaussian_fe_data, formula = y ~ x,
+       family = gaussian(), m = 20),
+  list(label = "bernoulli y ~ x",
+       data_fn = make_bernoulli_fe_data, formula = y ~ x,
+       family = brms::bernoulli(), m = 25),
+  list(label = "poisson y ~ x",
+       data_fn = make_poisson_fe_data, formula = y ~ x,
+       family = poisson(), m = 25),
+  list(label = "negbinomial y ~ x",
+       data_fn = make_negbinomial_fe_data, formula = y ~ x,
+       family = brms::negbinomial(), m = 25),
+  list(label = "gaussian y ~ s(x)",
+       data_fn = make_gaussian_spline_data, formula = y ~ s(x, k = 5),
+       family = gaussian(), m = 25),
+  list(label = "bernoulli y ~ s(x)",
+       data_fn = make_bernoulli_spline_data, formula = y ~ s(x, k = 5),
+       family = brms::bernoulli(), m = 30),
+  list(label = "poisson y ~ s(x)",
+       data_fn = make_poisson_spline_data, formula = y ~ s(x, k = 5),
+       family = poisson(), m = 25),
+  list(label = "gaussian y ~ gp(x)",
+       data_fn = make_gaussian_gp_data, formula = y ~ gp(x),
+       family = gaussian(), m = 15),
+  list(label = "bernoulli y ~ gp(x)",
+       data_fn = make_bernoulli_gp_data, formula = y ~ gp(x),
+       family = brms::bernoulli(), tol = 1e-3, m = 15),
+  list(label = "gaussian y ~ x + s(z)",
+       data_fn = make_gaussian_fe_spline_data, formula = y ~ x + s(z, k = 5),
+       family = gaussian(), m = 25),
+  list(label = "poisson y ~ x + s(z)",
+       data_fn = make_poisson_fe_spline_data, formula = y ~ x + s(z, k = 5),
+       family = poisson(), m = 25),
+  list(label = "gaussian y ~ x + gp(z)",
+       data_fn = make_gaussian_fe_gp_data, formula = y ~ x + gp(z),
+       family = gaussian(), tol = 1e-3, m = 15),
+  list(label = "gaussian y ~ x + s(z) + gp(w)",
+       data_fn = make_gaussian_fe_spline_gp_data,
+       formula = y ~ x + s(z, k = 5) + gp(w),
+       family = gaussian(), tol = 1e-3, m = 15),
+  list(label = "gaussian y ~ s(x, k=5) + s(z, k=5)",
+       data_fn = make_gaussian_multi_spline_data,
+       formula = y ~ s(x, k = 5) + s(z, k = 5),
+       family = gaussian(), m = 25),
+  list(label = "student y ~ x",
+       data_fn = make_student_fe_data, formula = y ~ x,
+       family = brms::student(), m = 25),
+  list(label = "Gamma y ~ x",
+       data_fn = make_gamma_fe_data, formula = y ~ x,
+       family = brms::brmsfamily("Gamma"), m = 25),
+  list(label = "Beta y ~ x",
+       data_fn = make_beta_fe_data, formula = y ~ x,
+       family = brms::brmsfamily("Beta"), m = 25)
+)
 
-test_that("gradient subsample: bernoulli y ~ x", {
-  skip_if_no_exhaustive_tests()
-  df <- make_bernoulli_fe_data()
-  setup <- setup_gradient_test(y ~ x, df, brms::bernoulli())
-  run_subsample_gradient_test(setup, m = 25)
-})
+for (spec in gradient_specs_fe) {
+  test_that(paste0("gradient fulldata: ", spec$label), {
+    skip_if_no_exhaustive_tests()
+    df <- spec$data_fn()
+    setup <- setup_gradient_test(spec$formula, df, spec$family)
+    run_fulldata_gradient_test(setup, tol = spec$tol %||% 1e-6)
+  })
+}
 
-test_that("gradient subsample: poisson y ~ x", {
-  skip_if_no_exhaustive_tests()
-  df <- make_poisson_fe_data()
-  setup <- setup_gradient_test(y ~ x, df, poisson())
-  run_subsample_gradient_test(setup, m = 25)
-})
-
-test_that("gradient subsample: negbinomial y ~ x", {
-  skip_if_no_exhaustive_tests()
-  df <- make_negbinomial_fe_data()
-  setup <- setup_gradient_test(y ~ x, df, brms::negbinomial())
-  run_subsample_gradient_test(setup, m = 25)
-})
-
-test_that("gradient subsample: gaussian y ~ s(x)", {
-  skip_if_no_exhaustive_tests()
-  df <- make_gaussian_spline_data()
-  setup <- setup_gradient_test(y ~ s(x, k = 5), df, gaussian())
-  run_subsample_gradient_test(setup, m = 25)
-})
-
-test_that("gradient subsample: bernoulli y ~ s(x)", {
-  skip_if_no_exhaustive_tests()
-  df <- make_bernoulli_spline_data()
-  setup <- setup_gradient_test(y ~ s(x, k = 5), df, brms::bernoulli())
-  run_subsample_gradient_test(setup, m = 30)
-})
-
-test_that("gradient subsample: poisson y ~ s(x)", {
-  skip_if_no_exhaustive_tests()
-  df <- make_poisson_spline_data()
-  setup <- setup_gradient_test(y ~ s(x, k = 5), df, poisson())
-  run_subsample_gradient_test(setup, m = 25)
-})
-
-test_that("gradient subsample: gaussian y ~ gp(x)", {
-  skip_if_no_exhaustive_tests()
-  df <- make_gaussian_gp_data()
-  setup <- setup_gradient_test(y ~ gp(x), df, gaussian())
-  run_subsample_gradient_test(setup, m = 15)
-})
-
-test_that("gradient subsample: bernoulli y ~ gp(x)", {
-  skip_if_no_exhaustive_tests()
-  df <- make_bernoulli_gp_data()
-  setup <- setup_gradient_test(y ~ gp(x), df, brms::bernoulli())
-  run_subsample_gradient_test(setup, m = 15)
-})
-
-test_that("gradient subsample: gaussian y ~ x + s(z)", {
-  skip_if_no_exhaustive_tests()
-  df <- make_gaussian_fe_spline_data()
-  setup <- setup_gradient_test(y ~ x + s(z, k = 5), df, gaussian())
-  run_subsample_gradient_test(setup, m = 25)
-})
-
-test_that("gradient subsample: poisson y ~ x + s(z)", {
-  skip_if_no_exhaustive_tests()
-  df <- make_poisson_fe_spline_data()
-  setup <- setup_gradient_test(y ~ x + s(z, k = 5), df, poisson())
-  run_subsample_gradient_test(setup, m = 25)
-})
-
-test_that("gradient subsample: gaussian y ~ x + gp(z)", {
-  skip_if_no_exhaustive_tests()
-  df <- make_gaussian_fe_gp_data()
-  setup <- setup_gradient_test(y ~ x + gp(z), df, gaussian())
-  run_subsample_gradient_test(setup, m = 15)
-})
-
-test_that("gradient subsample: gaussian y ~ x + s(z) + gp(w)", {
-  skip_if_no_exhaustive_tests()
-  df <- make_gaussian_fe_spline_gp_data()
-  setup <- setup_gradient_test(y ~ x + s(z, k = 5) + gp(w), df, gaussian())
-  run_subsample_gradient_test(setup, m = 15)
-})
-
-test_that("gradient subsample: gaussian y ~ s(x, k=5) + s(z, k=5)", {
-  skip_if_no_exhaustive_tests()
-  df <- make_gaussian_multi_spline_data()
-  setup <- setup_gradient_test(y ~ s(x, k = 5) + s(z, k = 5), df, gaussian())
-  run_subsample_gradient_test(setup, m = 25)
-})
+for (spec in gradient_specs_fe) {
+  test_that(paste0("gradient subsample: ", spec$label), {
+    skip_if_no_exhaustive_tests()
+    df <- spec$data_fn()
+    setup <- setup_gradient_test(spec$formula, df, spec$family)
+    run_subsample_gradient_test(setup, m = spec$m)
+  })
+}
 
 # -- Data generators (random effects) -----------------------------------------
 
@@ -546,139 +470,53 @@ make_poisson_fe_spline_re_data <- function(n = 100, n_groups = 5, seed = 380) {
   data.frame(y = y, x = x, z = z, group = group)
 }
 
-# ==============================================================================
-# Testset 2a: Gradient equivalence tests with random effects (m = N)
-# ==============================================================================
+gradient_specs_re <- list(
+  list(label = "gaussian y ~ x + (1 | group)",
+       data_fn = make_gaussian_re_intercept_data,
+       formula = y ~ x + (1 | group), family = gaussian(), m = 20),
+  list(label = "bernoulli y ~ x + (1 | group)",
+       data_fn = make_bernoulli_re_intercept_data,
+       formula = y ~ x + (1 | group), family = brms::bernoulli(), m = 25),
+  list(label = "poisson y ~ x + (1 | group)",
+       data_fn = make_poisson_re_intercept_data,
+       formula = y ~ x + (1 | group), family = poisson(), m = 25),
+  list(label = "negbinomial y ~ x + (1 | group)",
+       data_fn = make_negbinomial_re_intercept_data,
+       formula = y ~ x + (1 | group), family = brms::negbinomial(), m = 25),
+  list(label = "gaussian y ~ x + (1 + x | group)",
+       data_fn = make_gaussian_re_slope_data,
+       formula = y ~ x + (1 + x | group), family = gaussian(), m = 20),
+  list(label = "bernoulli y ~ x + (1 + x | group)",
+       data_fn = make_bernoulli_re_slope_data,
+       formula = y ~ x + (1 + x | group), family = brms::bernoulli(), m = 25),
+  list(label = "gaussian y ~ x + (1 | g1) + (1 | g2)",
+       data_fn = make_gaussian_re_multi_group_data,
+       formula = y ~ x + (1 | g1) + (1 | g2), family = gaussian(), m = 15),
+  list(label = "gaussian y ~ x + s(z) + (1 | group)",
+       data_fn = make_gaussian_fe_spline_re_data,
+       formula = y ~ x + s(z, k = 5) + (1 | group), family = gaussian(), m = 25),
+  list(label = "poisson y ~ x + s(z) + (1 | group)",
+       data_fn = make_poisson_fe_spline_re_data,
+       formula = y ~ x + s(z, k = 5) + (1 | group), family = poisson(), m = 25)
+)
 
-test_that("gradient fulldata: gaussian y ~ x + (1 | group)", {
-  skip_if_no_exhaustive_tests()
-  df <- make_gaussian_re_intercept_data()
-  setup <- setup_gradient_test(y ~ x + (1 | group), df, gaussian())
-  run_fulldata_gradient_test(setup)
-})
+for (spec in gradient_specs_re) {
+  test_that(paste0("gradient fulldata: ", spec$label), {
+    skip_if_no_exhaustive_tests()
+    df <- spec$data_fn()
+    setup <- setup_gradient_test(spec$formula, df, spec$family)
+    run_fulldata_gradient_test(setup, tol = spec$tol %||% 1e-6)
+  })
+}
 
-test_that("gradient fulldata: bernoulli y ~ x + (1 | group)", {
-  skip_if_no_exhaustive_tests()
-  df <- make_bernoulli_re_intercept_data()
-  setup <- setup_gradient_test(y ~ x + (1 | group), df, brms::bernoulli())
-  run_fulldata_gradient_test(setup)
-})
-
-test_that("gradient fulldata: poisson y ~ x + (1 | group)", {
-  skip_if_no_exhaustive_tests()
-  df <- make_poisson_re_intercept_data()
-  setup <- setup_gradient_test(y ~ x + (1 | group), df, poisson())
-  run_fulldata_gradient_test(setup)
-})
-
-test_that("gradient fulldata: negbinomial y ~ x + (1 | group)", {
-  skip_if_no_exhaustive_tests()
-  df <- make_negbinomial_re_intercept_data()
-  setup <- setup_gradient_test(y ~ x + (1 | group), df, brms::negbinomial())
-  run_fulldata_gradient_test(setup)
-})
-
-test_that("gradient fulldata: gaussian y ~ x + (1 + x | group)", {
-  skip_if_no_exhaustive_tests()
-  df <- make_gaussian_re_slope_data()
-  setup <- setup_gradient_test(y ~ x + (1 + x | group), df, gaussian())
-  run_fulldata_gradient_test(setup)
-})
-
-test_that("gradient fulldata: bernoulli y ~ x + (1 + x | group)", {
-  skip_if_no_exhaustive_tests()
-  df <- make_bernoulli_re_slope_data()
-  setup <- setup_gradient_test(y ~ x + (1 + x | group), df, brms::bernoulli())
-  run_fulldata_gradient_test(setup)
-})
-
-test_that("gradient fulldata: gaussian y ~ x + (1 | g1) + (1 | g2)", {
-  skip_if_no_exhaustive_tests()
-  df <- make_gaussian_re_multi_group_data()
-  setup <- setup_gradient_test(y ~ x + (1 | g1) + (1 | g2), df, gaussian())
-  run_fulldata_gradient_test(setup)
-})
-
-test_that("gradient fulldata: gaussian y ~ x + s(z) + (1 | group)", {
-  skip_if_no_exhaustive_tests()
-  df <- make_gaussian_fe_spline_re_data()
-  setup <- setup_gradient_test(y ~ x + s(z, k = 5) + (1 | group), df, gaussian())
-  run_fulldata_gradient_test(setup)
-})
-
-test_that("gradient fulldata: poisson y ~ x + s(z) + (1 | group)", {
-  skip_if_no_exhaustive_tests()
-  df <- make_poisson_fe_spline_re_data()
-  setup <- setup_gradient_test(y ~ x + s(z, k = 5) + (1 | group), df, poisson())
-  run_fulldata_gradient_test(setup)
-})
-
-# ==============================================================================
-# Testset 2b: Gradient subsample scaling tests with random effects (m < N)
-# ==============================================================================
-
-test_that("gradient subsample: gaussian y ~ x + (1 | group)", {
-  skip_if_no_exhaustive_tests()
-  df <- make_gaussian_re_intercept_data()
-  setup <- setup_gradient_test(y ~ x + (1 | group), df, gaussian())
-  run_subsample_gradient_test(setup, m = 20)
-})
-
-test_that("gradient subsample: bernoulli y ~ x + (1 | group)", {
-  skip_if_no_exhaustive_tests()
-  df <- make_bernoulli_re_intercept_data()
-  setup <- setup_gradient_test(y ~ x + (1 | group), df, brms::bernoulli())
-  run_subsample_gradient_test(setup, m = 25)
-})
-
-test_that("gradient subsample: poisson y ~ x + (1 | group)", {
-  skip_if_no_exhaustive_tests()
-  df <- make_poisson_re_intercept_data()
-  setup <- setup_gradient_test(y ~ x + (1 | group), df, poisson())
-  run_subsample_gradient_test(setup, m = 25)
-})
-
-test_that("gradient subsample: negbinomial y ~ x + (1 | group)", {
-  skip_if_no_exhaustive_tests()
-  df <- make_negbinomial_re_intercept_data()
-  setup <- setup_gradient_test(y ~ x + (1 | group), df, brms::negbinomial())
-  run_subsample_gradient_test(setup, m = 25)
-})
-
-test_that("gradient subsample: gaussian y ~ x + (1 + x | group)", {
-  skip_if_no_exhaustive_tests()
-  df <- make_gaussian_re_slope_data()
-  setup <- setup_gradient_test(y ~ x + (1 + x | group), df, gaussian())
-  run_subsample_gradient_test(setup, m = 20)
-})
-
-test_that("gradient subsample: bernoulli y ~ x + (1 + x | group)", {
-  skip_if_no_exhaustive_tests()
-  df <- make_bernoulli_re_slope_data()
-  setup <- setup_gradient_test(y ~ x + (1 + x | group), df, brms::bernoulli())
-  run_subsample_gradient_test(setup, m = 25)
-})
-
-test_that("gradient subsample: gaussian y ~ x + (1 | g1) + (1 | g2)", {
-  skip_if_no_exhaustive_tests()
-  df <- make_gaussian_re_multi_group_data()
-  setup <- setup_gradient_test(y ~ x + (1 | g1) + (1 | g2), df, gaussian())
-  run_subsample_gradient_test(setup, m = 15)
-})
-
-test_that("gradient subsample: gaussian y ~ x + s(z) + (1 | group)", {
-  skip_if_no_exhaustive_tests()
-  df <- make_gaussian_fe_spline_re_data()
-  setup <- setup_gradient_test(y ~ x + s(z, k = 5) + (1 | group), df, gaussian())
-  run_subsample_gradient_test(setup, m = 25)
-})
-
-test_that("gradient subsample: poisson y ~ x + s(z) + (1 | group)", {
-  skip_if_no_exhaustive_tests()
-  df <- make_poisson_fe_spline_re_data()
-  setup <- setup_gradient_test(y ~ x + s(z, k = 5) + (1 | group), df, poisson())
-  run_subsample_gradient_test(setup, m = 25)
-})
+for (spec in gradient_specs_re) {
+  test_that(paste0("gradient subsample: ", spec$label), {
+    skip_if_no_exhaustive_tests()
+    df <- spec$data_fn()
+    setup <- setup_gradient_test(spec$formula, df, spec$family)
+    run_subsample_gradient_test(setup, m = spec$m)
+  })
+}
 
 # -- Data generators (distributional formulas) ---------------------------------
 
@@ -731,103 +569,47 @@ make_gaussian_mu_re_sigma_fe_data <- function(n = 80, n_groups = 4, seed = 440) 
   data.frame(y = y, x = x, z = z, group = group)
 }
 
-# ==============================================================================
-# Testset 3a: Gradient equivalence tests with distributional formulas (m = N)
-# ==============================================================================
+gradient_specs_dpar <- list(
+  list(label = "gaussian bf(y ~ x, sigma ~ z)",
+       data_fn = make_gaussian_sigma_fe_data,
+       formula = brms::bf(y ~ x, sigma ~ z), family = gaussian(), m = 20),
+  list(label = "negbinomial bf(y ~ x, shape ~ z)",
+       data_fn = make_negbinomial_shape_fe_data,
+       formula = brms::bf(y ~ x, shape ~ z), family = brms::negbinomial(), m = 25),
+  list(label = "gaussian bf(y ~ x, sigma ~ s(z))",
+       data_fn = make_gaussian_sigma_spline_data,
+       formula = brms::bf(y ~ x, sigma ~ s(z, k = 5)), family = gaussian(), m = 25),
+  list(label = "gaussian bf(y ~ x, sigma ~ (1 | group))",
+       data_fn = make_gaussian_sigma_re_data,
+       formula = brms::bf(y ~ x, sigma ~ (1 | group)), family = gaussian(), m = 20),
+  list(label = "gaussian bf(y ~ x + (1|group), sigma ~ z)",
+       data_fn = make_gaussian_mu_re_sigma_fe_data,
+       formula = brms::bf(y ~ x + (1 | group), sigma ~ z), family = gaussian(), m = 20),
+  list(label = "student bf(y ~ x, sigma ~ z)",
+       data_fn = make_student_sigma_fe_data,
+       formula = brms::bf(y ~ x, sigma ~ z), family = brms::student(), m = 25),
+  list(label = "Gamma bf(y ~ x, shape ~ z)",
+       data_fn = make_gamma_shape_fe_data,
+       formula = brms::bf(y ~ x, shape ~ z), family = brms::brmsfamily("Gamma"), m = 25)
+)
 
-test_that("gradient fulldata: gaussian bf(y ~ x, sigma ~ z)", {
-  skip_if_no_exhaustive_tests()
-  df <- make_gaussian_sigma_fe_data()
-  setup <- setup_gradient_test(
-    brms::bf(y ~ x, sigma ~ z), df, gaussian()
-  )
-  run_fulldata_gradient_test(setup)
-})
+for (spec in gradient_specs_dpar) {
+  test_that(paste0("gradient fulldata: ", spec$label), {
+    skip_if_no_exhaustive_tests()
+    df <- spec$data_fn()
+    setup <- setup_gradient_test(spec$formula, df, spec$family)
+    run_fulldata_gradient_test(setup, tol = spec$tol %||% 1e-6)
+  })
+}
 
-test_that("gradient fulldata: negbinomial bf(y ~ x, shape ~ z)", {
-  skip_if_no_exhaustive_tests()
-  df <- make_negbinomial_shape_fe_data()
-  setup <- setup_gradient_test(
-    brms::bf(y ~ x, shape ~ z), df, brms::negbinomial()
-  )
-  run_fulldata_gradient_test(setup)
-})
-
-test_that("gradient fulldata: gaussian bf(y ~ x, sigma ~ s(z))", {
-  skip_if_no_exhaustive_tests()
-  df <- make_gaussian_sigma_spline_data()
-  setup <- setup_gradient_test(
-    brms::bf(y ~ x, sigma ~ s(z, k = 5)), df, gaussian()
-  )
-  run_fulldata_gradient_test(setup)
-})
-
-test_that("gradient fulldata: gaussian bf(y ~ x, sigma ~ (1 | group))", {
-  skip_if_no_exhaustive_tests()
-  df <- make_gaussian_sigma_re_data()
-  setup <- setup_gradient_test(
-    brms::bf(y ~ x, sigma ~ (1 | group)), df, gaussian()
-  )
-  run_fulldata_gradient_test(setup)
-})
-
-test_that("gradient fulldata: gaussian bf(y ~ x + (1|group), sigma ~ z)", {
-  skip_if_no_exhaustive_tests()
-  df <- make_gaussian_mu_re_sigma_fe_data()
-  setup <- setup_gradient_test(
-    brms::bf(y ~ x + (1 | group), sigma ~ z), df, gaussian()
-  )
-  run_fulldata_gradient_test(setup)
-})
-
-# ==============================================================================
-# Testset 3b: Gradient subsample scaling with distributional formulas (m < N)
-# ==============================================================================
-
-test_that("gradient subsample: gaussian bf(y ~ x, sigma ~ z)", {
-  skip_if_no_exhaustive_tests()
-  df <- make_gaussian_sigma_fe_data()
-  setup <- setup_gradient_test(
-    brms::bf(y ~ x, sigma ~ z), df, gaussian()
-  )
-  run_subsample_gradient_test(setup, m = 20)
-})
-
-test_that("gradient subsample: negbinomial bf(y ~ x, shape ~ z)", {
-  skip_if_no_exhaustive_tests()
-  df <- make_negbinomial_shape_fe_data()
-  setup <- setup_gradient_test(
-    brms::bf(y ~ x, shape ~ z), df, brms::negbinomial()
-  )
-  run_subsample_gradient_test(setup, m = 25)
-})
-
-test_that("gradient subsample: gaussian bf(y ~ x, sigma ~ s(z))", {
-  skip_if_no_exhaustive_tests()
-  df <- make_gaussian_sigma_spline_data()
-  setup <- setup_gradient_test(
-    brms::bf(y ~ x, sigma ~ s(z, k = 5)), df, gaussian()
-  )
-  run_subsample_gradient_test(setup, m = 25)
-})
-
-test_that("gradient subsample: gaussian bf(y ~ x, sigma ~ (1 | group))", {
-  skip_if_no_exhaustive_tests()
-  df <- make_gaussian_sigma_re_data()
-  setup <- setup_gradient_test(
-    brms::bf(y ~ x, sigma ~ (1 | group)), df, gaussian()
-  )
-  run_subsample_gradient_test(setup, m = 20)
-})
-
-test_that("gradient subsample: gaussian bf(y ~ x + (1|group), sigma ~ z)", {
-  skip_if_no_exhaustive_tests()
-  df <- make_gaussian_mu_re_sigma_fe_data()
-  setup <- setup_gradient_test(
-    brms::bf(y ~ x + (1 | group), sigma ~ z), df, gaussian()
-  )
-  run_subsample_gradient_test(setup, m = 20)
-})
+for (spec in gradient_specs_dpar) {
+  test_that(paste0("gradient subsample: ", spec$label), {
+    skip_if_no_exhaustive_tests()
+    df <- spec$data_fn()
+    setup <- setup_gradient_test(spec$formula, df, spec$family)
+    run_subsample_gradient_test(setup, m = spec$m)
+  })
+}
 
 # ==============================================================================
 # Section 3: Posterior correctness tests (TEMPORARILY COMMENTED OUT)

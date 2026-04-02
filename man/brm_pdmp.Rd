@@ -35,6 +35,7 @@ brm_pdmp(
   bank_capacity = 20L,
   use_fd_hvp = FALSE,
   post_warmup_simplify = FALSE,
+  use_fd_hcv = FALSE,
   stanvars = NULL,
   sample_prior = "no",
   save_model = NULL,
@@ -91,7 +92,7 @@ for each sample (default: FALSE). Adds overhead but enables
 \item{subsample_size}{Integer number of observations per subsample,
 or NULL (default) for full-data gradients. When non-NULL, a
 BridgeStan control-variate subsampled gradient is used. Must be
-less than `nrow(data)`. Currently only fixed-effects models are
+less than `nrow(data)`. Fixed-effects and random-effects models are
 supported for subsampling.}
 
 \item{n_anchor_updates}{Integer number of anchor updates during warmup
@@ -126,6 +127,12 @@ call, giving ~30-50\% per-grid-point savings.}
 thinning mode after warmup when the sampler is well-adapted
 (default: FALSE). Activates when the reflection ratio is below 30\%
 and at least 10 events have been observed.}
+
+\item{use_fd_hcv}{Logical; use finite-difference approximation for the
+HVP inside the HCV correction (default: FALSE). Replaces the exact
+BridgeStan HVP at the anchor with a cheaper gradient-based FD
+approximation. Also disables HVP for grid thinning. Only used when
+`use_hcv` is TRUE.}
 
 \item{stanvars}{Optional `stanvar` object for custom Stan code.}
 

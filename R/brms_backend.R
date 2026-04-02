@@ -33,7 +33,7 @@
 #' @param subsample_size Integer number of observations per subsample,
 #'   or NULL (default) for full-data gradients. When non-NULL, a
 #'   BridgeStan control-variate subsampled gradient is used. Must be
-#'   less than `nrow(data)`. Currently only fixed-effects models are
+#'   less than `nrow(data)`. Fixed-effects and random-effects models are
 #'   supported for subsampling.
 #' @param n_anchor_updates Integer number of anchor updates during warmup
 #'   (default: 10). Only used when `subsample_size` is non-NULL.

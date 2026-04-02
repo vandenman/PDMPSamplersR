@@ -78,4 +78,14 @@ inline auto get_subsampled_vector(const T& v_full, std::ostream* pstream__) {
     return v_sub;
 }
 
+inline std::vector<int> get_subsampled_int_array(const std::vector<int>& arr,
+                                                  std::ostream* pstream__) {
+    int m = pdmp_subsample::m_;
+    std::vector<int> result(m);
+    for (int i = 0; i < m; ++i) {
+        result[i] = arr[pdmp_subsample::indices_[i]];
+    }
+    return result;
+}
+
 #endif

@@ -28,7 +28,7 @@ brm_standata(
 \item{subsample_size}{Integer number of observations per subsample,
 or NULL (default) for full-data gradients. When non-NULL, a
 BridgeStan control-variate subsampled gradient is used. Must be
-less than `nrow(data)`. Currently only fixed-effects models are
+less than `nrow(data)`. Fixed-effects and random-effects models are
 supported for subsampling.}
 
 \item{indices}{Optional integer vector of observation indices for
@@ -51,7 +51,7 @@ after any subsampling modifications. Without `subsample_size`, this
 is identical to `brms::standata()`. With `subsample_size`, returns
 a named list with three elements:
 \describe{
-  \item{full}{Full dataset with `means_X` added.}
+  \item{full}{Full dataset.}
   \item{prior}{Prior-only dummy data (`N=1`, `prior_only=1`).}
   \item{subsample}{An initial subsample of `subsample_size` rows.}
 }

@@ -27,7 +27,7 @@ brm_stancode(
 \item{subsample_size}{Integer number of observations per subsample,
 or NULL (default) for full-data gradients. When non-NULL, a
 BridgeStan control-variate subsampled gradient is used. Must be
-less than `nrow(data)`. Currently only fixed-effects models are
+less than `nrow(data)`. Fixed-effects and random-effects models are
 supported for subsampling.}
 
 \item{stanvars}{Optional `stanvar` object for custom Stan code.}
@@ -46,9 +46,10 @@ subsampling modifications. Without `subsample_size`, this is
 identical to `brms::stancode()`. With `subsample_size`, two
 variants are returned:
 \describe{
-  \item{standard}{The standard model with `means_X` moved to data
-    (used for the full-data and prior-only models).}
-  \item{ext_cpp}{The model with external C++ subsetting functions
-    injected (used for the subsampled-gradient model).}
+  \item{standard}{The standard model (used for the full-data and
+    prior-only models).}
+  \item{ext_cpp}{The model with likelihood rewritten to use
+    external C++ subsetting functions (used for the
+    subsampled-gradient model).}
 }
 }

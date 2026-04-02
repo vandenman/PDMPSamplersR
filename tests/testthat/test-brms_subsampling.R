@@ -2,72 +2,16 @@
 
 # ── Unit tests for helper functions (no Julia needed) ─────────────────────────
 
-test_that("fix_brms_stancode moves means_X from transformed data to data", {
-  code <- paste(
-    "data {",
-    "  int<lower=1> N;",
-    "  vector[N] Y;",
-    "  int<lower=1> K;",
-    "  matrix[N, K] X;",
-    "  int<lower=1> Kc;",
-    "  int prior_only;",
-    "}",
-    "transformed data {",
-    "  vector[Kc] means_X;",
-    "  for (i in 2:K) {",
-    "    means_X[i - 1] = mean(X[, i]);",
-    "  }",
-    "}",
-    "parameters {",
-    "  vector[Kc] b;",
-    "  real Intercept;",
-    "}",
-    sep = "\n"
-  )
-
-  fix_brms_stancode <- PDMPSamplersR:::fix_brms_stancode
-  result <- fix_brms_stancode(code)
-  lines <- strsplit(result, "\n")[[1]]
-
-  # means_X declaration should appear after prior_only in data block
-  prior_only_line <- grep("prior_only", lines)[1]
-  means_data_line <- grep("means_X", lines)
-  # There should be exactly one means_X line (the new one in data)
-  means_data_line <- means_data_line[means_data_line > prior_only_line]
-  expect_length(means_data_line, 1)
-
-  # The original transformed-data declaration and assignment should be gone
-  expect_false(any(grepl("means_X\\[i - 1\\] = mean\\(X\\[, i\\]\\)", result)))
-
-  td_start <- grep("transformed data", lines)
-  td_body <- lines[(td_start + 1):length(lines)]
-  td_end <- grep("^\\}", td_body)[1]
-  td_block <- td_body[1:(td_end - 1)]
-  expect_false(any(grepl("vector\\[Kc\\] means_X", td_block)))
-})
-
-test_that("fix_brms_stancode returns unchanged code without means_X", {
-  fix_brms_stancode <- PDMPSamplersR:::fix_brms_stancode
-  code <- "data {\n  int N;\n}\nparameters {\n  real x;\n}"
-  expect_equal(fix_brms_stancode(code), code)
-})
-
-test_that("fix_brms_stancode returns unchanged code without transformed data", {
-  fix_brms_stancode <- PDMPSamplersR:::fix_brms_stancode
-  code <- "data {\n  int N;\n  int prior_only;\n}\nparameters {\n  real x;\n}"
-  expect_equal(fix_brms_stancode(code), code)
-})
-
 test_that("subset_standata subsets correctly", {
   sdata <- list(
     N = 10L, Y = 1:10, K = 3L, Kc = 2L,
-    X = matrix(seq_len(30), nrow = 10, ncol = 3)
+    X = matrix(seq_len(30), nrow = 10, ncol = 3),
+    means_X = c(5.5, 15.5)
   )
-  means_X <- c(5.5, 15.5)
   indices <- c(1L, 3L, 5L)
 
   subset_standata <- PDMPSamplersR:::subset_standata
-  sub <- subset_standata(sdata, indices, means_X)
+  sub <- subset_standata(sdata, indices)
 
   expect_equal(sub$N, 3L)
   expect_equal(sub$Y, c(1L, 3L, 5L))
@@ -76,25 +20,25 @@ test_that("subset_standata subsets correctly", {
   expect_equal(sub$X[1, ], sdata$X[1, ])
   expect_equal(sub$X[2, ], sdata$X[3, ])
   expect_equal(sub$X[3, ], sdata$X[5, ])
-  expect_equal(sub$means_X, means_X)
+  expect_equal(sub$means_X, c(5.5, 15.5))
   expect_equal(sub$K, 3L)
 })
 
 test_that("make_prior_standata creates valid prior data", {
   sdata <- list(
     N = 10L, Y = 1:10, K = 3L, Kc = 2L,
-    X = matrix(seq_len(30), nrow = 10, ncol = 3)
+    X = matrix(seq_len(30), nrow = 10, ncol = 3),
+    means_X = c(5.5, 15.5)
   )
-  means_X <- c(5.5, 15.5)
 
   make_prior_standata <- PDMPSamplersR:::make_prior_standata
-  prior <- make_prior_standata(sdata, means_X)
+  prior <- make_prior_standata(sdata)
 
   expect_equal(prior$N, 1L)
   expect_equal(prior$K, 3L)
   expect_equal(prior$Kc, 2L)
   expect_equal(prior$prior_only, 1L)
-  expect_equal(prior$means_X, means_X)
+  expect_equal(prior$means_X, c(5.5, 15.5))
   expect_true(is.integer(prior$Y))
   expect_equal(length(prior$Y), 1L)
   expect_true(!is.null(dim(prior$Y)))
@@ -105,12 +49,12 @@ test_that("make_prior_standata creates valid prior data", {
 test_that("make_prior_standata handles double Y", {
   sdata <- list(
     N = 5L, Y = c(1.1, 2.2, 3.3, 4.4, 5.5), K = 2L, Kc = 1L,
-    X = matrix(seq_len(10), nrow = 5, ncol = 2)
+    X = matrix(seq_len(10), nrow = 5, ncol = 2),
+    means_X = 3.5
   )
-  means_X <- 3.5
 
   make_prior_standata <- PDMPSamplersR:::make_prior_standata
-  prior <- make_prior_standata(sdata, means_X)
+  prior <- make_prior_standata(sdata)
 
   expect_true(is.double(prior$Y))
   expect_equal(length(prior$Y), 1L)
@@ -122,12 +66,12 @@ test_that("subset_standata subsets extra observation fields", {
     N = 5L, Y = 1:5, K = 2L, Kc = 1L,
     X       = matrix(seq_len(10), nrow = 5, ncol = 2),
     offsets = c(0.1, 0.2, 0.3, 0.4, 0.5),
-    trials  = c(10L, 20L, 30L, 40L, 50L)
+    trials  = c(10L, 20L, 30L, 40L, 50L),
+    means_X = 1.5
   )
-  means_X <- 1.5
   indices <- c(2L, 4L)
 
-  sub <- PDMPSamplersR:::subset_standata(sdata, indices, means_X)
+  sub <- PDMPSamplersR:::subset_standata(sdata, indices)
 
   expect_equal(sub$offsets, c(0.2, 0.4))
   expect_equal(sub$trials, c(20L, 40L))
@@ -138,11 +82,11 @@ test_that("make_prior_standata includes extra observation fields at N=1", {
     N = 5L, Y = 1:5, K = 2L, Kc = 1L,
     X       = matrix(seq_len(10), nrow = 5, ncol = 2),
     offsets = c(0.1, 0.2, 0.3, 0.4, 0.5),
-    trials  = c(10L, 20L, 30L, 40L, 50L)
+    trials  = c(10L, 20L, 30L, 40L, 50L),
+    means_X = 1.5
   )
-  means_X <- 1.5
 
-  prior <- PDMPSamplersR:::make_prior_standata(sdata, means_X)
+  prior <- PDMPSamplersR:::make_prior_standata(sdata)
 
   expect_equal(prior$N, 1L)
   expect_equal(length(prior$offsets), 1L)
@@ -160,7 +104,7 @@ test_that("brm_pdmp rejects subsample_size >= nrow(data)", {
   )
 })
 
-test_that("brm_pdmp rejects random effects with subsampling", {
+test_that("brm_stancode accepts random effects with subsampling", {
   skip_if_no_brms_setup()
 
   set.seed(1)
@@ -168,11 +112,11 @@ test_that("brm_pdmp rejects random effects with subsampling", {
     y = rnorm(20), x = rnorm(20),
     group = rep(1:4, each = 5)
   )
-  expect_error(
-    brm_pdmp(y ~ x + (1 | group), data = df,
-             subsample_size = 5L, T = 100, show_progress = FALSE),
-    "fixed-effects"
-  )
+  result <- brm_stancode(y ~ x + (1 | group), data = df,
+                         subsample_size = 5L)
+  expect_true(is.list(result))
+  expect_true(grepl("for \\(i in 1:m_sub\\)", result$ext_cpp))
+  expect_true(grepl("pdmp_get_subsample_index", result$ext_cpp))
 })
 
 # ── Integration tests (need Julia + brms) ────────────────────────────────────

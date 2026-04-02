@@ -99,20 +99,39 @@ pdmp_function_decls <- function(stancode) {
   )
 }
 
+replace_prior_block <- function(ext_code, standard_code) {
+  std_tp <- extract_named_block(standard_code, "transformed parameters")
+  ext_tp <- extract_named_block(ext_code, "transformed parameters")
+  replace_named_block(ext_code, "transformed parameters", std_tp)
+}
+
 make_ext_cpp_stancode <- function(standard_code, formula, data, family,
                                   prior, stanvars, sample_prior, ...) {
-  if (brms_has_subsample()) {
-    sub <- pdmp_subsampling(standard_code)
-    decls <- pdmp_function_decls(standard_code)
-    sv <- brms::stanvar(scode = decls, block = "functions")
-    stanvars <- if (is.null(stanvars)) sv else stanvars + sv
-    brms::stancode(formula, data = data, family = family,
-                   prior = prior, stanvars = stanvars,
-                   sample_prior = sample_prior,
-                   subsample = sub, ...)
-  } else {
-    inject_ext_cpp_stancode(standard_code)
-  }
+  sub_family   <- make_subsampled_family(family)
+  sub_stanvars <- make_pdmp_stanvars(
+    formula, data, family, user_stanvars = stanvars,
+    prior = prior, sample_prior = sample_prior, ...
+  )
+  code <- brms::stancode(
+    formula,
+    data = data,
+    family = sub_family,
+    prior = prior,
+    stanvars = sub_stanvars,
+    sample_prior = sample_prior,
+    ...
+  )
+  code <- replace_prior_block(code, standard_code)
+  non_mu_dpars <- setdiff(sub_family$dpars, "mu")
+  code <- validate_and_rewrite_subsampled_code(code, non_mu_dpars)
+  pkg_ver <- utils::packageVersion("PDMPSamplersR")
+  code <- sub(
+    "(// generated with brms [0-9.]+)",
+    paste0("\\1, modified by PDMPSamplersR ", pkg_ver),
+    code
+  )
+  class(code) <- c("character", "brmsmodel")
+  code
 }
 
 #' Show the Stan code used by brm_pdmp

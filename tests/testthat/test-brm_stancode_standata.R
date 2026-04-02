@@ -48,7 +48,7 @@ test_that("brm_stancode with subsampling works for bernoulli", {
   expect_true(is.list(result))
   expect_named(result, c("standard", "ext_cpp"))
   expect_true(grepl("means_X", result$standard))
-  expect_true(grepl("get_subsampled_Y_int", result$ext_cpp))
+  expect_true(grepl("subsampled_bernoulli_logit_lpmf", result$ext_cpp))
 })
 
 # ── brm_standata ─────────────────────────────────────────────────────────────
@@ -200,24 +200,24 @@ test_that("brm_stancode and brm_standata are consistent", {
   expect_true("means_X" %in% names(dlist$subsample))
 })
 
-test_that("brm_stancode ext_cpp injects external C++ declarations for gaussian", {
+test_that("brm_stancode ext_cpp uses custom-family Stan code for gaussian", {
   skip_if_no_brms()
 
   df <- data.frame(y = rnorm(50), x = rnorm(50))
   result <- brm_stancode(y ~ x, data = df, subsample_size = 10L)
 
-  expect_true(grepl("get_subsampled_Y_real", result$ext_cpp))
+  expect_true(grepl("subsampled_gaussian_lpdf", result$ext_cpp))
   expect_true(grepl("get_subsampled_Xc", result$ext_cpp))
-  expect_false(grepl("get_subsampled_Y_real", result$standard))
+  expect_false(grepl("subsampled_gaussian_lpdf", result$standard))
 })
 
-test_that("brm_stancode ext_cpp injects external C++ declarations for poisson", {
+test_that("brm_stancode ext_cpp uses custom-family Stan code for poisson", {
   skip_if_no_brms()
 
   df <- data.frame(y = rpois(50, 3), x = rnorm(50))
   result <- brm_stancode(y ~ x, data = df, family = poisson(),
                           subsample_size = 10L)
 
-  expect_true(grepl("get_subsampled_Y_int", result$ext_cpp))
+  expect_true(grepl("subsampled_poisson_log_lpmf", result$ext_cpp))
   expect_true(grepl("get_subsampled_Xc", result$ext_cpp))
 })

@@ -48,43 +48,7 @@ replace_named_block <- function(stancode, block_name, new_content) {
   cli::cli_abort("Unmatched braces in {.val {block_name}} block.")
 }
 
-# -- Phase 1 validation -------------------------------------------------------
-
-validate_phase1_surface <- function(model_block) {
-  if (!grepl("vector\\[N\\]\\s+mu\\s*=\\s*rep_vector\\(0\\.0,\\s*N\\)", model_block))
-    cli::cli_abort("Unsupported model: mu initialization pattern not found.")
-
-  has_fe     <- grepl("\\bXc\\s*\\*\\s*b\\b", model_block)
-  has_sp_lin <- grepl("\\bXs\\s*\\*\\s*bs\\b", model_block)
-  has_sp_bas <- grepl("\\bZs_\\d+_\\d+\\s*\\*\\s*s_\\d+_\\d+\\b", model_block)
-  has_gp     <- grepl("\\bgp_pred_\\d+\\[Jgp_\\d+\\]", model_block)
-  if (!has_fe && !has_sp_lin && !has_sp_bas && !has_gp)
-    cli::cli_abort("Unsupported model: no supported predictor accumulation found (expected Xc*b, Xs*bs, spline bases, or GP terms).")
-
-  if (grepl("r_[0-9a-zA-Z_]+\\[", model_block))
-    cli::cli_abort("Unsupported model: random effects detected. Only fixed-effects models are supported for subsampling.")
-
-  if (grepl("\\bXc_(sigma|shape|hu|zi|disc|quantile|phi)\\b", model_block))
-    cli::cli_abort("Unsupported model: distributional predictor matrices detected.")
-
-  unsupported <- c(
-    "\\bcens\\b"   = "censoring",
-    "\\btrunc\\b"  = "truncation"
-  )
-  for (i in seq_along(unsupported)) {
-    if (grepl(names(unsupported)[[i]], model_block))
-      cli::cli_abort("Unsupported model: {unsupported[[i]]} detected.")
-  }
-
-  mu_matches <- gregexpr("vector\\[N\\]\\s+mu\\s*=", model_block)[[1]]
-  mu_count <- if (mu_matches[1] == -1L) 0L else length(mu_matches)
-  if (mu_count != 1L)
-    cli::cli_abort("Unsupported model: expected exactly one mu initialization, found {mu_count}.")
-
-  invisible(NULL)
-}
-
-# -- Unified validation (Phase 1 + Phase 2 + Phase 3) -------------------------
+# -- Validation ----------------------------------------------------------------
 
 validate_subsampled_surface <- function(model_block, non_mu_dpars = character(0)) {
   if (!grepl("vector\\[N\\]\\s+mu\\s*=\\s*rep_vector\\(0\\.0,\\s*N\\)", model_block))

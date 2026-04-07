@@ -1,37 +1,21 @@
-# Exhaustive integration tests for subsampled brms models.
+# Gradient equivalence tests for subsampled brms models.
 #
-# These tests are gated by the PDMPSAMPLERSR_EXHAUSTIVE_TESTS environment
-# variable and are never run on CRAN.  They verify:
-#
+# These tests verify:
 #   1. Gradient equivalence: the ext_cpp (subsampled) Stan model produces
-#      the same gradient as a standard brms Stan model evaluated on the
-#      same data when all observations are included in the subsample.
+#      the same gradient as a standard brms Stan model on full data.
+#   2. Subsample scaling: with m < N, the gradient partitions correctly
+#      so that averaging over non-overlapping subsamples recovers the
+#      full-data gradient.
 #
-#   2. Subsample scaling: with a proper subsample of m < N, the gradient
-#      of the ext_cpp model satisfies
-#          grad_ext = (1 - s) * grad_prior + s * grad_std_sub
-#      where s = N / m, grad_prior is the prior-only gradient, and
-#      grad_std_sub is the standard model gradient on subsetted data.
-#
-#   3. Posterior correctness: PDMP posteriors (with and without sub-
-#      sampling) are close to Stan HMC reference posteriors.
-#
-# Run locally with (CLI):
-#   NOT_CRAN=true PDMPSAMPLERSR_EXHAUSTIVE_TESTS=true Rscript -e 'testthat::test_file("tests/testthat/test-exhaustive_subsampling.R")'
-# Run locally with (RStudio):
+# Requires Julia + BridgeStan (~22s total).  Always skipped on CRAN.
 
-# for standalone usage
 require(PDMPSamplersR, quietly = TRUE)
 require(testthat, quietly = TRUE)
-Sys.setenv("PDMPSAMPLERSR_EXHAUSTIVE_TESTS" = "true")
-# -- skip helpers --------------------------------------------------------------
 
-skip_if_no_exhaustive_tests <- function() {
+# -- skip helper ---------------------------------------------------------------
+
+skip_if_no_gradient_tests <- function() {
   testthat::skip_on_cran()
-  testthat::skip_if_not(
-    identical(Sys.getenv("PDMPSAMPLERSR_EXHAUSTIVE_TESTS"), "true"),
-    "Exhaustive subsampling tests not enabled (set PDMPSAMPLERSR_EXHAUSTIVE_TESTS=true)"
-  )
   skip_if_no_brms_setup()
 }
 
@@ -364,7 +348,7 @@ gradient_specs_fe <- list(
 
 for (spec in gradient_specs_fe) {
   test_that(paste0("gradient fulldata: ", spec$label), {
-    skip_if_no_exhaustive_tests()
+    skip_if_no_gradient_tests()
     df <- spec$data_fn()
     setup <- setup_gradient_test(spec$formula, df, spec$family)
     run_fulldata_gradient_test(setup, tol = spec$tol %||% 1e-6)
@@ -373,7 +357,7 @@ for (spec in gradient_specs_fe) {
 
 for (spec in gradient_specs_fe) {
   test_that(paste0("gradient subsample: ", spec$label), {
-    skip_if_no_exhaustive_tests()
+    skip_if_no_gradient_tests()
     df <- spec$data_fn()
     setup <- setup_gradient_test(spec$formula, df, spec$family)
     run_subsample_gradient_test(setup, m = spec$m)
@@ -502,7 +486,7 @@ gradient_specs_re <- list(
 
 for (spec in gradient_specs_re) {
   test_that(paste0("gradient fulldata: ", spec$label), {
-    skip_if_no_exhaustive_tests()
+    skip_if_no_gradient_tests()
     df <- spec$data_fn()
     setup <- setup_gradient_test(spec$formula, df, spec$family)
     run_fulldata_gradient_test(setup, tol = spec$tol %||% 1e-6)
@@ -511,7 +495,7 @@ for (spec in gradient_specs_re) {
 
 for (spec in gradient_specs_re) {
   test_that(paste0("gradient subsample: ", spec$label), {
-    skip_if_no_exhaustive_tests()
+    skip_if_no_gradient_tests()
     df <- spec$data_fn()
     setup <- setup_gradient_test(spec$formula, df, spec$family)
     run_subsample_gradient_test(setup, m = spec$m)
@@ -595,7 +579,7 @@ gradient_specs_dpar <- list(
 
 for (spec in gradient_specs_dpar) {
   test_that(paste0("gradient fulldata: ", spec$label), {
-    skip_if_no_exhaustive_tests()
+    skip_if_no_gradient_tests()
     df <- spec$data_fn()
     setup <- setup_gradient_test(spec$formula, df, spec$family)
     run_fulldata_gradient_test(setup, tol = spec$tol %||% 1e-6)
@@ -604,7 +588,7 @@ for (spec in gradient_specs_dpar) {
 
 for (spec in gradient_specs_dpar) {
   test_that(paste0("gradient subsample: ", spec$label), {
-    skip_if_no_exhaustive_tests()
+    skip_if_no_gradient_tests()
     df <- spec$data_fn()
     setup <- setup_gradient_test(spec$formula, df, spec$family)
     run_subsample_gradient_test(setup, m = spec$m)
@@ -639,7 +623,7 @@ compare_posteriors <- function(fit_pdmp, fit_stan, tol_est = 0.1,
 }
 
 test_that("posterior: gaussian y ~ x (standard)", {
-  skip_if_no_exhaustive_tests()
+  skip_if_no_gradient_tests()
   df <- make_gaussian_fe_data()
   fit_pdmp <- brm_pdmp(y ~ x, data = df, family = gaussian(),
                        flow = "ZigZag", T = 50000, show_progress = FALSE)
@@ -650,7 +634,7 @@ test_that("posterior: gaussian y ~ x (standard)", {
 })
 
 test_that("posterior: gaussian y ~ x (subsampled)", {
-  skip_if_no_exhaustive_tests()
+  skip_if_no_gradient_tests()
   df <- make_gaussian_fe_data()
   fit_sub <- brm_pdmp(y ~ x, data = df, family = gaussian(),
                       flow = "AdaptiveBoomerang", T = 50000,
@@ -663,7 +647,7 @@ test_that("posterior: gaussian y ~ x (subsampled)", {
 })
 
 test_that("posterior: bernoulli y ~ x (standard)", {
-  skip_if_no_exhaustive_tests()
+  skip_if_no_gradient_tests()
   df <- make_bernoulli_fe_data()
   fit_pdmp <- brm_pdmp(y ~ x, data = df, family = brms::bernoulli(),
                        flow = "ZigZag", T = 50000, show_progress = FALSE)
@@ -674,7 +658,7 @@ test_that("posterior: bernoulli y ~ x (standard)", {
 })
 
 test_that("posterior: bernoulli y ~ x (subsampled)", {
-  skip_if_no_exhaustive_tests()
+  skip_if_no_gradient_tests()
   df <- make_bernoulli_fe_data()
   fit_sub <- brm_pdmp(y ~ x, data = df, family = brms::bernoulli(),
                       flow = "AdaptiveBoomerang", T = 50000,
@@ -687,7 +671,7 @@ test_that("posterior: bernoulli y ~ x (subsampled)", {
 })
 
 test_that("posterior: poisson y ~ x (standard)", {
-  skip_if_no_exhaustive_tests()
+  skip_if_no_gradient_tests()
   df <- make_poisson_fe_data()
   fit_pdmp <- brm_pdmp(y ~ x, data = df, family = poisson(),
                        flow = "ZigZag", T = 50000, show_progress = FALSE)
@@ -698,7 +682,7 @@ test_that("posterior: poisson y ~ x (standard)", {
 })
 
 test_that("posterior: poisson y ~ x (subsampled)", {
-  skip_if_no_exhaustive_tests()
+  skip_if_no_gradient_tests()
   df <- make_poisson_fe_data()
   fit_sub <- brm_pdmp(y ~ x, data = df, family = poisson(),
                       flow = "AdaptiveBoomerang", T = 50000,
@@ -711,7 +695,7 @@ test_that("posterior: poisson y ~ x (subsampled)", {
 })
 
 test_that("posterior: negbinomial y ~ x (standard)", {
-  skip_if_no_exhaustive_tests()
+  skip_if_no_gradient_tests()
   df <- make_negbinomial_fe_data()
   fit_pdmp <- brm_pdmp(y ~ x, data = df, family = brms::negbinomial(),
                        flow = "AdaptiveBoomerang", T = 50000,
@@ -723,7 +707,7 @@ test_that("posterior: negbinomial y ~ x (standard)", {
 })
 
 test_that("posterior: negbinomial y ~ x (subsampled)", {
-  skip_if_no_exhaustive_tests()
+  skip_if_no_gradient_tests()
   df <- make_negbinomial_fe_data()
   fit_sub <- brm_pdmp(y ~ x, data = df, family = brms::negbinomial(),
                       flow = "AdaptiveBoomerang", T = 50000,
@@ -736,7 +720,7 @@ test_that("posterior: negbinomial y ~ x (subsampled)", {
 })
 
 test_that("posterior: gaussian y ~ s(x) (standard)", {
-  skip_if_no_exhaustive_tests()
+  skip_if_no_gradient_tests()
   df <- make_gaussian_spline_data()
   fit_pdmp <- brm_pdmp(y ~ s(x, k = 5), data = df, family = gaussian(),
                        flow = "AdaptiveBoomerang", T = 50000,
@@ -748,7 +732,7 @@ test_that("posterior: gaussian y ~ s(x) (standard)", {
 })
 
 test_that("posterior: gaussian y ~ s(x) (subsampled)", {
-  skip_if_no_exhaustive_tests()
+  skip_if_no_gradient_tests()
   df <- make_gaussian_spline_data()
   fit_sub <- brm_pdmp(y ~ s(x, k = 5), data = df, family = gaussian(),
                       flow = "AdaptiveBoomerang", T = 50000,
@@ -761,7 +745,7 @@ test_that("posterior: gaussian y ~ s(x) (subsampled)", {
 })
 
 test_that("posterior: gaussian y ~ x + s(z) (standard)", {
-  skip_if_no_exhaustive_tests()
+  skip_if_no_gradient_tests()
   df <- make_gaussian_fe_spline_data()
   fit_pdmp <- brm_pdmp(y ~ x + s(z, k = 5), data = df, family = gaussian(),
                        flow = "AdaptiveBoomerang", T = 50000,
@@ -773,7 +757,7 @@ test_that("posterior: gaussian y ~ x + s(z) (standard)", {
 })
 
 test_that("posterior: gaussian y ~ x + s(z) (subsampled)", {
-  skip_if_no_exhaustive_tests()
+  skip_if_no_gradient_tests()
   df <- make_gaussian_fe_spline_data()
   fit_sub <- brm_pdmp(y ~ x + s(z, k = 5), data = df, family = gaussian(),
                       flow = "AdaptiveBoomerang", T = 50000,
@@ -786,7 +770,7 @@ test_that("posterior: gaussian y ~ x + s(z) (subsampled)", {
 })
 
 test_that("posterior: gaussian y ~ gp(x) (standard)", {
-  skip_if_no_exhaustive_tests()
+  skip_if_no_gradient_tests()
   df <- make_gaussian_gp_data()
   fit_pdmp <- brm_pdmp(y ~ gp(x), data = df, family = gaussian(),
                        flow = "AdaptiveBoomerang", T = 50000,
@@ -798,7 +782,7 @@ test_that("posterior: gaussian y ~ gp(x) (standard)", {
 })
 
 test_that("posterior: gaussian y ~ gp(x) (subsampled)", {
-  skip_if_no_exhaustive_tests()
+  skip_if_no_gradient_tests()
   df <- make_gaussian_gp_data()
   fit_sub <- brm_pdmp(y ~ gp(x), data = df, family = gaussian(),
                       flow = "AdaptiveBoomerang", T = 50000,
@@ -811,7 +795,7 @@ test_that("posterior: gaussian y ~ gp(x) (subsampled)", {
 })
 
 test_that("posterior: gaussian y ~ x + s(z) + gp(w) (standard)", {
-  skip_if_no_exhaustive_tests()
+  skip_if_no_gradient_tests()
   df <- make_gaussian_fe_spline_gp_data()
   fit_pdmp <- brm_pdmp(y ~ x + s(z, k = 5) + gp(w), data = df,
                        family = gaussian(),
@@ -826,7 +810,7 @@ test_that("posterior: gaussian y ~ x + s(z) + gp(w) (standard)", {
 })
 
 test_that("posterior: gaussian y ~ x + s(z) + gp(w) (subsampled)", {
-  skip_if_no_exhaustive_tests()
+  skip_if_no_gradient_tests()
   df <- make_gaussian_fe_spline_gp_data()
   fit_sub <- brm_pdmp(y ~ x + s(z, k = 5) + gp(w), data = df,
                       family = gaussian(),
@@ -841,7 +825,7 @@ test_that("posterior: gaussian y ~ x + s(z) + gp(w) (subsampled)", {
 })
 
 test_that("posterior: bernoulli y ~ s(x) (standard)", {
-  skip_if_no_exhaustive_tests()
+  skip_if_no_gradient_tests()
   df <- make_bernoulli_spline_data()
   fit_pdmp <- brm_pdmp(y ~ s(x, k = 5), data = df,
                        family = brms::bernoulli(),
@@ -855,7 +839,7 @@ test_that("posterior: bernoulli y ~ s(x) (standard)", {
 })
 
 test_that("posterior: poisson y ~ x + s(z) (standard)", {
-  skip_if_no_exhaustive_tests()
+  skip_if_no_gradient_tests()
   df <- make_poisson_fe_spline_data()
   fit_pdmp <- brm_pdmp(y ~ x + s(z, k = 5), data = df, family = poisson(),
                        flow = "AdaptiveBoomerang", T = 50000,

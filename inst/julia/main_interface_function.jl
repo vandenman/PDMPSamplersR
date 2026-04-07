@@ -384,8 +384,7 @@ function r_pdmp_custom_subsampled(
     prec = isempty(flow_cov) ? Diagonal(ones(d)) : _to_precision(flow_cov, d)
     fmean = isempty(flow_mean) ? zeros(d) : flow_mean
     flow = build_flow(flow_type, prec, fmean; adaptive_scheme)
-    alg0 = build_algorithm(algorithm_type; c0, d, grid_n, grid_t_max)
-    alg = wrap_sticky(alg0, sticky, model_prior, parameter_prior, can_stick)
+    alg = build_algorithm(algorithm_type; c0, d, grid_n, grid_t_max)
 
     chains = pdmp_sample(x0, flow, model, alg, t0, T, t_warmup;
                          progress = show_progress, n_chains, threaded)

@@ -57,11 +57,19 @@ jobs:
         if: matrix.config.julia
         uses: julia-actions/cache@v2
 
+      - name: Compute PDMPSamplersR cache path
+        if: matrix.config.julia
+        shell: Rscript {0}
+        run: |
+          p <- rappdirs::user_cache_dir("PDMPSamplersR")
+          cat(sprintf("PDMPSAMPLERSR_CACHE=%s\n", p),
+              file = Sys.getenv("GITHUB_ENV"), append = TRUE)
+
       - name: Cache PDMPSamplersR artifacts
         if: matrix.config.julia
         uses: actions/cache@v4
         with:
-          path: ~/.cache/PDMPSamplersR
+          path: ${{ env.PDMPSAMPLERSR_CACHE }}
           key: ${{ runner.os }}-pdmpsamplersr-cache-${{ hashFiles('DESCRIPTION', '.github/workflows/R-CMD-check.yaml') }}
           restore-keys: |
             ${{ runner.os }}-pdmpsamplersr-cache-

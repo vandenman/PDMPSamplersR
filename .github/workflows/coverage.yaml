@@ -1,33 +1,24 @@
-name: pkgdown
-
 on:
   push:
     branches: [main, master]
   pull_request:
-  release:
-    types: [published]
-  workflow_dispatch:
+    branches: [main, master]
 
-permissions:
-  contents: write
+name: test-coverage
+
+permissions: read-all
 
 jobs:
-  pkgdown:
+  test-coverage:
     runs-on: ubuntu-latest
+
     env:
       GITHUB_PAT: ${{ secrets.GITHUB_TOKEN }}
+      CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
       JULIA_NUM_PRECOMPILE_TASKS: "1"
+
     steps:
       - uses: actions/checkout@v6
-
-      - uses: julia-actions/setup-julia@v2
-        with:
-          version: '1'
-
-      - uses: julia-actions/cache@v2
-
-      - name: Install JuliaCall dependencies
-        run: julia -e 'using Pkg; Pkg.add("Suppressor"); Pkg.add("RCall")'
 
       - uses: r-lib/actions/setup-r@v2
         with:
@@ -35,10 +26,24 @@ jobs:
 
       - uses: r-lib/actions/setup-r-dependencies@v2
         with:
-          # JuliaCall dev version needed for libunwind fix (PR #265)
-          # that prevents segfaults on Ubuntu 24.04; CRAN 0.17.6 predates this
-          extra-packages: any::pkgdown, any::BH, any::RcppEigen, github::Non-Contradiction/JuliaCall, local::.
-          needs: website
+          extra-packages: any::covr, any::xml2, any::BH, any::RcppEigen, github::Non-Contradiction/JuliaCall, local::.
+          needs: coverage
+
+      - name: Install Julia
+        uses: julia-actions/setup-julia@v2
+        with:
+          version: '1'
+
+      - name: Cache Julia packages
+        uses: julia-actions/cache@v2
+
+      - name: Cache PDMPSamplersR artifacts
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/PDMPSamplersR
+          key: ${{ runner.os }}-pdmpsamplersr-cache-${{ hashFiles('DESCRIPTION', '.github/workflows/coverage.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-pdmpsamplersr-cache-
 
       - name: Configure RCall Julia preferences
         shell: Rscript {0}
@@ -57,16 +62,17 @@ jobs:
           env_dir <- file.path(julia_depot, "environments", paste0("v", julia_ver))
           dir.create(env_dir, recursive = TRUE, showWarnings = FALSE)
           libr <- file.path(rhome, "lib", "libR.so")
+          rhome <- gsub("\\\\", "/", rhome)
+          libr  <- gsub("\\\\", "/", libr)
           prefs_path <- file.path(env_dir, "LocalPreferences.toml")
           prefs <- sprintf('[RCall]\nRhome = "%s"\nlibR = "%s"\n', rhome, libr)
           writeLines(prefs, prefs_path)
           message("Wrote ", prefs_path, ":\n", prefs)
 
-      # Pre-compile Julia packages in a standalone Julia process.
-      # JuliaCall's embedded Julia cannot reliably precompile packages
-      # (the precompile worker subprocess crashes silently inside R).
-      # Running precompilation here ensures the cache is warm before
-      # JuliaCall starts, so it only needs to load the cached files.
+      - name: Install JuliaCall dependencies
+        shell: bash
+        run: julia -e 'using Pkg; Pkg.add("Suppressor"); Pkg.add("RCall")'
+
       - name: Pre-compile Julia project
         shell: bash
         run: |
@@ -77,27 +83,31 @@ jobs:
             import Pkg
             Pkg.add(url="https://github.com/vandenman/PDMPSamplers.jl")
             Pkg.add("BridgeStan")
-            Pkg.update()
             Pkg.precompile()
             using PDMPSamplers, LinearAlgebra, BridgeStan
             @info "Pre-compilation and loading successful"
           '
 
       - name: Set up Julia backend
-        run: |
-          Rscript -e '
-            library(PDMPSamplersR)
-            pdmpsamplers_setup()
-          '
-
-      - name: Build site
-        run: pkgdown::build_site_github_pages(new_process = FALSE, install = FALSE)
         shell: Rscript {0}
+        run: |
+          library(PDMPSamplersR)
+          pdmpsamplers_setup()
 
-      - name: Deploy to GitHub Pages
-        if: github.event_name != 'pull_request'
-        uses: JamesIves/github-pages-deploy-action@v4
+      - name: Test coverage
+        shell: Rscript {0}
+        run: |
+          cov <- covr::package_coverage(
+            quiet = FALSE,
+            clean = FALSE,
+            install_path = file.path(normalizePath(Sys.getenv("RUNNER_TEMP"), winslash = "/"), "package")
+          )
+          covr::to_cobertura(cov)
+
+      - uses: codecov/codecov-action@v4
         with:
-          clean: false
-          branch: gh-pages
-          folder: docs
+          fail_ci_if_error: ${{ github.event_name != 'pull_request' && true || false }}
+          file: ./cobertura.xml
+          plugin: noop
+          disable_search: true
+          token: ${{ secrets.CODECOV_TOKEN }}

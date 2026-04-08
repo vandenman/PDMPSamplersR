@@ -1,21 +1,6 @@
 # Integration tests for Stan model sampling.
 # These tests are skipped if Julia or the Stan models are not available.
 
-skip_if_no_julia <- function() {
-  julia_available <- tryCatch({
-    JuliaCall::julia_setup(verbose = FALSE)
-    TRUE
-  }, error = function(e) FALSE)
-  testthat::skip_if_not(julia_available, "Julia is not available")
-
-  # pdmp_available <- tryCatch({
-  #   PDMPSamplersR:::check_for_julia_setup()
-  #   # check BridgeStan extension loaded: PDMPModel(String, String) must exist
-  #   JuliaCall::julia_eval("hasmethod(PDMPModel, Tuple{String, String})")
-  # }, error = function(e) FALSE)
-  # testthat::skip_if_not(pdmp_available, "PDMPSamplers.jl BridgeStan extension not available")
-}
-
 # Pure R-side validation tests (don't call check_for_julia_setup)
 
 test_that("pdmp_sample_from_stanmodel validates input types", {
@@ -83,8 +68,7 @@ test_that("pdmp_sample_from_stanmodel rejects wrong data extension", {
 
 test_that("pdmp_sample_from_stanmodel runs with mvnormal Stan model", {
   skip_on_cran()
-  skip_if_no_julia()
-  PDMPSamplersR:::check_for_julia_setup()
+  skip_if_no_pdmp_julia_backend()
 
   stan_model_dir <- system.file("stan", "models", package = "PDMPSamplersR")
   stan_data_dir  <- system.file("stan", "data",   package = "PDMPSamplersR")

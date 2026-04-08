@@ -79,6 +79,30 @@ load_julia_project <- function() {
   JuliaCall::julia_command(sprintf('Base.active_project() == joinpath("%1$s", "Project.toml") || Pkg.activate("%1$s");', project_dir))
 }
 
+.pdmp_env <- new.env(parent = emptyenv())
+.pdmp_env$version_printed <- FALSE
+
+print_pdmpsamplers_version <- function() {
+  if (.pdmp_env$version_printed) return(invisible(NULL))
+  version_str <- tryCatch(
+    JuliaCall::julia_eval('
+      let deps = Pkg.dependencies()
+        entry = [dep for (_, dep) in deps if dep.name == "PDMPSamplers"]
+        if isempty(entry)
+          "unknown"
+        else
+          d = first(entry)
+          d.is_tracking_path || d.is_tracking_repo ? "$(d.version) (dev)" : string(d.version)
+        end
+      end
+    '),
+    error = function(e) "unknown"
+  )
+  cli::cli_inform("Using PDMPSamplers.jl v{version_str}")
+  .pdmp_env$version_printed <- TRUE
+  invisible(NULL)
+}
+
 #' Update the Julia project for PDMPSamplers.jl
 #'
 #' Updates the Julia package dependencies used by PDMPSamplersR. If the
@@ -97,6 +121,58 @@ pdmpsamplers_update <- function() {
     cli::cli_inform("Julia project not found. Setting up a new project.")
     setup_julia_project()
   }
+}
+
+#' Show the status of the PDMPSamplers.jl installation
+#'
+#' Displays the current version of PDMPSamplers.jl and whether it is installed
+#' from a local path or from GitHub.
+#'
+#' @returns Invisible \code{NULL}. Called for its side effects.
+#' @seealso \code{\link{pdmpsamplers_setup}} to perform the initial setup,
+#'   \code{\link{pdmpsamplers_update}} to update Julia dependencies.
+#' @export
+pdmpsamplers_status <- function() {
+  if (!julia_project_exists()) {
+    cli::cli_alert_warning("Julia project not found. Run {.fn pdmpsamplers_setup} first.")
+    return(invisible(NULL))
+  }
+  load_julia_project()
+  info <- tryCatch(
+    JuliaCall::julia_eval('
+      let deps = Pkg.dependencies()
+        entries = [dep for (_, dep) in deps if dep.name == "PDMPSamplers"]
+        if isempty(entries)
+          "not installed|||none|||"
+        else
+          d = first(entries)
+          ver = d.version === nothing ? "unknown" : string(d.version)
+          git_src = isnothing(d.git_source) ? "" : d.git_source
+          source_type = d.is_tracking_path ? "local" : (d.is_tracking_repo ? "GitHub" : "registry")
+          join([ver, source_type, git_src], "|||")
+        end
+      end
+    '),
+    error = function(e) "unknown|||unknown|||"
+  )
+  parts <- strsplit(info, "|||", fixed = TRUE)[[1]]
+  version     <- parts[1]
+  source_type <- if (length(parts) >= 2) parts[2] else "unknown"
+  source_path <- if (length(parts) >= 3) parts[3] else ""
+
+  source_label <- switch(source_type,
+    "local"    = paste0("local (", source_path, ")"),
+    "GitHub"   = "GitHub",
+    "registry" = "registry",
+    source_type
+  )
+
+  cli::cli_inform(c(
+    "PDMPSamplers.jl status:",
+    "*" = "Version: {version}",
+    "*" = "Source:  {source_label}"
+  ))
+  invisible(NULL)
 }
 
 #' Use a local version of PDMPSamplers.jl
@@ -132,6 +208,7 @@ use_local_pdmpsamplers <- function(path = NULL) {
 }
 
 load_interface_function <- function() {
+  if (isTRUE(JuliaCall::julia_eval("isdefined(Main, :PDMPSamplersRBridge)"))) return(invisible(NULL))
   interface_file <- system.file("julia", "main_interface_function.jl", package = "PDMPSamplersR")
   if (fs::file_exists(interface_file)) {
     JuliaCall::julia_source(interface_file)
@@ -155,6 +232,7 @@ check_for_julia_setup <- function(error_if_not_exists = FALSE, setup_if_not_exis
     load_julia_project()
     load_required_julia_packages()
     load_interface_function()
+    print_pdmpsamplers_version()
     return(TRUE)
   } else if (!error_if_not_exists) {
     if (setup_if_not_exists) {

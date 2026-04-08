@@ -12,7 +12,7 @@
 #'
 #' Note: this method is copied from the cmdstanr package to avoid a dependency
 #' on a non-CRAN package. It's copied at commit [edccf2d2f6449e7d80626a3ee6cc93845e82915b](https://github.com/stan-dev/cmdstanr/blob/edccf2d2f6449e7d80626a3ee6cc93845e82915b/R/data.R#L59).
-#' As such, this file and the code therein follows the same license cmdstanr (BSD 3-Clause License),
+#' As such, this file and the code therein follows the same license as cmdstanr (BSD 3-Clause License),
 #' see the LICENSE file of cmdstanr for details.
 #'
 #' `write_stan_json()` performs several conversions before writing the JSON

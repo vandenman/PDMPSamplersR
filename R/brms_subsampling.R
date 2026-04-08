@@ -1,0 +1,169 @@
+subset_standata <- function(sdata, indices) {
+  N_orig  <- sdata$N
+  non_obs <- c("N", "K", "Kc", "prior_only", "means_X")
+  sub     <- sdata
+  sub$N   <- length(indices)
+  for (nm in setdiff(names(sdata), non_obs)) {
+    val <- sdata[[nm]]
+    if (is.matrix(val) && nrow(val) == N_orig) {
+      sub[[nm]] <- val[indices, , drop = FALSE]
+    } else if (!is.matrix(val) && is.atomic(val) && length(val) == N_orig) {
+      sub_val <- val[indices]
+      if (length(sub_val) == 1L) sub_val <- array(sub_val)
+      sub[[nm]] <- sub_val
+    }
+  }
+  sub
+}
+
+make_prior_standata <- function(sdata) {
+  N_orig  <- sdata$N
+  non_obs <- c("N", "K", "Kc", "prior_only", "means_X")
+  prior   <- sdata
+  prior$N <- 1L
+  for (nm in setdiff(names(sdata), non_obs)) {
+    val <- sdata[[nm]]
+    if (is.matrix(val) && nrow(val) == N_orig) {
+      prior[[nm]] <- val[1L, , drop = FALSE]
+    } else if (!is.matrix(val) && is.atomic(val) && length(val) == N_orig) {
+      prior[[nm]] <- array(val[1L])
+    }
+  }
+  prior$prior_only <- 1L
+  prior
+}
+
+hpp_path <- function() {
+  system.file("stan", "pdmp_subsample.hpp", package = "PDMPSamplersR")
+}
+
+replace_prior_block <- function(ext_code, standard_code) {
+  std_tp <- extract_named_block(standard_code, "transformed parameters")
+  ext_tp <- extract_named_block(ext_code, "transformed parameters")
+  replace_named_block(ext_code, "transformed parameters", std_tp)
+}
+
+make_ext_cpp_stancode <- function(standard_code, formula, data, family,
+                                  prior, stanvars, sample_prior, ...) {
+  sub_family   <- make_subsampled_family(family)
+  sub_stanvars <- make_pdmp_stanvars(
+    formula, data, family, user_stanvars = stanvars,
+    prior = prior, sample_prior = sample_prior, ...
+  )
+  code <- brms::stancode(
+    formula,
+    data = data,
+    family = sub_family,
+    prior = prior,
+    stanvars = sub_stanvars,
+    sample_prior = sample_prior,
+    ...
+  )
+  code <- replace_prior_block(code, standard_code)
+  non_mu_dpars <- setdiff(sub_family$dpars, "mu")
+  code <- validate_and_rewrite_subsampled_code(code, non_mu_dpars)
+  pkg_ver <- utils::packageVersion("PDMPSamplersR")
+  code <- sub(
+    "(// generated with brms [0-9.]+)",
+    paste0("\\1, modified by PDMPSamplersR ", pkg_ver),
+    code
+  )
+  class(code) <- c("character", "brmsmodel")
+  code
+}
+
+#' Show the Stan code used by brm_pdmp
+#'
+#' Returns the Stan code that [brm_pdmp()] would compile, after any
+#' subsampling modifications. Without `subsample_size`, this is
+#' identical to `brms::stancode()`. With `subsample_size`, two
+#' variants are returned:
+#' \describe{
+#'   \item{standard}{The standard model (used for the full-data and
+#'     prior-only models).}
+#'   \item{ext_cpp}{The model with likelihood rewritten to use
+#'     external C++ subsetting functions (used for the
+#'     subsampled-gradient model).}
+#' }
+#'
+#' @inheritParams brm_pdmp
+#'
+#' @return A character string when `subsample_size` is NULL, or a
+#'   named list with elements `standard` and `ext_cpp`.
+#' @export
+brm_stancode <- function(
+    formula, data, family = gaussian(),
+    prior = NULL,
+    subsample_size = NULL,
+    stanvars = NULL, sample_prior = "no",
+    ...
+) {
+  if (!requireNamespace("brms", quietly = TRUE))
+    cli::cli_abort("Package {.pkg brms} is required for {.fn brm_stancode}.")
+
+  scode <- brms::stancode(formula, data = data, family = family,
+                          prior = prior, stanvars = stanvars,
+                          sample_prior = sample_prior, ...)
+  if (is.null(subsample_size)) return(scode)
+
+  list(
+    standard = scode,
+    ext_cpp  = make_ext_cpp_stancode(scode, formula, data, family,
+                                     prior, stanvars, sample_prior, ...)
+  )
+}
+
+#' Show the Stan data used by brm_pdmp
+#'
+#' Returns the Stan data that [brm_pdmp()] would pass to BridgeStan,
+#' after any subsampling modifications. Without `subsample_size`, this
+#' is identical to `brms::standata()`. With `subsample_size`, returns
+#' a named list with three elements:
+#' \describe{
+#'   \item{full}{Full dataset.}
+#'   \item{prior}{Prior-only dummy data (`N=1`, `prior_only=1`).}
+#'   \item{subsample}{An initial subsample of `subsample_size` rows.}
+#' }
+#'
+#' @inheritParams brm_pdmp
+#' @param indices Optional integer vector of observation indices for
+#'   the initial subsample. If NULL (default), a random sample of
+#'   size `subsample_size` is drawn.
+#'
+#' @return A list (Stan data) when `subsample_size` is NULL, or a
+#'   named list with elements `full`, `prior`, and `subsample`.
+#' @export
+brm_standata <- function(
+    formula, data, family = gaussian(),
+    prior = NULL,
+    subsample_size = NULL,
+    indices = NULL,
+    stanvars = NULL, sample_prior = "no",
+    ...
+) {
+  if (!requireNamespace("brms", quietly = TRUE))
+    cli::cli_abort("Package {.pkg brms} is required for {.fn brm_standata}.")
+
+  sdata <- brms::standata(formula, data = data, family = family,
+                          prior = prior, stanvars = stanvars,
+                          sample_prior = sample_prior, ...)
+
+  if (is.null(subsample_size)) return(sdata)
+
+  N <- nrow(data)
+  subsample_size <- as.integer(subsample_size)
+  if (subsample_size >= N)
+    cli::cli_abort("{.arg subsample_size} ({subsample_size}) must be less than {.code nrow(data)} ({N}).")
+
+  sdata_prior <- make_prior_standata(sdata)
+
+  if (is.null(indices)) {
+    indices <- sample.int(N, subsample_size)
+  } else {
+    if (length(indices) != subsample_size)
+      cli::cli_abort("{.arg indices} length ({length(indices)}) must equal {.arg subsample_size} ({subsample_size}).")
+  }
+  sdata_sub <- subset_standata(sdata, indices)
+
+  list(full = sdata, prior = sdata_prior, subsample = sdata_sub)
+}

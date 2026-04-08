@@ -20,12 +20,14 @@ navbar:
       icon: fa-book
     github:
       icon: fa-github
+      aria-label: GitHub
       href: https://github.com/vandenman/PDMPSamplersR
 
 reference:
   - title: Sampling
     contents:
       - pdmp_sample
+      - pdmp_sample_subsampled
       - pdmp_sample_from_stanmodel
       - write_stan_json
   - title: Results
@@ -54,9 +56,18 @@ reference:
     contents:
       - bernoulli
       - betabernoulli
+  - title: brms interface
+    contents:
+      - brm_pdmp
+      - brm_stancode
+      - brm_standata
+      - log_lik_subsampled
+      - posterior_epred_subsampled
+      - posterior_predict_subsampled
   - title: Setup
     contents:
       - pdmpsamplers_setup
       - pdmpsamplers_update
+      - pdmpsamplers_status
       - use_local_pdmpsamplers
       - check_for_julia_setup

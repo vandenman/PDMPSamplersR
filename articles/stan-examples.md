@@ -409,5 +409,5 @@ tibble(
     # A tibble: 2 × 2
       method   bayes_factor
       <chr>           <dbl>
-    1 PDMP             1.31
+    1 PDMP             1.30
     2 Analytic         1.34

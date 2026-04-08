@@ -22,7 +22,7 @@
   </ul></li>
       </ul><ul class="navbar-nav"><li class="nav-item"><form class="form-inline" role="search">
  <input class="form-control" type="search" name="search-input" id="search-input" autocomplete="off" aria-label="Search site" placeholder="Search for" data-search-index="../search.json"></form></li>
-<li class="nav-item"><a class="external-link nav-link" href="https://github.com/vandenman/PDMPSamplersR"><span class="fa fa-github"></span></a></li>
+<li class="nav-item"><a class="external-link nav-link" href="https://github.com/vandenman/PDMPSamplersR" aria-label="GitHub"><span class="fa fa-github"></span></a></li>
 <li class="nav-item"><a class="external-link nav-link" href="https://vandenman.github.io/PDMPSamplers.jl/dev/"><span class="fa fa-book"></span> Full Documentation</a></li>
       </ul></div>
 
@@ -51,6 +51,13 @@
 
         </dt>
         <dd>PDMP Sampling</dd>
+
+        <dt>
+
+          <code><a href="pdmp_sample_subsampled.html">pdmp_sample_subsampled()</a></code>
+
+        </dt>
+        <dd>PDMP sampling with subsampled gradients</dd>
 
         <dt>
 
@@ -233,6 +240,57 @@
         </dt>
         <dd>Create a Beta-Bernoulli model prior</dd>
       </dl></div><div class="section level2">
+      <h2 id="brms-interface">brms interface<a class="anchor" aria-label="anchor" href="#brms-interface"></a></h2>
+
+
+
+      <dl></dl></div><div class="section level2">
+
+
+
+
+      <dl><dt>
+
+          <code><a href="brm_pdmp.html">brm_pdmp()</a></code>
+
+        </dt>
+        <dd>Fit a brms model using PDMP samplers</dd>
+
+        <dt>
+
+          <code><a href="brm_stancode.html">brm_stancode()</a></code>
+
+        </dt>
+        <dd>Show the Stan code used by brm_pdmp</dd>
+
+        <dt>
+
+          <code><a href="brm_standata.html">brm_standata()</a></code>
+
+        </dt>
+        <dd>Show the Stan data used by brm_pdmp</dd>
+
+        <dt>
+
+          <code><a href="log_lik_subsampled.html">log_lik_subsampled_bernoulli_logit()</a></code> <code><a href="log_lik_subsampled.html">log_lik_subsampled_poisson_log()</a></code> <code><a href="log_lik_subsampled.html">log_lik_subsampled_gaussian()</a></code> <code><a href="log_lik_subsampled.html">log_lik_subsampled_negbinomial_log()</a></code> <code><a href="log_lik_subsampled.html">log_lik_subsampled_student()</a></code> <code><a href="log_lik_subsampled.html">log_lik_subsampled_gamma()</a></code> <code><a href="log_lik_subsampled.html">log_lik_subsampled_beta()</a></code>
+
+        </dt>
+        <dd>Log-likelihood for subsampled custom families</dd>
+
+        <dt>
+
+          <code><a href="posterior_epred_subsampled.html">posterior_epred_subsampled_bernoulli_logit()</a></code> <code><a href="posterior_epred_subsampled.html">posterior_epred_subsampled_poisson_log()</a></code> <code><a href="posterior_epred_subsampled.html">posterior_epred_subsampled_gaussian()</a></code> <code><a href="posterior_epred_subsampled.html">posterior_epred_subsampled_negbinomial_log()</a></code> <code><a href="posterior_epred_subsampled.html">posterior_epred_subsampled_student()</a></code> <code><a href="posterior_epred_subsampled.html">posterior_epred_subsampled_gamma()</a></code> <code><a href="posterior_epred_subsampled.html">posterior_epred_subsampled_beta()</a></code>
+
+        </dt>
+        <dd>Posterior expected values for subsampled custom families</dd>
+
+        <dt>
+
+          <code><a href="posterior_predict_subsampled.html">posterior_predict_subsampled_bernoulli_logit()</a></code> <code><a href="posterior_predict_subsampled.html">posterior_predict_subsampled_poisson_log()</a></code> <code><a href="posterior_predict_subsampled.html">posterior_predict_subsampled_gaussian()</a></code> <code><a href="posterior_predict_subsampled.html">posterior_predict_subsampled_negbinomial_log()</a></code> <code><a href="posterior_predict_subsampled.html">posterior_predict_subsampled_student()</a></code> <code><a href="posterior_predict_subsampled.html">posterior_predict_subsampled_gamma()</a></code> <code><a href="posterior_predict_subsampled.html">posterior_predict_subsampled_beta()</a></code>
+
+        </dt>
+        <dd>Posterior predictions for subsampled custom families</dd>
+      </dl></div><div class="section level2">
       <h2 id="setup">Setup<a class="anchor" aria-label="anchor" href="#setup"></a></h2>
 
 
@@ -255,6 +313,13 @@
 
         </dt>
         <dd>Update the Julia project for PDMPSamplers.jl</dd>
+
+        <dt>
+
+          <code><a href="pdmpsamplers_status.html">pdmpsamplers_status()</a></code>
+
+        </dt>
+        <dd>Show the status of the PDMPSamplers.jl installation</dd>
 
         <dt>
 

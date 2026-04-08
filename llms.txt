@@ -38,6 +38,8 @@ examples.
 
 - [`pdmp_sample()`](https://vandenman.github.io/PDMPSamplersR/reference/pdmp_sample.md)
   : PDMP Sampling
+- [`pdmp_sample_subsampled()`](https://vandenman.github.io/PDMPSamplersR/reference/pdmp_sample_subsampled.md)
+  : PDMP sampling with subsampled gradients
 - [`pdmp_sample_from_stanmodel()`](https://vandenman.github.io/PDMPSamplersR/reference/pdmp_sample_from_stanmodel.md)
   : PDMP Sampling from Stan Model
 - [`write_stan_json()`](https://vandenman.github.io/PDMPSamplersR/reference/write_stan_json.md)
@@ -92,12 +94,47 @@ examples.
 - [`betabernoulli()`](https://vandenman.github.io/PDMPSamplersR/reference/betabernoulli.md)
   : Create a Beta-Bernoulli model prior
 
+## brms interface
+
+- [`brm_pdmp()`](https://vandenman.github.io/PDMPSamplersR/reference/brm_pdmp.md)
+  : Fit a brms model using PDMP samplers
+- [`brm_stancode()`](https://vandenman.github.io/PDMPSamplersR/reference/brm_stancode.md)
+  : Show the Stan code used by brm_pdmp
+- [`brm_standata()`](https://vandenman.github.io/PDMPSamplersR/reference/brm_standata.md)
+  : Show the Stan data used by brm_pdmp
+- [`log_lik_subsampled_bernoulli_logit()`](https://vandenman.github.io/PDMPSamplersR/reference/log_lik_subsampled.md)
+  [`log_lik_subsampled_poisson_log()`](https://vandenman.github.io/PDMPSamplersR/reference/log_lik_subsampled.md)
+  [`log_lik_subsampled_gaussian()`](https://vandenman.github.io/PDMPSamplersR/reference/log_lik_subsampled.md)
+  [`log_lik_subsampled_negbinomial_log()`](https://vandenman.github.io/PDMPSamplersR/reference/log_lik_subsampled.md)
+  [`log_lik_subsampled_student()`](https://vandenman.github.io/PDMPSamplersR/reference/log_lik_subsampled.md)
+  [`log_lik_subsampled_gamma()`](https://vandenman.github.io/PDMPSamplersR/reference/log_lik_subsampled.md)
+  [`log_lik_subsampled_beta()`](https://vandenman.github.io/PDMPSamplersR/reference/log_lik_subsampled.md)
+  : Log-likelihood for subsampled custom families
+- [`posterior_epred_subsampled_bernoulli_logit()`](https://vandenman.github.io/PDMPSamplersR/reference/posterior_epred_subsampled.md)
+  [`posterior_epred_subsampled_poisson_log()`](https://vandenman.github.io/PDMPSamplersR/reference/posterior_epred_subsampled.md)
+  [`posterior_epred_subsampled_gaussian()`](https://vandenman.github.io/PDMPSamplersR/reference/posterior_epred_subsampled.md)
+  [`posterior_epred_subsampled_negbinomial_log()`](https://vandenman.github.io/PDMPSamplersR/reference/posterior_epred_subsampled.md)
+  [`posterior_epred_subsampled_student()`](https://vandenman.github.io/PDMPSamplersR/reference/posterior_epred_subsampled.md)
+  [`posterior_epred_subsampled_gamma()`](https://vandenman.github.io/PDMPSamplersR/reference/posterior_epred_subsampled.md)
+  [`posterior_epred_subsampled_beta()`](https://vandenman.github.io/PDMPSamplersR/reference/posterior_epred_subsampled.md)
+  : Posterior expected values for subsampled custom families
+- [`posterior_predict_subsampled_bernoulli_logit()`](https://vandenman.github.io/PDMPSamplersR/reference/posterior_predict_subsampled.md)
+  [`posterior_predict_subsampled_poisson_log()`](https://vandenman.github.io/PDMPSamplersR/reference/posterior_predict_subsampled.md)
+  [`posterior_predict_subsampled_gaussian()`](https://vandenman.github.io/PDMPSamplersR/reference/posterior_predict_subsampled.md)
+  [`posterior_predict_subsampled_negbinomial_log()`](https://vandenman.github.io/PDMPSamplersR/reference/posterior_predict_subsampled.md)
+  [`posterior_predict_subsampled_student()`](https://vandenman.github.io/PDMPSamplersR/reference/posterior_predict_subsampled.md)
+  [`posterior_predict_subsampled_gamma()`](https://vandenman.github.io/PDMPSamplersR/reference/posterior_predict_subsampled.md)
+  [`posterior_predict_subsampled_beta()`](https://vandenman.github.io/PDMPSamplersR/reference/posterior_predict_subsampled.md)
+  : Posterior predictions for subsampled custom families
+
 ## Setup
 
 - [`pdmpsamplers_setup()`](https://vandenman.github.io/PDMPSamplersR/reference/pdmpsamplers_setup.md)
   : Set up the Julia environment for PDMPSamplers.jl
 - [`pdmpsamplers_update()`](https://vandenman.github.io/PDMPSamplersR/reference/pdmpsamplers_update.md)
   : Update the Julia project for PDMPSamplers.jl
+- [`pdmpsamplers_status()`](https://vandenman.github.io/PDMPSamplersR/reference/pdmpsamplers_status.md)
+  : Show the status of the PDMPSamplers.jl installation
 - [`use_local_pdmpsamplers()`](https://vandenman.github.io/PDMPSamplersR/reference/use_local_pdmpsamplers.md)
   : Use a local version of PDMPSamplers.jl
 - [`check_for_julia_setup()`](https://vandenman.github.io/PDMPSamplersR/reference/check_for_julia_setup.md)

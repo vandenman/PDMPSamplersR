@@ -30,7 +30,7 @@ write_stan_json(data, file, always_decimal = FALSE)
 Note: this method is copied from the cmdstanr package to avoid a
 dependency on a non-CRAN package. It's copied at commit
 \[edccf2d2f6449e7d80626a3ee6cc93845e82915b\](https://github.com/stan-dev/cmdstanr/blob/edccf2d2f6449e7d80626a3ee6cc93845e82915b/R/data.R#L59).
-As such, this file and the code therein follows the same license
+As such, this file and the code therein follows the same license as
 cmdstanr (BSD 3-Clause License), see the LICENSE file of cmdstanr for
 details.
 
@@ -77,13 +77,13 @@ cat(readLines(file), sep = "\n")
 #>   "N": 5,
 #>   "K": 2,
 #>   "x": [
+#>     [-1.40004351672175, 1.14841160602606],
 #>     [0.25531705484526, -1.82181766097663],
 #>     [-2.43726361121953, -0.247325302073524],
 #>     [-0.00557128674616073, -0.244199606778383],
-#>     [0.621552721415214, -0.282705448814465],
-#>     [1.14841160602606, -0.553699383688721]
+#>     [0.621552721415214, -0.282705448814465]
 #>   ],
-#>   "y": [11, 16, 4, 11, 7],
+#>   "y": [8, 11, 16, 4, 11],
 #>   "z": [1, 0]
 #> }
 

@@ -65,6 +65,20 @@
 #'   BridgeStan HVP at the anchor with a cheaper gradient-based FD
 #'   approximation. Also disables HVP for grid thinning. Only used when
 #'   `use_hcv` is TRUE.
+#' @param sticky Logical; enable spike-and-slab variable selection for
+#'   population-level coefficients (default: FALSE). Requires
+#'   `model_prior` to be set. Only supported on the full-data path
+#'   (not with `subsample_size`).
+#' @param can_stick Optional logical vector indicating which non-intercept
+#'   population-level coefficients are candidates for selection. Length
+#'   must match the number of supported coefficients. If omitted, all
+#'   non-intercept population-level coefficients are candidates.
+#' @param model_prior A [bernoulli()] or [betabernoulli()] object
+#'   specifying the prior on model space. Required when `sticky = TRUE`.
+#' @param parameter_prior Optional numeric vector of slab densities at
+#'   zero for each stickable coordinate. If omitted, derived
+#'   automatically from the brms prior specification (only `normal(0, s)`
+#'   and `student_t(df, 0, s)` are supported for automatic derivation).
 #' @param stanvars Optional `stanvar` object for custom Stan code.
 #' @param sample_prior Currently only `"no"` is supported.
 #' @param save_model Optional file path to save the generated Stan code.
@@ -117,6 +131,7 @@ brm_pdmp <- function(
     use_fd_hvp = FALSE,
     post_warmup_simplify = FALSE,
     use_fd_hcv = FALSE,
+    sticky = FALSE, can_stick = NULL, model_prior = NULL, parameter_prior = NULL,
     stanvars = NULL, sample_prior = "no",
     save_model = NULL,
     ...
@@ -212,6 +227,27 @@ brm_pdmp <- function(
   jl_discretize_dt <- if (is.null(discretize_dt)) 0.0 else discretize_dt
   jl_resample_dt <- if (is.null(resample_dt)) 0.0 else resample_dt
 
+  # Validate sticky arguments (requires param_unc_names from BridgeStan)
+  if (isTRUE(sticky) && subsampled)
+    cli::cli_abort("Sticky variable selection with subsampled gradients is not yet supported. Use full-data gradients.")
+
+  if (isTRUE(sticky)) {
+    unc_names <- JuliaCall::julia_call(
+      "r_get_param_unc_names",
+      normalizePath(stan_file, mustWork = TRUE),
+      normalizePath(data_file, mustWork = TRUE)
+    )
+    brms_prior <- brms::prior_summary(empty_fit)
+    sticky_args <- validate_brms_sticky(
+      sticky, can_stick, model_prior, parameter_prior,
+      d = length(unc_names), unc_names = unc_names,
+      prior = brms_prior, subsampled = subsampled
+    )
+  } else {
+    sticky_args <- list(sticky = FALSE, can_stick = NULL,
+                        model_prior = NULL, parameter_prior = NULL)
+  }
+
   if (subsampled) {
     jl_result <- JuliaCall::julia_call(
       "r_pdmp_brms_subsampled",
@@ -263,7 +299,11 @@ brm_pdmp <- function(
       threaded = threaded,
       compute_lp = compute_lp,
       use_fd_hvp = use_fd_hvp,
-      post_warmup_simplify = post_warmup_simplify
+      post_warmup_simplify = post_warmup_simplify,
+      sticky = sticky_args$sticky,
+      can_stick = sticky_args$can_stick,
+      model_prior = sticky_args$model_prior,
+      parameter_prior = sticky_args$parameter_prior
     )
   }
 
@@ -277,6 +317,26 @@ brm_pdmp <- function(
   empty_fit <- brms::rename_pars(empty_fit)
   attr(empty_fit, "sampling_time") <- sampling_time
   attr(empty_fit, "pdmp_stats") <- pdmp_stats
+
+  if (isTRUE(sticky_args$sticky) && !is.null(jl_result$inclusion_probs)) {
+    incl_raw <- jl_result$inclusion_probs
+    if (is.environment(incl_raw)) incl_raw <- as.list(incl_raw)
+    stickable_names <- stickable_coef_names(unc_names)
+    stickable_idx <- which(sticky_args$can_stick)
+    incl_list <- lapply(seq_along(incl_raw), function(ch) {
+      probs <- incl_raw[[ch]]
+      named_probs <- probs[stickable_idx]
+      names(named_probs) <- stickable_names
+      named_probs
+    })
+    names(incl_list) <- paste0("chain", seq_along(incl_list))
+    attr(empty_fit, "sticky") <- list(
+      inclusion_probs = incl_list,
+      can_stick = sticky_args$can_stick,
+      unc_names = unc_names
+    )
+  }
+
   empty_fit
 }
 

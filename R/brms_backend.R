@@ -67,8 +67,7 @@
 #'   `use_hcv` is TRUE.
 #' @param sticky Logical; enable spike-and-slab variable selection for
 #'   population-level coefficients (default: FALSE). Requires
-#'   `model_prior` to be set. Only supported on the full-data path
-#'   (not with `subsample_size`).
+#'   `model_prior` to be set.
 #' @param can_stick Optional logical vector indicating which non-intercept
 #'   population-level coefficients are candidates for selection. Length
 #'   must match the number of supported coefficients. If omitted, all
@@ -228,14 +227,12 @@ brm_pdmp <- function(
   jl_resample_dt <- if (is.null(resample_dt)) 0.0 else resample_dt
 
   # Validate sticky arguments (requires param_unc_names from BridgeStan)
-  if (isTRUE(sticky) && subsampled)
-    cli::cli_abort("Sticky variable selection with subsampled gradients is not yet supported. Use full-data gradients.")
-
   if (isTRUE(sticky)) {
+    data_for_names <- if (subsampled) data_full_file else data_file
     unc_names <- JuliaCall::julia_call(
       "r_get_param_unc_names",
       normalizePath(stan_file, mustWork = TRUE),
-      normalizePath(data_file, mustWork = TRUE)
+      normalizePath(data_for_names, mustWork = TRUE)
     )
     brms_prior <- brms::prior_summary(empty_fit)
     sticky_args <- validate_brms_sticky(
@@ -278,7 +275,11 @@ brm_pdmp <- function(
       bank_capacity = as.integer(bank_capacity),
       use_fd_hvp = use_fd_hvp,
       post_warmup_simplify = post_warmup_simplify,
-      use_fd_hcv = use_fd_hcv
+      use_fd_hcv = use_fd_hcv,
+      sticky = sticky_args$sticky,
+      can_stick = sticky_args$can_stick,
+      model_prior = sticky_args$model_prior,
+      parameter_prior = sticky_args$parameter_prior
     )
   } else {
     jl_result <- JuliaCall::julia_call(

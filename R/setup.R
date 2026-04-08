@@ -123,6 +123,58 @@ pdmpsamplers_update <- function() {
   }
 }
 
+#' Show the status of the PDMPSamplers.jl installation
+#'
+#' Displays the current version of PDMPSamplers.jl and whether it is installed
+#' from a local path or from GitHub.
+#'
+#' @returns Invisible \code{NULL}. Called for its side effects.
+#' @seealso \code{\link{pdmpsamplers_setup}} to perform the initial setup,
+#'   \code{\link{pdmpsamplers_update}} to update Julia dependencies.
+#' @export
+pdmpsamplers_status <- function() {
+  if (!julia_project_exists()) {
+    cli::cli_alert_warning("Julia project not found. Run {.fn pdmpsamplers_setup} first.")
+    return(invisible(NULL))
+  }
+  load_julia_project()
+  info <- tryCatch(
+    JuliaCall::julia_eval('
+      let deps = Pkg.dependencies()
+        entries = [dep for (_, dep) in deps if dep.name == "PDMPSamplers"]
+        if isempty(entries)
+          "not installed|||none|||"
+        else
+          d = first(entries)
+          ver = d.version === nothing ? "unknown" : string(d.version)
+          git_src = isnothing(d.git_source) ? "" : d.git_source
+          source_type = d.is_tracking_path ? "local" : (d.is_tracking_repo ? "GitHub" : "registry")
+          join([ver, source_type, git_src], "|||")
+        end
+      end
+    '),
+    error = function(e) "unknown|||unknown|||"
+  )
+  parts <- strsplit(info, "|||", fixed = TRUE)[[1]]
+  version     <- parts[1]
+  source_type <- if (length(parts) >= 2) parts[2] else "unknown"
+  source_path <- if (length(parts) >= 3) parts[3] else ""
+
+  source_label <- switch(source_type,
+    "local"    = paste0("local (", source_path, ")"),
+    "GitHub"   = "GitHub",
+    "registry" = "registry",
+    source_type
+  )
+
+  cli::cli_inform(c(
+    "PDMPSamplers.jl status:",
+    "*" = "Version: {version}",
+    "*" = "Source:  {source_label}"
+  ))
+  invisible(NULL)
+}
+
 #' Use a local version of PDMPSamplers.jl
 #'
 #' Switch the Julia project to use a local (development) copy of

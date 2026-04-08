@@ -61,9 +61,13 @@ reference:
       - brm_pdmp
       - brm_stancode
       - brm_standata
+      - log_lik_subsampled
+      - posterior_epred_subsampled
+      - posterior_predict_subsampled
   - title: Setup
     contents:
       - pdmpsamplers_setup
       - pdmpsamplers_update
+      - pdmpsamplers_status
       - use_local_pdmpsamplers
       - check_for_julia_setup

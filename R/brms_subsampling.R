@@ -33,70 +33,8 @@ make_prior_standata <- function(sdata) {
   prior
 }
 
-inject_ext_cpp_stancode <- function(stancode) {
-  y_is_int <- grepl("array\\[N\\] int Y;", stancode)
-
-  if (y_is_int) {
-    func_decls <- paste(
-      "  array[] int get_subsampled_Y_int(array[] int Y_full);",
-      "  matrix get_subsampled_Xc(matrix Xc_full);",
-      sep = "\n"
-    )
-    y_getter <- "get_subsampled_Y_int"
-  } else {
-    func_decls <- paste(
-      "  vector get_subsampled_Y_real(vector Y_full);",
-      "  matrix get_subsampled_Xc(matrix Xc_full);",
-      sep = "\n"
-    )
-    y_getter <- "get_subsampled_Y_real"
-  }
-
-  stancode <- sub(
-    "(functions\\s*\\{)\n",
-    paste0("\\1\n", func_decls, "\n"),
-    stancode
-  )
-
-  gsub(
-    "(_glm_lp[dm]f\\()([^|]+)(\\|\\s*)Xc,",
-    paste0("\\1", y_getter, "(\\2) \\3get_subsampled_Xc(Xc),"),
-    stancode
-  )
-}
-
 hpp_path <- function() {
   system.file("stan", "pdmp_subsample.hpp", package = "PDMPSamplersR")
-}
-
-brms_has_subsample <- function() {
-  "subsample" %in% names(formals(brms:::stancode.default))
-}
-
-pdmp_subsampling <- function(stancode) {
-  y_is_int <- grepl("array\\[N\\] int Y;", stancode)
-  y_getter <- if (y_is_int) "get_subsampled_Y_int" else "get_subsampled_Y_real"
-  brms::subsampling(
-    size_fn = "pdmp_get_subsample_size",
-    index_fn = "pdmp_get_subsample_index",
-    wrap = list(Y = y_getter, Xc = "get_subsampled_Xc")
-  )
-}
-
-pdmp_function_decls <- function(stancode) {
-  y_is_int <- grepl("array\\[N\\] int Y;", stancode)
-  y_decl <- if (y_is_int) {
-    "  array[] int get_subsampled_Y_int(array[] int Y_full);"
-  } else {
-    "  vector get_subsampled_Y_real(vector Y_full);"
-  }
-  paste(
-    "  int pdmp_get_subsample_size();",
-    "  int pdmp_get_subsample_index(int n);",
-    y_decl,
-    "  matrix get_subsampled_Xc(matrix Xc_full);",
-    sep = "\n"
-  )
 }
 
 replace_prior_block <- function(ext_code, standard_code) {

@@ -286,86 +286,123 @@ make_pdmp_stanvars <- function(formula, data, family, user_stanvars = NULL,
 
 # -- Custom-family post-processing functions -----------------------------------
 
+#' Log-likelihood for subsampled custom families
+#'
+#' Post-processing functions used by [brms::log_lik()] for subsampled custom
+#' families. Each function computes the log-likelihood for a single observation.
+#'
+#' @param i Integer index of the observation.
+#' @param prep A preparation object as used by brms post-processing functions.
+#'
+#' @name log_lik_subsampled
 #' @export
 log_lik_subsampled_bernoulli_logit <- function(i, prep) {
   mu <- brms::get_dpar(prep, "mu", i = i)
   y  <- prep$data$Y[i]
-  dbinom(y, size = 1, prob = plogis(mu), log = TRUE)
+  stats::dbinom(y, size = 1, prob = stats::plogis(mu), log = TRUE)
 }
 
+#' Posterior predictions for subsampled custom families
+#'
+#' Post-processing functions used by [brms::posterior_predict()] for subsampled
+#' custom families. Each function draws posterior predictions for a single observation.
+#'
+#' @param i Integer index of the observation.
+#' @param prep A preparation object as used by brms post-processing functions.
+#' @param ... Additional arguments (unused).
+#'
+#' @name posterior_predict_subsampled
 #' @export
 posterior_predict_subsampled_bernoulli_logit <- function(i, prep, ...) {
   mu <- brms::get_dpar(prep, "mu", i = i)
-  rbinom(length(mu), size = 1, prob = plogis(mu))
+  stats::rbinom(length(mu), size = 1, prob = stats::plogis(mu))
 }
 
+#' Posterior expected values for subsampled custom families
+#'
+#' Post-processing functions used by [brms::posterior_epred()] for subsampled
+#' custom families. Each function returns the posterior expected value.
+#'
+#' @param prep A preparation object as used by brms post-processing functions.
+#'
+#' @name posterior_epred_subsampled
 #' @export
 posterior_epred_subsampled_bernoulli_logit <- function(prep) {
   mu <- brms::get_dpar(prep, "mu")
-  plogis(mu)
+  stats::plogis(mu)
 }
 
+#' @rdname log_lik_subsampled
 #' @export
 log_lik_subsampled_poisson_log <- function(i, prep) {
   mu <- brms::get_dpar(prep, "mu", i = i)
   y  <- prep$data$Y[i]
-  dpois(y, lambda = exp(mu), log = TRUE)
+  stats::dpois(y, lambda = exp(mu), log = TRUE)
 }
 
+#' @rdname posterior_predict_subsampled
 #' @export
 posterior_predict_subsampled_poisson_log <- function(i, prep, ...) {
   mu <- brms::get_dpar(prep, "mu", i = i)
-  rpois(length(mu), lambda = exp(mu))
+  stats::rpois(length(mu), lambda = exp(mu))
 }
 
+#' @rdname posterior_epred_subsampled
 #' @export
 posterior_epred_subsampled_poisson_log <- function(prep) {
   mu <- brms::get_dpar(prep, "mu")
   exp(mu)
 }
 
+#' @rdname log_lik_subsampled
 #' @export
 log_lik_subsampled_gaussian <- function(i, prep) {
   mu    <- brms::get_dpar(prep, "mu", i = i)
   sigma <- brms::get_dpar(prep, "sigma", i = i)
   y     <- prep$data$Y[i]
-  dnorm(y, mean = mu, sd = sigma, log = TRUE)
+  stats::dnorm(y, mean = mu, sd = sigma, log = TRUE)
 }
 
+#' @rdname posterior_predict_subsampled
 #' @export
 posterior_predict_subsampled_gaussian <- function(i, prep, ...) {
   mu    <- brms::get_dpar(prep, "mu", i = i)
   sigma <- brms::get_dpar(prep, "sigma", i = i)
-  rnorm(length(mu), mean = mu, sd = sigma)
+  stats::rnorm(length(mu), mean = mu, sd = sigma)
 }
 
+#' @rdname posterior_epred_subsampled
 #' @export
 posterior_epred_subsampled_gaussian <- function(prep) {
   mu <- brms::get_dpar(prep, "mu")
   mu
 }
 
+#' @rdname log_lik_subsampled
 #' @export
 log_lik_subsampled_negbinomial_log <- function(i, prep) {
   mu    <- brms::get_dpar(prep, "mu", i = i)
   shape <- brms::get_dpar(prep, "shape", i = i)
   y     <- prep$data$Y[i]
-  dnbinom(y, mu = exp(mu), size = shape, log = TRUE)
+  stats::dnbinom(y, mu = exp(mu), size = shape, log = TRUE)
 }
 
+#' @rdname posterior_predict_subsampled
 #' @export
 posterior_predict_subsampled_negbinomial_log <- function(i, prep, ...) {
   mu    <- brms::get_dpar(prep, "mu", i = i)
   shape <- brms::get_dpar(prep, "shape", i = i)
-  rnbinom(length(mu), mu = exp(mu), size = shape)
+  stats::rnbinom(length(mu), mu = exp(mu), size = shape)
 }
 
+#' @rdname posterior_epred_subsampled
 #' @export
 posterior_epred_subsampled_negbinomial_log <- function(prep) {
   mu <- brms::get_dpar(prep, "mu")
   exp(mu)
 }
 
+#' @rdname log_lik_subsampled
 #' @export
 log_lik_subsampled_student <- function(i, prep) {
   mu    <- brms::get_dpar(prep, "mu", i = i)
@@ -375,6 +412,7 @@ log_lik_subsampled_student <- function(i, prep) {
   brms::dstudent_t(y, df = nu, mu = mu, sigma = sigma, log = TRUE)
 }
 
+#' @rdname posterior_predict_subsampled
 #' @export
 posterior_predict_subsampled_student <- function(i, prep, ...) {
   mu    <- brms::get_dpar(prep, "mu", i = i)
@@ -383,46 +421,53 @@ posterior_predict_subsampled_student <- function(i, prep, ...) {
   brms::rstudent_t(length(mu), df = nu, mu = mu, sigma = sigma)
 }
 
+#' @rdname posterior_epred_subsampled
 #' @export
 posterior_epred_subsampled_student <- function(prep) {
   brms::get_dpar(prep, "mu")
 }
 
+#' @rdname log_lik_subsampled
 #' @export
 log_lik_subsampled_gamma <- function(i, prep) {
   mu    <- brms::get_dpar(prep, "mu", i = i)
   shape <- brms::get_dpar(prep, "shape", i = i)
   y     <- prep$data$Y[i]
-  dgamma(y, shape = shape, rate = shape / mu, log = TRUE)
+  stats::dgamma(y, shape = shape, rate = shape / mu, log = TRUE)
 }
 
+#' @rdname posterior_predict_subsampled
 #' @export
 posterior_predict_subsampled_gamma <- function(i, prep, ...) {
   mu    <- brms::get_dpar(prep, "mu", i = i)
   shape <- brms::get_dpar(prep, "shape", i = i)
-  rgamma(length(mu), shape = shape, rate = shape / mu)
+  stats::rgamma(length(mu), shape = shape, rate = shape / mu)
 }
 
+#' @rdname posterior_epred_subsampled
 #' @export
 posterior_epred_subsampled_gamma <- function(prep) {
   brms::get_dpar(prep, "mu")
 }
 
+#' @rdname log_lik_subsampled
 #' @export
 log_lik_subsampled_beta <- function(i, prep) {
   mu  <- brms::get_dpar(prep, "mu", i = i)
   phi <- brms::get_dpar(prep, "phi", i = i)
   y   <- prep$data$Y[i]
-  dbeta(y, shape1 = mu * phi, shape2 = (1 - mu) * phi, log = TRUE)
+  stats::dbeta(y, shape1 = mu * phi, shape2 = (1 - mu) * phi, log = TRUE)
 }
 
+#' @rdname posterior_predict_subsampled
 #' @export
 posterior_predict_subsampled_beta <- function(i, prep, ...) {
   mu  <- brms::get_dpar(prep, "mu", i = i)
   phi <- brms::get_dpar(prep, "phi", i = i)
-  rbeta(length(mu), shape1 = mu * phi, shape2 = (1 - mu) * phi)
+  stats::rbeta(length(mu), shape1 = mu * phi, shape2 = (1 - mu) * phi)
 }
 
+#' @rdname posterior_epred_subsampled
 #' @export
 posterior_epred_subsampled_beta <- function(prep) {
   brms::get_dpar(prep, "mu")

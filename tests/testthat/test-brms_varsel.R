@@ -167,19 +167,41 @@ test_that("brm_pdmp sticky: errors without model_prior", {
   )
 })
 
-test_that("brm_pdmp sticky: errors with subsampling", {
+test_that("brm_pdmp sticky: works with subsampled gradients", {
   skip_if_no_slow_tests()
 
-  df <- data.frame(y = rnorm(100), x = rnorm(100))
-  expect_error(
-    brm_pdmp(y ~ x, data = df, family = gaussian(),
-             prior = brms::prior(normal(0, 5), class = b),
-             flow = "ZigZag", algorithm = "GridThinningStrategy",
-             T = 1000, show_progress = FALSE,
-             sticky = TRUE, model_prior = bernoulli(0.5),
-             subsample_size = 50L),
-    "subsampled"
+  set.seed(42)
+  n <- 200
+  d <- 6
+  X <- matrix(rnorm(n * d), n, d)
+  colnames(X) <- paste0("x", 1:d)
+  beta_true <- c(2.0, -1.5, rep(0, d - 2))
+  y <- X %*% beta_true + rnorm(n, sd = 0.5)
+  df <- data.frame(y = as.numeric(y), X)
+
+  formula <- y ~ x1 + x2 + x3 + x4 + x5 + x6
+  fit <- brm_pdmp(
+    formula, data = df, family = gaussian(),
+    prior = brms::set_prior("normal(0, 5)", class = "b"),
+    flow = "ZigZag", algorithm = "GridThinningStrategy",
+    T = 100000, t_warmup = 10000, show_progress = FALSE,
+    sticky = TRUE, model_prior = bernoulli(0.5),
+    subsample_size = 50L
   )
+
+  expect_s3_class(fit, "brmsfit")
+  sticky_meta <- attr(fit, "sticky")
+  expect_false(is.null(sticky_meta))
+  expect_false(is.null(sticky_meta$inclusion_probs))
+
+  incl <- sticky_meta$inclusion_probs$chain1
+  expect_length(incl, d)
+
+  active_incl <- incl[1:2]
+  inactive_incl <- incl[3:d]
+  expect_true(min(active_incl) > max(inactive_incl),
+              info = paste("Active:", paste(round(active_incl, 3), collapse = ", "),
+                           "; max inactive:", round(max(inactive_incl), 3)))
 })
 
 # ==============================================================================

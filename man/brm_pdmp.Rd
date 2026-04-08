@@ -140,8 +140,7 @@ approximation. Also disables HVP for grid thinning. Only used when
 
 \item{sticky}{Logical; enable spike-and-slab variable selection for
 population-level coefficients (default: FALSE). Requires
-`model_prior` to be set. Only supported on the full-data path
-(not with `subsample_size`).}
+`model_prior` to be set.}
 
 \item{can_stick}{Optional logical vector indicating which non-intercept
 population-level coefficients are candidates for selection. Length

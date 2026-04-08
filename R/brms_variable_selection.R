@@ -194,9 +194,6 @@ validate_brms_sticky <- function(sticky, can_stick, model_prior, parameter_prior
     if (!isTRUE(sticky))
         return(list(sticky = FALSE, can_stick = NULL, model_prior = NULL, parameter_prior = NULL))
 
-    if (subsampled)
-        cli::cli_abort("Sticky variable selection with subsampled gradients is not yet supported. Use full-data gradients.")
-
     # model_prior is required
     if (is.null(model_prior) || !(is.bernoulli(model_prior) || is.betabernoulli(model_prior)))
         cli::cli_abort("{.arg model_prior} must be a {.cls bernoulli} or {.cls beta-bernoulli} object when {.arg sticky} is {.code TRUE}.")

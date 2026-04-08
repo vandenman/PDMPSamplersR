@@ -139,14 +139,17 @@ jobs:
           library(PDMPSamplersR)
           pdmpsamplers_setup()
 
+      # Force RcppParallel to bypass TBB and use tinythread to avoid segfaults on macOS-latest
+      - name: Configure R environment for macOS
+        if: matrix.config.os == 'macOS-latest'
+        run: echo 'RCPP_PARALLEL_BACKEND="tinythread"' >> ~/.Renviron
+
       - uses: r-lib/actions/check-r-package@v2
         if: matrix.config.os == 'macOS-latest'
         with:
           upload-snapshots: true
           build_args: 'c("--no-manual", "--no-build-vignettes", "--compact-vignettes=gs+qpdf")'
           args: 'c("--no-manual", "--as-cran", "--ignore-vignettes")'
-        env:
-          RCPP_PARALLEL_BACKEND: "tinythread" # Force RcppParallel to bypass TBB and use tinythread to avoid segfaults on macOS-latest
 
       - uses: r-lib/actions/check-r-package@v2
         if: matrix.config.os != 'macOS-latest'

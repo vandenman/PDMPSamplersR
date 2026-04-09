@@ -55,7 +55,7 @@ jobs:
 
       - name: Cache Julia packages
         if: matrix.config.julia
-        uses: julia-actions/cache@v2
+        uses: julia-actions/cache@v3
 
       - name: Compute PDMPSamplersR cache path
         if: matrix.config.julia
@@ -67,7 +67,7 @@ jobs:
 
       - name: Cache PDMPSamplersR artifacts
         if: matrix.config.julia
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ${{ env.PDMPSAMPLERSR_CACHE }}
           key: ${{ runner.os }}-pdmpsamplersr-cache-${{ hashFiles('DESCRIPTION', '.github/workflows/R-CMD-check.yaml') }}

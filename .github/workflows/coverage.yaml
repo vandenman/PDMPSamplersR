@@ -35,10 +35,10 @@ jobs:
           version: '1'
 
       - name: Cache Julia packages
-        uses: julia-actions/cache@v2
+        uses: julia-actions/cache@v3
 
       - name: Cache PDMPSamplersR artifacts
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ~/.cache/PDMPSamplersR
           key: ${{ runner.os }}-pdmpsamplersr-cache-${{ hashFiles('DESCRIPTION', '.github/workflows/coverage.yaml') }}
@@ -104,7 +104,7 @@ jobs:
           )
           covr::to_cobertura(cov)
 
-      - uses: codecov/codecov-action@v4
+      - uses: codecov/codecov-action@v6
         with:
           fail_ci_if_error: ${{ github.event_name != 'pull_request' && true || false }}
           file: ./cobertura.xml

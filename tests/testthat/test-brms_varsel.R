@@ -375,3 +375,85 @@ test_that("brm_pdmp sticky: prior sensitivity — active > inactive under scale 
                              "; max inactive:", round(max(incl[3:d]), 3)))
   }
 })
+
+# ==============================================================================
+# Section 10: Anchor-update invariance under subsampled sticky
+# ==============================================================================
+
+test_that("brm_pdmp sticky subsampled: anchor-update count does not alter active/inactive ranking", {
+  skip_if_no_slow_tests()
+
+  set.seed(7)
+  n <- 200
+  d <- 6
+  X <- matrix(rnorm(n * d), n, d)
+  colnames(X) <- paste0("x", 1:d)
+  beta_true <- c(2.0, -1.5, rep(0, d - 2))
+  y <- X %*% beta_true + rnorm(n, sd = 0.5)
+  df <- data.frame(y = as.numeric(y), X)
+  formula <- y ~ x1 + x2 + x3 + x4 + x5 + x6
+
+  fit_few <- brm_pdmp(
+    formula, data = df, family = gaussian(),
+    prior = brms::set_prior("normal(0, 5)", class = "b"),
+    flow = "ZigZag", algorithm = "GridThinningStrategy",
+    T = 100000, t_warmup = 10000, show_progress = FALSE,
+    sticky = TRUE, model_prior = bernoulli(0.5),
+    subsample_size = 50L, n_anchor_updates = 3L
+  )
+  fit_many <- brm_pdmp(
+    formula, data = df, family = gaussian(),
+    prior = brms::set_prior("normal(0, 5)", class = "b"),
+    flow = "ZigZag", algorithm = "GridThinningStrategy",
+    T = 100000, t_warmup = 10000, show_progress = FALSE,
+    sticky = TRUE, model_prior = bernoulli(0.5),
+    subsample_size = 50L, n_anchor_updates = 15L
+  )
+
+  incl_few  <- attr(fit_few,  "sticky")$inclusion_probs$chain1
+  incl_many <- attr(fit_many, "sticky")$inclusion_probs$chain1
+
+  expect_true(min(incl_few[1:2])  > max(incl_few[3:d]),
+              info = paste("n_anchor=3 ; active:", paste(round(incl_few[1:2], 3), collapse = ", "),
+                           "; max inactive:", round(max(incl_few[3:d]), 3)))
+  expect_true(min(incl_many[1:2]) > max(incl_many[3:d]),
+              info = paste("n_anchor=15; active:", paste(round(incl_many[1:2], 3), collapse = ", "),
+                           "; max inactive:", round(max(incl_many[3:d]), 3)))
+})
+
+# ==============================================================================
+# Section 11: Multi-seed frozen-coordinate persistence under subsampled sticky
+# ==============================================================================
+
+test_that("brm_pdmp sticky subsampled: frozen coordinates persist across multiple seeds", {
+  skip_if_no_slow_tests()
+
+  n <- 200
+  d <- 6
+  beta_true <- c(2.0, -1.5, rep(0, d - 2))
+
+  seeds <- c(1L, 2L, 3L)
+  for (s in seeds) {
+    set.seed(s)
+    X <- matrix(rnorm(n * d), n, d)
+    colnames(X) <- paste0("x", 1:d)
+    y <- X %*% beta_true + rnorm(n, sd = 0.5)
+    df <- data.frame(y = as.numeric(y), X)
+
+    fit <- brm_pdmp(
+      y ~ x1 + x2 + x3 + x4 + x5 + x6, data = df, family = gaussian(),
+      prior = brms::set_prior("normal(0, 5)", class = "b"),
+      flow = "ZigZag", algorithm = "GridThinningStrategy",
+      T = 100000, t_warmup = 10000, show_progress = FALSE,
+      sticky = TRUE, model_prior = bernoulli(0.5),
+      subsample_size = 50L
+    )
+
+    incl <- attr(fit, "sticky")$inclusion_probs$chain1
+    expect_length(incl, d)
+    expect_true(min(incl[1:2]) > max(incl[3:d]),
+                info = paste("seed =", s,
+                             "; active:", paste(round(incl[1:2], 3), collapse = ", "),
+                             "; max inactive:", round(max(incl[3:d]), 3)))
+  }
+})

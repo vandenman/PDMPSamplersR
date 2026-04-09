@@ -5,7 +5,7 @@
 #
 # Gated by PDMPSAMPLERSR_SLOW_TESTS environment variable + skip_on_cran.
 # Run locally:
-#   NOT_CRAN=true PDMPSAMPLERSR_SLOW_TESTS=true Rscript -e 'testthat::test_file("tests/testthat/test-brms_sampling.R")'
+#   NOT_CRAN=true PDMPSAMPLERSR_SLOW_TESTS=true Rscript -e 'require(PDMPSamplersR); testthat::test_file("tests/testthat/test-brms_sampling.R")'
 
 skip_if_no_slow_tests <- function() {
   testthat::skip_on_cran()

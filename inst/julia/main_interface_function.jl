@@ -8,6 +8,7 @@ export r_inclusion_probs, extract_stats
 export r_pdmp_stan, r_pdmp_custom, r_pdmp_custom_subsampled
 export write_cmdstan_csv, r_constrain_and_write_csv
 export r_pdmp_brms_subsampled, r_pdmp_stan_for_brms
+export r_get_param_unc_names
 
 function build_flow(flow_type::String, prec::AbstractMatrix{Float64}, flow_mean::AbstractVector{Float64};
                     adaptive_scheme::String="diagonal")
@@ -942,7 +943,11 @@ function r_pdmp_brms_subsampled(
         bank_capacity::Int = 20,
         use_fd_hvp::Bool = false,
         post_warmup_simplify::Bool = false,
-        use_fd_hcv::Bool = false
+        use_fd_hcv::Bool = false,
+        sticky::Bool = false,
+        can_stick::Union{AbstractVector{Bool}, Nothing} = nothing,
+        model_prior = nothing,
+        parameter_prior::Union{AbstractVector{Float64}, Nothing} = nothing
     )
     lib_path_std = if endswith(stan_file, ".stan")
         BridgeStan.compile_model(stan_file)
@@ -997,7 +1002,8 @@ function r_pdmp_brms_subsampled(
     fmean = isempty(flow_mean) ? zeros(d) : Vector{Float64}(flow_mean)
     prec = isempty(flow_cov) ? Matrix{Float64}(I, d, d) : inv(Symmetric(Matrix{Float64}(flow_cov)))
     flow = build_flow(flow_type, prec, fmean; adaptive_scheme)
-    alg = build_algorithm(algorithm_type; c0, d, grid_n, grid_t_max, use_fd_hvp, post_warmup_simplify)
+    alg0 = build_algorithm(algorithm_type; c0, d, grid_n, grid_t_max, use_fd_hvp, post_warmup_simplify)
+    alg = wrap_sticky(alg0, sticky, model_prior, parameter_prior, can_stick)
 
     adapter = if bank_adapter !== nothing
         PDMPSamplers.default_adapter(flow, model.grad, bank_adapter, t_warmup / 10, t_warmup, t0)
@@ -1073,7 +1079,15 @@ function r_pdmp_brms_subsampled(
         push!(csv_paths, csv_path)
     end
 
-    return Dict{String, Any}("csv_paths" => csv_paths, "stats" => stats)
+    result = Dict{String, Any}("csv_paths" => csv_paths, "stats" => stats)
+    if sticky
+        incl = Dict{Int,Vector{Float64}}()
+        for i in 1:n_ch
+            incl[i] = inclusion_probs(chains; chain=i)
+        end
+        result["inclusion_probs"] = incl
+    end
+    return result
 end
 
 function r_pdmp_stan_for_brms(
@@ -1097,7 +1111,11 @@ function r_pdmp_stan_for_brms(
         threaded::Bool = false,
         compute_lp::Bool = false,
         use_fd_hvp::Bool = false,
-        post_warmup_simplify::Bool = false
+        post_warmup_simplify::Bool = false,
+        sticky::Bool = false,
+        can_stick::Union{AbstractVector{Bool}, Nothing} = nothing,
+        model_prior = nothing,
+        parameter_prior::Union{AbstractVector{Float64}, Nothing} = nothing
     )
     sm = BridgeStan.StanModel(path_to_stan_model, path_to_stan_data; warn=false)
     model = PDMPModel(sm; hvp = !use_fd_hvp)
@@ -1107,7 +1125,8 @@ function r_pdmp_stan_for_brms(
     prec = isempty(flow_cov) ? Diagonal(ones(d)) : _to_precision(flow_cov, d)
 
     flow = build_flow(flow_type, prec, fmean; adaptive_scheme)
-    alg = build_algorithm(algorithm_type; c0, d, grid_n, grid_t_max, use_fd_hvp, post_warmup_simplify)
+    alg0 = build_algorithm(algorithm_type; c0, d, grid_n, grid_t_max, use_fd_hvp, post_warmup_simplify)
+    alg = wrap_sticky(alg0, sticky, model_prior, parameter_prior, can_stick)
 
     chains = pdmp_sample(d, flow, model, alg, t0, T, t_warmup;
                          progress = show_progress, n_chains, threaded)
@@ -1128,7 +1147,20 @@ function r_pdmp_stan_for_brms(
         push!(csv_paths, csv_path)
     end
 
-    return Dict{String, Any}("csv_paths" => csv_paths, "stats" => stats)
+    result = Dict{String, Any}("csv_paths" => csv_paths, "stats" => stats)
+    if sticky
+        incl = Dict{Int,Vector{Float64}}()
+        for i in 1:n_ch
+            incl[i] = inclusion_probs(chains; chain=i)
+        end
+        result["inclusion_probs"] = incl
+    end
+    return result
+end
+
+function r_get_param_unc_names(path_to_stan_model::String, path_to_stan_data::String)
+    sm = BridgeStan.StanModel(path_to_stan_model, path_to_stan_data; warn=false)
+    return BridgeStan.param_unc_names(sm)
 end
 
 end # module PDMPSamplersRBridge

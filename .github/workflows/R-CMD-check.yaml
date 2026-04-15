@@ -51,10 +51,12 @@ jobs:
         if: matrix.config.julia
         uses: ./.github/actions/setup-julia-r
 
-      # Force RcppParallel to bypass TBB and use tinythread to avoid segfaults on macOS-latest
+      # Force RcppParallel to bypass TBB and use tinythread to avoid segfaults on macOS-latest.
+      # Set via GITHUB_ENV so it propagates into R CMD check sub-processes
+      # (which may ignore ~/.Renviron under --as-cran).
       - name: Configure R environment for macOS
         if: matrix.config.os == 'macOS-latest'
-        run: echo 'RCPP_PARALLEL_BACKEND="tinythread"' >> ~/.Renviron
+        run: echo 'RCPP_PARALLEL_BACKEND=tinythread' >> "$GITHUB_ENV"
 
       - uses: r-lib/actions/check-r-package@v2
         if: matrix.config.os == 'macOS-latest'

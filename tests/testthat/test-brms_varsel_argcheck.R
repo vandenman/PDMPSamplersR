@@ -167,12 +167,12 @@ test_that("validate_brms_sticky returns noop when sticky=FALSE", {
 })
 
 test_that("validate_brms_sticky allows subsampled", {
-  result <- PDMPSamplersR:::validate_brms_sticky(
+  result <- suppressWarnings(PDMPSamplersR:::validate_brms_sticky(
     TRUE, NULL, bernoulli(0.5), NULL, 3,
     c("b.Intercept", "b.x", "sigma"),
     data.frame(prior = "normal(0, 5)", class = "b", coef = "", group = "", stringsAsFactors = FALSE),
     TRUE
-  )
+  ))
   expect_true(result$sticky)
   expect_length(result$can_stick, 3)
 })

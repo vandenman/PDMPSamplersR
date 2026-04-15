@@ -181,12 +181,15 @@ end
 
 function extract_stats(chains::PDMPChains)
     all = chains.stats
+    # TODO: should just return entire ess if we compute it here anyway...
     ct_ess_per_chain = try
         [minimum(ess(chains; chain=i)) for i in 1:length(chains.traces)]
     catch
         Float64[]
     end
     ct_ess_min = isempty(ct_ess_per_chain) ? NaN : sum(ct_ess_per_chain)
+    # TODO: just return a vector for each chain and have the R user decide what they want
+    # insteady of Any just return vector{Float64}?
     return Dict{String, Any}(
         "reflections_events"    => sum(s -> s.reflections_events, all),
         "reflections_accepted"  => sum(s -> s.reflections_accepted, all),

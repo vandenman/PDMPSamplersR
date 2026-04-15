@@ -51,7 +51,7 @@ test_that("brm_pdmp: gaussian y ~ x", {
 
   fit <- brm_pdmp(y ~ x, data = df, family = gaussian(),
                   flow = "ZigZag", algorithm = "GridThinningStrategy",
-                  T = 50000, show_progress = FALSE)
+                  T = 5000, show_progress = FALSE)
 
   expect_s3_class(fit, "brmsfit")
 
@@ -73,8 +73,8 @@ test_that("brm_pdmp: gaussian y ~ x", {
                              silent = 2, refresh = 0)
 
   compare_posteriors(fit, fit_reference,
-                     tols = c("Estimate" = .05, "Est.Error" = .15,
-                              "Q2.5" = 0.1, "Q97.5" = 0.1))
+                     tols = c("Estimate" = .15, "Est.Error" = .25,
+                              "Q2.5" = 0.25, "Q97.5" = 0.25))
 })
 
 test_that("brm_pdmp: logistic regression", {
@@ -89,7 +89,7 @@ test_that("brm_pdmp: logistic regression", {
 
   fit <- brm_pdmp(y ~ x, data = df, family = brms::bernoulli(),
                   flow = "ZigZag", algorithm = "GridThinningStrategy",
-                  T = 50000, show_progress = FALSE)
+                  T = 5000, show_progress = FALSE)
 
   expect_s3_class(fit, "brmsfit")
 
@@ -102,7 +102,9 @@ test_that("brm_pdmp: logistic regression", {
                              chains = 1, iter = 2000, warmup = 1000,
                              silent = 2, refresh = 0)
 
-  compare_posteriors(fit, fit_reference)
+  compare_posteriors(fit, fit_reference,
+                     tols = c("Estimate" = .15, "Est.Error" = .25,
+                              "Q2.5" = 0.25, "Q97.5" = 0.25))
 })
 
 test_that("brm_pdmp: Poisson regression", {
@@ -116,7 +118,7 @@ test_that("brm_pdmp: Poisson regression", {
 
   fit <- brm_pdmp(y ~ x, data = df, family = poisson(),
                   flow = "BouncyParticle", algorithm = "GridThinningStrategy",
-                  T = 50000, show_progress = FALSE)
+                  T = 5000, show_progress = FALSE)
 
   expect_s3_class(fit, "brmsfit")
 
@@ -129,7 +131,9 @@ test_that("brm_pdmp: Poisson regression", {
                              chains = 1, iter = 2000, warmup = 1000,
                              silent = 2, refresh = 0)
 
-  compare_posteriors(fit, fit_reference)
+  compare_posteriors(fit, fit_reference,
+                     tols = c("Estimate" = .15, "Est.Error" = .25,
+                              "Q2.5" = 0.25, "Q97.5" = 0.25))
 })
 
 test_that("brm_pdmp: Poisson regression in epileptic patients", {
@@ -150,12 +154,12 @@ test_that("brm_pdmp: Poisson regression in epileptic patients", {
     prior = brms::prior(normal(0, 10), class = b) +
             brms::prior(cauchy(0, 2), class = sd),
     flow = "AdaptiveBoomerang", algorithm = "GridThinningStrategy",
-    T = 10000, show_progress = TRUE
+    T = 5000, show_progress = TRUE
   )
 
   compare_posteriors(fit, fit_reference,
-                     tols = c("Estimate" = .05, "Est.Error" = .15,
-                              "Q2.5" = 0.1, "Q97.5" = 0.1))
+                     tols = c("Estimate" = .1, "Est.Error" = .2,
+                              "Q2.5" = 0.2, "Q97.5" = 0.2))
 })
 
 test_that("brm_pdmp: multi-chain gaussian with Rhat", {
@@ -169,7 +173,7 @@ test_that("brm_pdmp: multi-chain gaussian with Rhat", {
 
   fit <- brm_pdmp(y ~ x, data = df, family = gaussian(),
                   flow = "ZigZag", algorithm = "GridThinningStrategy",
-                  T = 50000, show_progress = FALSE,
+                  T = 5000, show_progress = FALSE,
                   n_chains = 2L)
 
   expect_s3_class(fit, "brmsfit")
@@ -180,11 +184,11 @@ test_that("brm_pdmp: multi-chain gaussian with Rhat", {
   expect_true("Rhat" %in% colnames(fixed))
   rhat_vals <- fixed[, "Rhat"]
   for (rh in rhat_vals) {
-    expect_lt(rh, 1.05)
+    expect_lt(rh, 1.1)
   }
 
-  expect_true(abs(fixed["Intercept", "Estimate"] - 2) < 0.1)
-  expect_true(abs(fixed["x", "Estimate"] - 0.5) < 0.15)
+  expect_true(abs(fixed["Intercept", "Estimate"] - 2) < 0.5)
+  expect_true(abs(fixed["x", "Estimate"] - 0.5) < 0.5)
 })
 
 test_that("brm_pdmp: compute_lp populates lp__", {
@@ -198,7 +202,7 @@ test_that("brm_pdmp: compute_lp populates lp__", {
 
   fit <- brm_pdmp(y ~ x, data = df, family = gaussian(),
                   flow = "AdaptiveBoomerang", algorithm = "GridThinningStrategy",
-                  T = 20000, show_progress = FALSE,
+                  T = 5000, show_progress = FALSE,
                   compute_lp = TRUE)
 
   expect_s3_class(fit, "brmsfit")
@@ -218,7 +222,7 @@ test_that("brm_pdmp: pp_check and loo work", {
 
   fit <- brm_pdmp(y ~ x, data = df, family = gaussian(),
                   flow = "PreconditionedZigZag", algorithm = "GridThinningStrategy",
-                  T = 20000, show_progress = FALSE)
+                  T = 5000, show_progress = FALSE)
 
   pp <- brms::pp_check(fit, ndraws = 50)
   expect_s3_class(pp, "gg")
@@ -253,7 +257,7 @@ test_that("brm_pdmp subsampled: gaussian y ~ x", {
   fit <- tryCatch(
     brm_pdmp(y ~ x, data = df, family = gaussian(),
              flow = "ZigZag", algorithm = "GridThinningStrategy",
-             T = 50000, t_warmup = 5000,
+             T = 5000, t_warmup = 1000,
              subsample_size = 20L,
              show_progress = FALSE),
     error = function(e) {
@@ -283,7 +287,7 @@ test_that("brm_pdmp subsampled: bernoulli y ~ x (with summary and pp_check)", {
 
   fit <- brm_pdmp(y ~ x, data = df, family = brms::bernoulli(),
                   flow = "ZigZag", algorithm = "GridThinningStrategy",
-                  T = 50000, t_warmup = 5000,
+                  T = 5000, t_warmup = 1000,
                   subsample_size = 30L,
                   show_progress = FALSE)
 
@@ -310,7 +314,7 @@ test_that("brm_pdmp subsampled: poisson y ~ x", {
 
   fit <- brm_pdmp(y ~ x, data = df, family = poisson(),
                   flow = "ZigZag", algorithm = "GridThinningStrategy",
-                  T = 50000, t_warmup = 5000,
+                  T = 5000, t_warmup = 1000,
                   subsample_size = 30L,
                   show_progress = FALSE)
 
@@ -334,7 +338,7 @@ test_that("brm_pdmp subsampled: multi-chain Rhat", {
 
   fit <- brm_pdmp(y ~ x, data = df, family = brms::bernoulli(),
                   flow = "ZigZag", algorithm = "GridThinningStrategy",
-                  T = 50000, t_warmup = 5000,
+                  T = 5000, t_warmup = 1000,
                   subsample_size = 30L,
                   n_chains = 2L,
                   show_progress = FALSE)

@@ -322,8 +322,9 @@ brm_pdmp <- function(
   if (isTRUE(sticky_args$sticky) && !is.null(jl_result$inclusion_probs)) {
     incl_raw <- jl_result$inclusion_probs
     if (is.environment(incl_raw)) incl_raw <- as.list(incl_raw)
-    stickable_names <- stickable_coef_names(unc_names)
     stickable_idx <- which(sticky_args$can_stick)
+    fe_names <- setdiff(rownames(brms::fixef(empty_fit)), "Intercept")
+    stickable_names <- paste0("b.", fe_names)
     incl_list <- lapply(seq_along(incl_raw), function(ch) {
       probs <- incl_raw[[ch]]
       named_probs <- probs[stickable_idx]

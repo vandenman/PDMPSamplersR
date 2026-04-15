@@ -39,8 +39,8 @@ runs:
         # Ask Julia for its actual depot path and version to avoid
         # path mismatches (R's path.expand("~") differs from Julia's
         # homedir() on Windows).
-        julia_depot <- trimws(system2("julia", c("-e", "print(first(DEPOT_PATH))"), stdout = TRUE))
-        julia_ver <- trimws(system2("julia", c("-e", "print(\"$(VERSION.major).$(VERSION.minor)\")"), stdout = TRUE))
+        julia_depot <- trimws(system2("julia", c("-e", shQuote("print(first(DEPOT_PATH))")), stdout = TRUE))
+        julia_ver <- trimws(system2("julia", c("-e", shQuote("print(\"$(VERSION.major).$(VERSION.minor)\")")), stdout = TRUE))
         env_dir <- file.path(julia_depot, "environments", paste0("v", julia_ver))
         dir.create(env_dir, recursive = TRUE, showWarnings = FALSE)
 

@@ -29,66 +29,8 @@ jobs:
           extra-packages: any::covr, any::xml2, any::BH, any::RcppEigen, github::Non-Contradiction/JuliaCall, local::.
           needs: coverage
 
-      - name: Install Julia
-        uses: julia-actions/setup-julia@v2
-        with:
-          version: '1'
-
-      - name: Cache Julia packages
-        uses: julia-actions/cache@v3
-
-      - name: Cache PDMPSamplersR artifacts
-        uses: actions/cache@v5
-        with:
-          path: |
-            ~/.cache/PDMPSamplersR
-            ~/.bridgestan
-          key: ${{ runner.os }}-pdmpsamplersr-cache-${{ hashFiles('DESCRIPTION', '.github/workflows/coverage.yaml') }}
-          restore-keys: |
-            ${{ runner.os }}-pdmpsamplersr-cache-
-
-      - name: Configure RCall Julia preferences
-        shell: Rscript {0}
-        run: |
-          rhome <- R.home()
-          julia_depot <- trimws(system2("julia", c("-e", "print(first(DEPOT_PATH))"), stdout = TRUE))
-          julia_ver <- trimws(system2("julia", c("-e", "print(\"$(VERSION.major).$(VERSION.minor)\")"), stdout = TRUE))
-          env_dir <- file.path(julia_depot, "environments", paste0("v", julia_ver))
-          dir.create(env_dir, recursive = TRUE, showWarnings = FALSE)
-          libr <- file.path(rhome, "lib", "libR.so")
-          rhome <- gsub("\\\\", "/", rhome)
-          libr  <- gsub("\\\\", "/", libr)
-          prefs_path <- file.path(env_dir, "LocalPreferences.toml")
-          prefs <- sprintf('[RCall]\nRhome = "%s"\nlibR = "%s"\n', rhome, libr)
-          writeLines(prefs, prefs_path)
-          message("Wrote ", prefs_path, ":\n", prefs)
-
-      - name: Install JuliaCall dependencies
-        shell: bash
-        run: |
-          julia -e 'mkpath(joinpath(first(DEPOT_PATH), "conda", "3", string(Sys.ARCH)))'
-          julia -e 'using Pkg; Pkg.add("Suppressor"); Pkg.add("RCall")'
-
-      - name: Pre-compile Julia project
-        shell: bash
-        run: |
-          PROJECT_DIR=$(Rscript -e 'cat(path.expand(file.path(rappdirs::user_cache_dir("PDMPSamplersR"), "_juliaProject")))')
-          echo "Julia project directory: $PROJECT_DIR"
-          mkdir -p "$PROJECT_DIR"
-          julia --project="$PROJECT_DIR" -e '
-            import Pkg
-            Pkg.add(url="https://github.com/vandenman/PDMPSamplers.jl")
-            Pkg.add("BridgeStan")
-            Pkg.precompile()
-            using PDMPSamplers, LinearAlgebra, BridgeStan
-            @info "Pre-compilation and loading successful"
-          '
-
-      - name: Set up Julia backend
-        shell: Rscript {0}
-        run: |
-          library(PDMPSamplersR)
-          pdmpsamplers_setup()
+      - name: Set up Julia + R integration
+        uses: ./.github/actions/setup-julia-r
 
       - name: Test coverage
         shell: Rscript {0}

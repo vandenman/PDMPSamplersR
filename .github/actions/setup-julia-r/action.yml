@@ -1,0 +1,100 @@
+name: 'Set up Julia + R integration'
+description: >
+  Install Julia, configure RCall via LocalPreferences, pre-compile
+  PDMPSamplers.jl and BridgeStan, and run pdmpsamplers_setup().
+  Call this AFTER r-lib/actions/setup-r and setup-r-dependencies.
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Install Julia
+      uses: julia-actions/setup-julia@v2
+      with:
+        version: '1'
+
+    - name: Cache Julia packages
+      uses: julia-actions/cache@v3
+
+    - name: Compute PDMPSamplersR cache path
+      shell: Rscript {0}
+      run: |
+        p <- rappdirs::user_cache_dir("PDMPSamplersR")
+        cat(sprintf("PDMPSAMPLERSR_CACHE=%s\n", p),
+            file = Sys.getenv("GITHUB_ENV"), append = TRUE)
+
+    - name: Cache PDMPSamplersR artifacts
+      uses: actions/cache@v5
+      with:
+        path: |
+          ${{ env.PDMPSAMPLERSR_CACHE }}
+          ~/.bridgestan
+        key: ${{ runner.os }}-pdmpsamplersr-${{ hashFiles('DESCRIPTION', '.github/actions/setup-julia-r/action.yml') }}
+        restore-keys: |
+          ${{ runner.os }}-pdmpsamplersr-
+
+    - name: Configure RCall Julia preferences
+      shell: Rscript {0}
+      run: |
+        rhome <- R.home()
+        # Ask Julia for its actual depot path and version to avoid
+        # path mismatches (R's path.expand("~") differs from Julia's
+        # homedir() on Windows).
+        julia_depot <- trimws(system2("julia", c("-e", "print(first(DEPOT_PATH))"), stdout = TRUE))
+        julia_ver <- trimws(system2("julia", c("-e", "print(\"$(VERSION.major).$(VERSION.minor)\")"), stdout = TRUE))
+        env_dir <- file.path(julia_depot, "environments", paste0("v", julia_ver))
+        dir.create(env_dir, recursive = TRUE, showWarnings = FALSE)
+
+        sysname <- Sys.info()[["sysname"]]
+        libr <- if (sysname == "Windows") {
+          p64 <- file.path(rhome, "bin", "x64", "R.dll")
+          if (file.exists(p64)) p64 else file.path(rhome, "bin", "R.dll")
+        } else if (sysname == "Darwin") {
+          file.path(rhome, "lib", "libR.dylib")
+        } else {
+          file.path(rhome, "lib", "libR.so")
+        }
+
+        rhome <- gsub("\\\\", "/", rhome)
+        libr  <- gsub("\\\\", "/", libr)
+
+        prefs_path <- file.path(env_dir, "LocalPreferences.toml")
+        prefs <- sprintf('[RCall]\nRhome = "%s"\nlibR = "%s"\n', rhome, libr)
+        writeLines(prefs, prefs_path)
+        message("Wrote ", prefs_path, ":\n", prefs)
+
+    - name: Install JuliaCall dependencies
+      shell: bash
+      run: |
+        # Pre-create the Conda.jl ROOTENV directory so that Conda.jl's
+        # module-level `prefix(ROOTENV)` check (isdir) passes during
+        # precompilation.  RCall itself does not use Conda (R is located
+        # via LocalPreferences), but Conda.jl is a transitive dependency
+        # that must precompile successfully.
+        julia -e 'mkpath(joinpath(first(DEPOT_PATH), "conda", "3", string(Sys.ARCH)))'
+        julia -e 'using Pkg; Pkg.add("Suppressor"); Pkg.add("RCall")'
+
+    # Pre-compile Julia packages in a standalone Julia process.
+    # JuliaCall's embedded Julia cannot reliably precompile packages
+    # (the precompile worker subprocess crashes silently inside R).
+    # Running precompilation here ensures the cache is warm before
+    # JuliaCall starts, so it only needs to load the cached files.
+    - name: Pre-compile Julia project
+      shell: bash
+      run: |
+        PROJECT_DIR=$(Rscript -e 'cat(path.expand(file.path(rappdirs::user_cache_dir("PDMPSamplersR"), "_juliaProject")))')
+        echo "Julia project directory: $PROJECT_DIR"
+        mkdir -p "$PROJECT_DIR"
+        julia --project="$PROJECT_DIR" -e '
+          import Pkg
+          Pkg.add(url="https://github.com/vandenman/PDMPSamplers.jl")
+          Pkg.add("BridgeStan")
+          Pkg.precompile()
+          using PDMPSamplers, LinearAlgebra, BridgeStan
+          @info "Pre-compilation and loading successful"
+        '
+
+    - name: Set up Julia backend
+      shell: Rscript {0}
+      run: |
+        library(PDMPSamplersR)
+        pdmpsamplers_setup()

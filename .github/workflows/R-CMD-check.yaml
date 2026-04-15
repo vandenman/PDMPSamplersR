@@ -116,8 +116,15 @@ jobs:
 
       - name: Install JuliaCall dependencies
         if: matrix.config.julia
-        run: julia -e 'using Pkg; Pkg.add("Suppressor"); Pkg.add("RCall")'
         shell: bash
+        run: |
+          # Pre-create the Conda.jl ROOTENV directory so that Conda.jl's
+          # module-level `prefix(ROOTENV)` check (isdir) passes during
+          # precompilation.  RCall itself does not use Conda (R is located
+          # via LocalPreferences), but Conda.jl is a transitive dependency
+          # that must precompile successfully.
+          julia -e 'mkpath(joinpath(first(DEPOT_PATH), "conda", "3", string(Sys.ARCH)))'
+          julia -e 'using Pkg; Pkg.add("Suppressor"); Pkg.add("RCall")'
 
       # Pre-compile Julia packages in a standalone Julia process.
       # JuliaCall's embedded Julia cannot reliably precompile packages

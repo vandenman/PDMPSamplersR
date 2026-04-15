@@ -71,7 +71,9 @@ jobs:
 
       - name: Install JuliaCall dependencies
         shell: bash
-        run: julia -e 'using Pkg; Pkg.add("Suppressor"); Pkg.add("RCall")'
+        run: |
+          julia -e 'mkpath(joinpath(first(DEPOT_PATH), "conda", "3", string(Sys.ARCH)))'
+          julia -e 'using Pkg; Pkg.add("Suppressor"); Pkg.add("RCall")'
 
       - name: Pre-compile Julia project
         shell: bash

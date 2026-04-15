@@ -64,6 +64,10 @@ reference:
       - log_lik_subsampled
       - posterior_epred_subsampled
       - posterior_predict_subsampled
+      - inclusion_prob
+      - median_probability_model
+      - model_averaged_mean
+      - plot_inclusion
   - title: Setup
     contents:
       - pdmpsamplers_setup

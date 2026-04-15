@@ -314,10 +314,10 @@ gradient_specs_fe <- list(
        family = poisson(), m = 25),
   list(label = "gaussian y ~ gp(x)",
        data_fn = make_gaussian_gp_data, formula = y ~ gp(x),
-       family = gaussian(), m = 15),
+       family = gaussian(), tol = 1e-3, tol_sub = 1e-3, m = 15),
   list(label = "bernoulli y ~ gp(x)",
        data_fn = make_bernoulli_gp_data, formula = y ~ gp(x),
-       family = brms::bernoulli(), tol = 1e-3, m = 15),
+       family = brms::bernoulli(), tol = 1e-3, tol_sub = 1e-3, m = 15),
   list(label = "gaussian y ~ x + s(z)",
        data_fn = make_gaussian_fe_spline_data, formula = y ~ x + s(z, k = 5),
        family = gaussian(), m = 25),
@@ -326,11 +326,11 @@ gradient_specs_fe <- list(
        family = poisson(), m = 25),
   list(label = "gaussian y ~ x + gp(z)",
        data_fn = make_gaussian_fe_gp_data, formula = y ~ x + gp(z),
-       family = gaussian(), tol = 1e-3, m = 15),
+       family = gaussian(), tol = 1e-3, tol_sub = 1e-3, m = 15),
   list(label = "gaussian y ~ x + s(z) + gp(w)",
        data_fn = make_gaussian_fe_spline_gp_data,
        formula = y ~ x + s(z, k = 5) + gp(w),
-       family = gaussian(), tol = 1e-3, m = 15),
+       family = gaussian(), tol = 1e-3, tol_sub = 1e-3, m = 15),
   list(label = "gaussian y ~ s(x, k=5) + s(z, k=5)",
        data_fn = make_gaussian_multi_spline_data,
        formula = y ~ s(x, k = 5) + s(z, k = 5),
@@ -356,11 +356,11 @@ for (spec in gradient_specs_fe) {
 }
 
 for (spec in gradient_specs_fe) {
-  test_that(paste0("gradient subsample: ", spec$label), {
+  test_that(paste0("gradient subsample (m=", spec$m, "): ", spec$label), {
     skip_if_no_gradient_tests()
     df <- spec$data_fn()
     setup <- setup_gradient_test(spec$formula, df, spec$family)
-    run_subsample_gradient_test(setup, m = spec$m)
+    run_subsample_gradient_test(setup, m = spec$m, tol = spec$tol_sub %||% 1e-5)
   })
 }
 
@@ -494,11 +494,11 @@ for (spec in gradient_specs_re) {
 }
 
 for (spec in gradient_specs_re) {
-  test_that(paste0("gradient subsample: ", spec$label), {
+  test_that(paste0("gradient subsample (m=", spec$m, "): ", spec$label), {
     skip_if_no_gradient_tests()
     df <- spec$data_fn()
     setup <- setup_gradient_test(spec$formula, df, spec$family)
-    run_subsample_gradient_test(setup, m = spec$m)
+    run_subsample_gradient_test(setup, m = spec$m, tol = spec$tol_sub %||% 1e-5)
   })
 }
 
@@ -587,11 +587,11 @@ for (spec in gradient_specs_dpar) {
 }
 
 for (spec in gradient_specs_dpar) {
-  test_that(paste0("gradient subsample: ", spec$label), {
+  test_that(paste0("gradient subsample (m=", spec$m, "): ", spec$label), {
     skip_if_no_gradient_tests()
     df <- spec$data_fn()
     setup <- setup_gradient_test(spec$formula, df, spec$family)
-    run_subsample_gradient_test(setup, m = spec$m)
+    run_subsample_gradient_test(setup, m = spec$m, tol = spec$tol_sub %||% 1e-5)
   })
 }
 

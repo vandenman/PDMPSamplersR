@@ -39,6 +39,7 @@ skip_if_no_brms_setup <- function() {
 
   bridge_available <- cache_get_or_set("brms_bridge_setup_available", tryCatch({
     PDMPSamplersR:::check_for_julia_setup()
+    # Check if the BridgeStan extension was triggered and thus this method is available.
     isTRUE(JuliaCall::julia_eval("hasmethod(PDMPModel, Tuple{String, String})"))
   }, error = function(e) FALSE))
 

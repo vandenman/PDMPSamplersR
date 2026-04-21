@@ -19,6 +19,16 @@ test_that("map_can_stick honors metadata-derived supported coefficients", {
   expect_equal(result, c(FALSE, TRUE, TRUE, FALSE, FALSE))
 })
 
+test_that("map_can_stick supports numeric b.<index> unc names with semantic can_stick names", {
+  unc_names <- c("b.1", "b.2", "b.3", "Intercept", "sigma")
+  result <- PDMPSamplersR:::map_can_stick(
+    unc_names,
+    supported_coef_names = c("b.x1", "b.x2", "b.x3"),
+    user_can_stick = c(x2 = TRUE)
+  )
+  expect_equal(result, c(FALSE, TRUE, FALSE, FALSE, FALSE))
+})
+
 test_that("map_can_stick errors when supported coefficients cannot be aligned", {
   unc_names <- c("b.Intercept", "b.x1", "sigma")
   expect_error(
@@ -187,6 +197,15 @@ test_that("stickable_coef_names returns empty for no b coefficients", {
   expect_length(result, 0)
 })
 
+test_that("stickable_coef_names preserves semantic names with numeric b.<index> unc names", {
+  unc_names <- c("b.1", "b.2", "Intercept", "sigma")
+  result <- PDMPSamplersR:::stickable_coef_names(
+    unc_names,
+    supported_coef_names = c("b.x1", "b.x2")
+  )
+  expect_equal(result, c("b.x1", "b.x2"))
+})
+
 # ──────────────────────────────────────────────────────────────────────────────
 # .parse_and_eval_prior_at_zero
 # ──────────────────────────────────────────────────────────────────────────────
@@ -263,6 +282,28 @@ test_that("derive_parameter_prior with coefficient-specific priors", {
   result <- PDMPSamplersR:::derive_parameter_prior(prior, unc_names, can_stick)
   expect_equal(result[2], dnorm(0, 0, 5))
   expect_equal(result[3], dnorm(0, 0, 10))
+})
+
+test_that("derive_parameter_prior uses semantic coefficients for numeric b.<index> unc names", {
+  prior <- data.frame(
+    prior = c("normal(0, 5)", "normal(0, 10)"),
+    class = c("b", "b"),
+    coef = c("x1", "x2"),
+    group = c("", ""),
+    stringsAsFactors = FALSE
+  )
+  unc_names <- c("b.1", "b.2", "Intercept", "sigma")
+  can_stick <- c(TRUE, TRUE, FALSE, FALSE)
+  result <- PDMPSamplersR:::derive_parameter_prior(
+    prior,
+    unc_names,
+    can_stick,
+    supported_coef_names = c("b.x1", "b.x2")
+  )
+  expect_equal(result[1], dnorm(0, 0, 5))
+  expect_equal(result[2], dnorm(0, 0, 10))
+  expect_equal(result[3], 1.0)
+  expect_equal(result[4], 1.0)
 })
 
 test_that("derive_parameter_prior errors when no prior found", {
@@ -414,6 +455,33 @@ test_that("build_sticky_inclusion_probs keeps names aligned under partial can_st
 
   out <- PDMPSamplersR:::build_sticky_inclusion_probs(incl_raw, can_stick, unc_names)
   expect_equal(out$chain1, c("b.x1" = 0.9, "b.x3" = 0.8))
+})
+
+test_that("build_sticky_inclusion_probs uses semantic names with numeric b.<index> unc names", {
+  incl_raw <- list(chain1 = c(0.7, 0.2, 0.0, 0.0))
+  can_stick <- c(TRUE, TRUE, FALSE, FALSE)
+  unc_names <- c("b.1", "b.2", "Intercept", "sigma")
+
+  out <- PDMPSamplersR:::build_sticky_inclusion_probs(
+    incl_raw,
+    can_stick,
+    unc_names,
+    supported_coef_names = c("b.x1", "b.x2")
+  )
+  expect_equal(out$chain1, c("b.x1" = 0.7, "b.x2" = 0.2))
+})
+
+test_that("build_sticky_inclusion_probs clamps values to finite probabilities", {
+  incl_raw <- list(
+    chain1 = c(NaN, 1.3, 0.0, 0.0),
+    chain2 = c(-0.2, Inf, 0.0, 0.0)
+  )
+  can_stick <- c(TRUE, TRUE, FALSE, FALSE)
+  unc_names <- c("b.x1", "b.x2", "Intercept", "sigma")
+
+  out <- PDMPSamplersR:::build_sticky_inclusion_probs(incl_raw, can_stick, unc_names)
+  expect_equal(out$chain1, c("b.x1" = 0.0, "b.x2" = 1.0))
+  expect_equal(out$chain2, c("b.x1" = 0.0, "b.x2" = 0.0))
 })
 
 test_that("build_sticky_inclusion_probs errors on length mismatch", {

@@ -4,7 +4,12 @@
 \alias{derive_parameter_prior}
 \title{Derive parameter_prior from brms prior specification}
 \usage{
-derive_parameter_prior(prior, unc_names, can_stick)
+derive_parameter_prior(
+  prior,
+  unc_names,
+  can_stick,
+  supported_coef_names = NULL
+)
 }
 \arguments{
 \item{prior}{A `brmsprior` data frame (from `brms::prior_summary()` or
@@ -13,6 +18,9 @@ the prior slot of a brmsfit).}
 \item{unc_names}{Character vector from `BridgeStan::param_unc_names()`.}
 
 \item{can_stick}{Logical vector of length `d` (from `map_can_stick()`).}
+
+\item{supported_coef_names}{Optional character vector of supported
+coefficient names from brms metadata.}
 }
 \value{
 Numeric vector of length `d` with slab densities at zero for

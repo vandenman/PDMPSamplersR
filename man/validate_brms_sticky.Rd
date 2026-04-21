@@ -11,6 +11,7 @@ validate_brms_sticky(
   parameter_prior,
   d,
   unc_names,
+  supported_coef_names = NULL,
   prior,
   subsampled
 )
@@ -27,6 +28,9 @@ validate_brms_sticky(
 \item{d}{Integer, total number of unconstrained parameters.}
 
 \item{unc_names}{Character vector, unconstrained parameter names.}
+
+\item{supported_coef_names}{Character vector of supported coefficient names
+derived from brms metadata.}
 
 \item{prior}{brms prior data frame.}
 

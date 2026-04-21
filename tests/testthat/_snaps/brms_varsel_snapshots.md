@@ -54,3 +54,26 @@
       4        b.x3      TRUE
       5       sigma     FALSE
 
+# snapshot: metadata-first mapping for simple numeric formula
+
+    Code
+      data.frame(parameter = unc_names, can_stick = result)
+    Output
+          parameter can_stick
+      1 b.Intercept     FALSE
+      2        b.x1      TRUE
+      3        b.x2      TRUE
+      4        b.f1     FALSE
+      5       sigma     FALSE
+
+# snapshot: metadata-first mapping rejects factor formula
+
+    Code
+      PDMPSamplersR:::supported_b_coef_names(formula = y ~ f, data = df, fe_names = c(
+        "f_b"))
+    Condition
+      Error in `PDMPSamplersR:::supported_b_coef_names()`:
+      ! Formula-based sticky auto-mapping supports numeric predictors only.
+      x Non-numeric terms: "f".
+      i Factors and grouped structures are not supported.
+

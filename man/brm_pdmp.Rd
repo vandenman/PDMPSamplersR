@@ -39,7 +39,7 @@ brm_pdmp(
   sticky = FALSE,
   can_stick = NULL,
   model_prior = NULL,
-  parameter_prior = NULL,
+  kappa = NULL,
   stanvars = NULL,
   sample_prior = "no",
   save_model = NULL,
@@ -150,10 +150,11 @@ non-intercept population-level coefficients are candidates.}
 \item{model_prior}{A [bernoulli()] or [betabernoulli()] object
 specifying the prior on model space. Required when `sticky = TRUE`.}
 
-\item{parameter_prior}{Optional numeric vector of slab densities at
-zero for each stickable coordinate. If omitted, derived
-automatically from the brms prior specification (only `normal(0, s)`
-and `student_t(df, 0, s)` are supported for automatic derivation).}
+\item{kappa}{Optional numeric vector of slab densities at zero for each
+stickable coordinate (κ in the sticky PDMP literature). If omitted,
+derived automatically from the brms prior specification (only
+`normal(0, s)` and `student_t(df, 0, s)` are supported for automatic
+derivation).}
 
 \item{stanvars}{Optional `stanvar` object for custom Stan code.}
 

@@ -230,7 +230,8 @@ brm_pdmp <- function(
 
   # Validate sticky arguments (requires param_unc_names from BridgeStan)
   if (isTRUE(sticky)) {
-    fe_names <- setdiff(rownames(brms::fixef(empty_fit)), "Intercept")
+    brms_prior <- as.data.frame(brms::prior_summary(empty_fit), stringsAsFactors = FALSE)
+    fe_names <- unique(brms_prior$coef[brms_prior$class == "b" & nzchar(brms_prior$coef)])
     supported_coef_names <- supported_b_coef_names(
       fe_names = fe_names
     )
@@ -241,7 +242,6 @@ brm_pdmp <- function(
       normalizePath(stan_file, mustWork = TRUE),
       normalizePath(data_for_names, mustWork = TRUE)
     )
-    brms_prior <- brms::prior_summary(empty_fit)
     sticky_args <- validate_brms_sticky(
       sticky, can_stick, model_prior, kappa,
       d = length(unc_names), unc_names = unc_names,
@@ -331,7 +331,8 @@ brm_pdmp <- function(
     incl_list <- build_sticky_inclusion_probs(
       incl_raw = jl_result$inclusion_probs,
       can_stick = sticky_args$can_stick,
-      unc_names = unc_names
+      unc_names = unc_names,
+      supported_coef_names = sticky_args$supported_coef_names
     )
 
     attr(empty_fit, "sticky") <- list(
@@ -349,7 +350,7 @@ brm_pdmp <- function(
   empty_fit
 }
 
-build_sticky_inclusion_probs <- function(incl_raw, can_stick, unc_names) {
+build_sticky_inclusion_probs <- function(incl_raw, can_stick, unc_names, supported_coef_names = NULL) {
   if (is.environment(incl_raw))
     incl_raw <- as.list(incl_raw)
   if (is.numeric(incl_raw))
@@ -358,7 +359,19 @@ build_sticky_inclusion_probs <- function(incl_raw, can_stick, unc_names) {
     cli::cli_abort("Sticky inclusion probabilities must be a numeric vector or a list of numeric vectors.")
 
   stickable_idx <- which(can_stick)
-  stickable_names <- unc_names[stickable_idx]
+  if (!is.null(supported_coef_names)) {
+    resolved <- .resolve_stickable_mapping(
+      unc_names,
+      supported_coef_names = supported_coef_names
+    )
+    name_lookup <- stats::setNames(resolved$display_names, as.character(resolved$indices))
+    stickable_names <- unname(name_lookup[as.character(stickable_idx)])
+    missing_names <- is.na(stickable_names)
+    if (any(missing_names))
+      stickable_names[missing_names] <- unc_names[stickable_idx[missing_names]]
+  } else {
+    stickable_names <- unc_names[stickable_idx]
+  }
 
   incl_list <- lapply(incl_raw, function(probs) {
     if (!is.numeric(probs))
@@ -370,12 +383,13 @@ build_sticky_inclusion_probs <- function(incl_raw, can_stick, unc_names) {
       ))
 
     named_probs <- probs[stickable_idx]
+    named_probs[!is.finite(named_probs)] <- 0.0
+    named_probs <- pmin(pmax(named_probs, 0.0), 1.0)
     names(named_probs) <- stickable_names
     named_probs
   })
 
-  if (is.null(names(incl_list)) || any(!nzchar(names(incl_list))))
-    names(incl_list) <- paste0("chain", seq_along(incl_list))
+  names(incl_list) <- paste0("chain", seq_along(incl_list))
 
   incl_list
 }

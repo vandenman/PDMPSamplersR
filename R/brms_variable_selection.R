@@ -78,6 +78,60 @@ supported_b_coef_names <- function(fe_names, formula = NULL, data = NULL) {
     ))
 }
 
+.resolve_stickable_mapping <- function(unc_names, supported_coef_names = NULL) {
+    if (is.null(supported_coef_names)) {
+        b_indices <- grep("^b\\.", unc_names)
+        intercept_indices <- grep("^b\\..*[Ii]ntercept", unc_names)
+        stickable_indices <- setdiff(b_indices, intercept_indices)
+        stickable_unc_names <- unc_names[stickable_indices]
+        return(list(
+            indices = stickable_indices,
+            unc_names = stickable_unc_names,
+            display_names = stickable_unc_names
+        ))
+    }
+
+    if (!is.character(supported_coef_names))
+        cli::cli_abort("{.arg supported_coef_names} must be a character vector.")
+    if (anyDuplicated(supported_coef_names))
+        cli::cli_abort("{.arg supported_coef_names} cannot contain duplicates.")
+    if (length(supported_coef_names) == 0L) {
+        return(list(
+            indices = integer(0),
+            unc_names = character(0),
+            display_names = character(0)
+        ))
+    }
+
+    idx <- match(supported_coef_names, unc_names)
+    if (all(!is.na(idx))) {
+        return(list(
+            indices = idx,
+            unc_names = unc_names[idx],
+            display_names = supported_coef_names
+        ))
+    }
+
+    # Fallback for brms setups where unconstrained coefficients are named b.1, b.2, ...
+    numeric_b_idx <- grep("^b\\.[0-9]+$", unc_names)
+    if (all(is.na(idx)) && length(numeric_b_idx) == length(supported_coef_names)) {
+        numeric_order <- order(as.integer(sub("^b\\.", "", unc_names[numeric_b_idx])))
+        numeric_b_idx <- numeric_b_idx[numeric_order]
+        return(list(
+            indices = numeric_b_idx,
+            unc_names = unc_names[numeric_b_idx],
+            display_names = supported_coef_names
+        ))
+    }
+
+    missing <- supported_coef_names[is.na(idx)]
+    cli::cli_abort(c(
+        "Could not align supported brms coefficients to unconstrained parameter names.",
+        "x" = "Missing from {.arg unc_names}: {.val {missing}}.",
+        "i" = "This likely indicates drift between brms naming and BridgeStan parameter naming."
+    ))
+}
+
 #' Build logical can_stick vector from brms metadata
 #'
 #' Determines which unconstrained BridgeStan coordinates correspond to
@@ -94,8 +148,9 @@ supported_b_coef_names <- function(fe_names, formula = NULL, data = NULL) {
 #'
 #' @keywords internal
 map_can_stick <- function(unc_names, supported_coef_names = NULL, user_can_stick = NULL) {
-    stickable_names <- stickable_coef_names(unc_names, supported_coef_names = supported_coef_names)
-    stickable_indices <- match(stickable_names, unc_names)
+    resolved <- .resolve_stickable_mapping(unc_names, supported_coef_names = supported_coef_names)
+    stickable_names <- resolved$display_names
+    stickable_indices <- resolved$indices
     out <- rep(FALSE, length(unc_names))
     if (length(stickable_indices) == 0L)
         return(out)
@@ -146,33 +201,13 @@ map_can_stick <- function(unc_names, supported_coef_names = NULL, user_can_stick
 #' @param supported_coef_names Optional character vector of supported
 #'   coefficient names from brms metadata. If omitted, uses legacy raw
 #'   name matching over `unc_names`.
-#' @return Character vector of stickable unconstrained parameter names.
+#' @return Character vector of stickable coefficient names.
 #' @keywords internal
 stickable_coef_names <- function(unc_names, supported_coef_names = NULL) {
-    if (is.null(supported_coef_names)) {
-        b_indices <- grep("^b\\.", unc_names)
-        intercept_indices <- grep("^b\\..*[Ii]ntercept", unc_names)
-        stickable_indices <- setdiff(b_indices, intercept_indices)
-        return(unc_names[stickable_indices])
-    }
-
-    if (!is.character(supported_coef_names))
-        cli::cli_abort("{.arg supported_coef_names} must be a character vector.")
-    if (anyDuplicated(supported_coef_names))
-        cli::cli_abort("{.arg supported_coef_names} cannot contain duplicates.")
-    if (length(supported_coef_names) == 0L)
-        return(character(0))
-
-    idx <- match(supported_coef_names, unc_names)
-    missing <- supported_coef_names[is.na(idx)]
-    if (length(missing) > 0L)
-        cli::cli_abort(c(
-            "Could not align supported brms coefficients to unconstrained parameter names.",
-            "x" = "Missing from {.arg unc_names}: {.val {missing}}.",
-            "i" = "This likely indicates drift between brms naming and BridgeStan parameter naming."
-        ))
-
-    unc_names[idx]
+    .resolve_stickable_mapping(
+        unc_names,
+        supported_coef_names = supported_coef_names
+    )$display_names
 }
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -189,22 +224,35 @@ stickable_coef_names <- function(unc_names, supported_coef_names = NULL) {
 #'   the prior slot of a brmsfit).
 #' @param unc_names Character vector from `BridgeStan::param_unc_names()`.
 #' @param can_stick Logical vector of length `d` (from `map_can_stick()`).
+#' @param supported_coef_names Optional character vector of supported
+#'   coefficient names from brms metadata.
 #'
 #' @return Numeric vector of length `d` with slab densities at zero for
 #'   stickable coordinates and 1.0 elsewhere.
 #'
 #' @keywords internal
-derive_parameter_prior <- function(prior, unc_names, can_stick) {
+derive_parameter_prior <- function(prior, unc_names, can_stick, supported_coef_names = NULL) {
     d <- length(unc_names)
     param_prior <- rep(1.0, d)
     stickable_idx <- which(can_stick)
     if (length(stickable_idx) == 0L) return(param_prior)
 
+    resolved <- .resolve_stickable_mapping(
+        unc_names,
+        supported_coef_names = supported_coef_names
+    )
+    coef_lookup <- rep(NA_character_, d)
+    if (length(resolved$indices) > 0L) {
+        coef_lookup[resolved$indices] <- sub("^b\\.", "", resolved$display_names)
+    }
+
     stickable_names <- unc_names[stickable_idx]
 
     for (i in seq_along(stickable_idx)) {
         coef_name <- stickable_names[i]
-        coef_short <- sub("^b\\.", "", coef_name)
+        coef_short <- coef_lookup[stickable_idx[i]]
+        if (is.na(coef_short))
+            coef_short <- sub("^b\\.", "", coef_name)
         density_at_zero <- .prior_density_at_zero(prior, coef_short)
         param_prior[stickable_idx[i]] <- density_at_zero
     }
@@ -327,8 +375,8 @@ validate_brms_sticky <- function(sticky, can_stick, model_prior, parameter_prior
     if (is.null(model_prior) || !(is.bernoulli(model_prior) || is.betabernoulli(model_prior)))
         cli::cli_abort("{.arg model_prior} must be a {.cls bernoulli} or {.cls beta-bernoulli} object when {.arg sticky} is {.code TRUE}.")
 
-    supported_unc_names <- stickable_coef_names(unc_names, supported_coef_names = supported_coef_names)
-    if (length(supported_unc_names) == 0L)
+    supported_names <- stickable_coef_names(unc_names, supported_coef_names = supported_coef_names)
+    if (length(supported_names) == 0L)
         cli::cli_abort("No supported population-level coefficients found for variable selection. Check the model formula.")
 
     # Build can_stick
@@ -342,7 +390,7 @@ validate_brms_sticky <- function(sticky, can_stick, model_prior, parameter_prior
     if (n_stickable == 0L)
         cli::cli_abort(c(
             "No coefficients are currently selected for sticky variable selection.",
-            "i" = "Supported coefficients: {.val {supported_unc_names}}.",
+            "i" = "Supported coefficients: {.val {supported_names}}.",
             "i" = "Check {.arg can_stick}."
         ))
 
@@ -357,7 +405,12 @@ validate_brms_sticky <- function(sticky, can_stick, model_prior, parameter_prior
 
     # parameter_prior: derive automatically or validate user-supplied
     if (is.null(parameter_prior)) {
-        parameter_prior <- derive_parameter_prior(prior, unc_names, can_stick_full)
+        parameter_prior <- derive_parameter_prior(
+            prior,
+            unc_names,
+            can_stick_full,
+            supported_coef_names = supported_coef_names
+        )
     } else {
         if (length(parameter_prior) == n_stickable) {
             # Expand to full d-length vector
@@ -376,7 +429,7 @@ validate_brms_sticky <- function(sticky, can_stick, model_prior, parameter_prior
     list(
         sticky = TRUE,
         can_stick = can_stick_full,
-        supported_coef_names = supported_unc_names,
+        supported_coef_names = supported_names,
         model_prior = model_prior,
         parameter_prior = parameter_prior
     )

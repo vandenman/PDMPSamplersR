@@ -24,3 +24,4 @@
 Delegates to the standard brms print method and appends a one-line note
 about sticky variable selection results.
 }
+\keyword{internal}

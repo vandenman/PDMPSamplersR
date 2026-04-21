@@ -307,6 +307,7 @@ plot_inclusion.brmsfit <- function(x, threshold = 0.5, ...) {
 #' @param ... Passed to the brms print method.
 #'
 #' @return `x`, invisibly.
+#' @keywords internal
 #' @export
 print.sticky_brmsfit <- function(x, digits = 2,
                                  short = getOption("brms.short_summary", FALSE), ...) {

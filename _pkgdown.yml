@@ -64,10 +64,14 @@ reference:
       - log_lik_subsampled
       - posterior_epred_subsampled
       - posterior_predict_subsampled
-      - inclusion_prob
-      - median_probability_model
+  - title: Variable selection
+    contents:
       - model_averaged_mean
+      - inclusion_prob
+      - check_inclusion_stability
+      - inclusion_bf
       - plot_inclusion
+      - median_probability_model
   - title: Setup
     contents:
       - pdmpsamplers_setup

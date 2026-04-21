@@ -74,10 +74,11 @@
 #'   non-intercept population-level coefficients are candidates.
 #' @param model_prior A [bernoulli()] or [betabernoulli()] object
 #'   specifying the prior on model space. Required when `sticky = TRUE`.
-#' @param parameter_prior Optional numeric vector of slab densities at
-#'   zero for each stickable coordinate. If omitted, derived
-#'   automatically from the brms prior specification (only `normal(0, s)`
-#'   and `student_t(df, 0, s)` are supported for automatic derivation).
+#' @param kappa Optional numeric vector of slab densities at zero for each
+#'   stickable coordinate (κ in the sticky PDMP literature). If omitted,
+#'   derived automatically from the brms prior specification (only
+#'   `normal(0, s)` and `student_t(df, 0, s)` are supported for automatic
+#'   derivation).
 #' @param stanvars Optional `stanvar` object for custom Stan code.
 #' @param sample_prior Currently only `"no"` is supported.
 #' @param save_model Optional file path to save the generated Stan code.
@@ -130,7 +131,8 @@ brm_pdmp <- function(
     use_fd_hvp = FALSE,
     post_warmup_simplify = FALSE,
     use_fd_hcv = FALSE,
-    sticky = FALSE, can_stick = NULL, model_prior = NULL, parameter_prior = NULL,
+    sticky = FALSE, can_stick = NULL, model_prior = NULL,
+    kappa = NULL,
     stanvars = NULL, sample_prior = "no",
     save_model = NULL,
     ...
@@ -228,6 +230,11 @@ brm_pdmp <- function(
 
   # Validate sticky arguments (requires param_unc_names from BridgeStan)
   if (isTRUE(sticky)) {
+    fe_names <- setdiff(rownames(brms::fixef(empty_fit)), "Intercept")
+    supported_coef_names <- supported_b_coef_names(
+      fe_names = fe_names
+    )
+
     data_for_names <- if (subsampled) data_full_file else data_file
     unc_names <- JuliaCall::julia_call(
       "r_get_param_unc_names",
@@ -236,8 +243,9 @@ brm_pdmp <- function(
     )
     brms_prior <- brms::prior_summary(empty_fit)
     sticky_args <- validate_brms_sticky(
-      sticky, can_stick, model_prior, parameter_prior,
+      sticky, can_stick, model_prior, kappa,
       d = length(unc_names), unc_names = unc_names,
+      supported_coef_names = supported_coef_names,
       prior = brms_prior, subsampled = subsampled
     )
   } else {
@@ -320,26 +328,56 @@ brm_pdmp <- function(
   attr(empty_fit, "pdmp_stats") <- pdmp_stats
 
   if (isTRUE(sticky_args$sticky) && !is.null(jl_result$inclusion_probs)) {
-    incl_raw <- jl_result$inclusion_probs
-    if (is.environment(incl_raw)) incl_raw <- as.list(incl_raw)
-    stickable_idx <- which(sticky_args$can_stick)
-    fe_names <- setdiff(rownames(brms::fixef(empty_fit)), "Intercept")
-    stickable_names <- paste0("b.", fe_names)
-    incl_list <- lapply(seq_along(incl_raw), function(ch) {
-      probs <- incl_raw[[ch]]
-      named_probs <- probs[stickable_idx]
-      names(named_probs) <- stickable_names
-      named_probs
-    })
-    names(incl_list) <- paste0("chain", seq_along(incl_list))
-    attr(empty_fit, "sticky") <- list(
-      inclusion_probs = incl_list,
+    incl_list <- build_sticky_inclusion_probs(
+      incl_raw = jl_result$inclusion_probs,
       can_stick = sticky_args$can_stick,
       unc_names = unc_names
     )
+
+    attr(empty_fit, "sticky") <- list(
+      inclusion_probs = incl_list,
+      can_stick = sticky_args$can_stick,
+      supported_coef_names = sticky_args$supported_coef_names,
+      unc_names = unc_names,
+      model_prior = sticky_args$model_prior
+    )
+    # TODO: perhaps we should use a custom class for pdmps in general
+    # so that we can use continuous time estimators whenever available.
+    class(empty_fit) <- c("sticky_brmsfit", class(empty_fit))
   }
 
   empty_fit
+}
+
+build_sticky_inclusion_probs <- function(incl_raw, can_stick, unc_names) {
+  if (is.environment(incl_raw))
+    incl_raw <- as.list(incl_raw)
+  if (is.numeric(incl_raw))
+    incl_raw <- list(chain1 = incl_raw)
+  if (!is.list(incl_raw))
+    cli::cli_abort("Sticky inclusion probabilities must be a numeric vector or a list of numeric vectors.")
+
+  stickable_idx <- which(can_stick)
+  stickable_names <- unc_names[stickable_idx]
+
+  incl_list <- lapply(incl_raw, function(probs) {
+    if (!is.numeric(probs))
+      cli::cli_abort("Each chain's sticky inclusion probabilities must be numeric.")
+    if (length(probs) != length(unc_names))
+      cli::cli_abort(c(
+        "Sticky inclusion probabilities had unexpected length.",
+        "x" = "Expected length {length(unc_names)} and got {length(probs)}."
+      ))
+
+    named_probs <- probs[stickable_idx]
+    names(named_probs) <- stickable_names
+    named_probs
+  })
+
+  if (is.null(names(incl_list)) || any(!nzchar(names(incl_list))))
+    names(incl_list) <- paste0("chain", seq_along(incl_list))
+
+  incl_list
 }
 
 cached_stan_model <- function(scode) {

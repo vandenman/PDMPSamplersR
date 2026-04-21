@@ -7,6 +7,77 @@
 # can_stick mapping
 # ──────────────────────────────────────────────────────────────────────────────
 
+supported_b_coef_names <- function(fe_names, formula = NULL, data = NULL) {
+    if (!is.character(fe_names))
+        cli::cli_abort("{.arg fe_names} must be a character vector.")
+    if (length(fe_names) == 0L)
+        return(character(0))
+    if (is.null(formula))
+        return(paste0("b.", fe_names))
+    if (is.null(data))
+        cli::cli_abort("{.arg data} must be provided when {.arg formula} is supplied.")
+
+    main_formula <- .extract_main_formula(formula)
+    formula_text <- paste(deparse(formula), collapse = " ")
+    tilde_pos <- gregexpr("~", formula_text, fixed = TRUE)[[1L]]
+    n_tilde <- if (length(tilde_pos) == 1L && tilde_pos[1L] == -1L) 0L else length(tilde_pos)
+    if (n_tilde > 1L)
+        cli::cli_abort(c(
+            "Formula-based sticky auto-mapping supports only a single-response formula.",
+            "i" = "Distributional, multi-response, and non-linear formula extensions are not supported."
+        ))
+
+    term_labels <- attr(stats::terms(main_formula), "term.labels")
+    if (length(term_labels) == 0L)
+        return(character(0))
+
+    unsupported_terms <- term_labels[grepl("[:|]", term_labels) | grepl("\\(|\\)|\\[|\\]", term_labels)]
+    if (length(unsupported_terms) > 0L)
+        cli::cli_abort(c(
+            "Formula-based sticky auto-mapping supports only simple numeric main effects.",
+            "x" = "Unsupported terms: {.val {unsupported_terms}}.",
+            "i" = "Interactions, splines, random effects, and transformed terms are not supported."
+        ))
+
+    unknown_terms <- setdiff(term_labels, names(data))
+    if (length(unknown_terms) > 0L)
+        cli::cli_abort(c(
+            "Formula-based sticky auto-mapping requires direct data-column predictors.",
+            "x" = "Terms not found as plain data columns: {.val {unknown_terms}}.",
+            "i" = "Use simple numeric predictors like {.code y ~ x1 + x2}."
+        ))
+
+    non_numeric_terms <- term_labels[!vapply(term_labels, function(lbl) is.numeric(data[[lbl]]), logical(1L))]
+    if (length(non_numeric_terms) > 0L)
+        cli::cli_abort(c(
+            "Formula-based sticky auto-mapping supports numeric predictors only.",
+            "x" = "Non-numeric terms: {.val {non_numeric_terms}}.",
+            "i" = "Factors and grouped structures are not supported."
+        ))
+
+    if (!setequal(fe_names, term_labels))
+        cli::cli_abort(c(
+            "Formula-based sticky auto-mapping requires one fixed-effect coefficient per predictor term.",
+            "x" = "Formula terms: {.val {term_labels}}.",
+            "x" = "Fixed-effect coefficients: {.val {fe_names}}.",
+            "i" = "This mismatch indicates an unsupported model structure for sticky auto-mapping."
+        ))
+
+    paste0("b.", fe_names)
+}
+
+.extract_main_formula <- function(formula) {
+    if (inherits(formula, "formula"))
+        return(formula)
+    if (is.list(formula) && !is.null(formula$formula) && inherits(formula$formula, "formula"))
+        return(formula$formula)
+
+    cli::cli_abort(c(
+        "Unsupported {.arg formula} type for formula-based sticky auto-mapping.",
+        "i" = "Use a simple single-response formula like {.code y ~ x1 + x2}."
+    ))
+}
+
 #' Build logical can_stick vector from brms metadata
 #'
 #' Determines which unconstrained BridgeStan coordinates correspond to
@@ -14,45 +85,94 @@
 #' and shape parameters).
 #'
 #' @param unc_names Character vector from `BridgeStan::param_unc_names()`.
+#' @param supported_coef_names Character vector of supported coefficient names
+#'   on the unconstrained scale (e.g. `b.x1`) derived from brms metadata.
 #' @param user_can_stick Optional logical vector (same length as supported
 #'   non-intercept `b` coefficients) to override the default all-TRUE.
 #'
 #' @return A logical vector of length `length(unc_names)`.
 #'
 #' @keywords internal
-map_can_stick <- function(unc_names, user_can_stick = NULL) {
-    b_indices <- grep("^b\\.", unc_names)
-    intercept_indices <- grep("^b\\..*[Ii]ntercept", unc_names)
-    stickable_indices <- setdiff(b_indices, intercept_indices)
+map_can_stick <- function(unc_names, supported_coef_names = NULL, user_can_stick = NULL) {
+    stickable_names <- stickable_coef_names(unc_names, supported_coef_names = supported_coef_names)
+    stickable_indices <- match(stickable_names, unc_names)
+    out <- rep(FALSE, length(unc_names))
+    if (length(stickable_indices) == 0L)
+        return(out)
 
     if (!is.null(user_can_stick)) {
         if (!is.logical(user_can_stick))
             cli::cli_abort("{.arg can_stick} must be a logical vector.")
-        if (length(user_can_stick) != length(stickable_indices))
-            cli::cli_abort(c(
-                "{.arg can_stick} must have length {length(stickable_indices)} (the number of supported non-intercept population-level coefficients).",
-                "i" = "Stickable coefficients: {.val {unc_names[stickable_indices]}}.",
-                "x" = "Got length {length(user_can_stick)}."
-            ))
-        out <- rep(FALSE, length(unc_names))
-        out[stickable_indices] <- user_can_stick
+
+        if (!is.null(names(user_can_stick))) {
+            if (any(is.na(names(user_can_stick)) | !nzchar(names(user_can_stick))))
+                cli::cli_abort("Named {.arg can_stick} vectors cannot contain empty or NA names.")
+
+            # Named vector: match by name, accepting names with or without b. prefix
+            stickable_short <- sub("^b\\.", "", stickable_names)
+            norm_user_names <- sub("^b\\.", "", names(user_can_stick))
+            if (anyDuplicated(norm_user_names))
+                cli::cli_abort("Named {.arg can_stick} cannot contain duplicate coefficient names.")
+
+            unmatched <- setdiff(norm_user_names, stickable_short)
+            if (length(unmatched) > 0L)
+                cli::cli_abort(c(
+                    "{.arg can_stick} contains names not found among stickable coefficients.",
+                    "x" = "Unknown names: {.val {unmatched}}.",
+                    "i" = "Stickable coefficients: {.val {stickable_short}}."
+                ))
+
+            match_idx <- match(norm_user_names, stickable_short)
+            out[stickable_indices[match_idx]] <- user_can_stick
+        } else {
+            if (length(user_can_stick) != length(stickable_indices))
+                cli::cli_abort(c(
+                    "{.arg can_stick} must have length {length(stickable_indices)} (the number of supported non-intercept population-level coefficients).",
+                    "i" = "Stickable coefficients: {.val {stickable_names}}.",
+                    "x" = "Got length {length(user_can_stick)}."
+                ))
+            out[stickable_indices] <- user_can_stick
+        }
     } else {
-        out <- rep(FALSE, length(unc_names))
         out[stickable_indices] <- TRUE
     }
+
     out
 }
 
 #' Return the names of stickable coefficients
 #'
 #' @param unc_names Character vector from `BridgeStan::param_unc_names()`.
+#' @param supported_coef_names Optional character vector of supported
+#'   coefficient names from brms metadata. If omitted, uses legacy raw
+#'   name matching over `unc_names`.
 #' @return Character vector of stickable unconstrained parameter names.
 #' @keywords internal
-stickable_coef_names <- function(unc_names) {
-    b_indices <- grep("^b\\.", unc_names)
-    intercept_indices <- grep("^b\\..*[Ii]ntercept", unc_names)
-    stickable_indices <- setdiff(b_indices, intercept_indices)
-    unc_names[stickable_indices]
+stickable_coef_names <- function(unc_names, supported_coef_names = NULL) {
+    if (is.null(supported_coef_names)) {
+        b_indices <- grep("^b\\.", unc_names)
+        intercept_indices <- grep("^b\\..*[Ii]ntercept", unc_names)
+        stickable_indices <- setdiff(b_indices, intercept_indices)
+        return(unc_names[stickable_indices])
+    }
+
+    if (!is.character(supported_coef_names))
+        cli::cli_abort("{.arg supported_coef_names} must be a character vector.")
+    if (anyDuplicated(supported_coef_names))
+        cli::cli_abort("{.arg supported_coef_names} cannot contain duplicates.")
+    if (length(supported_coef_names) == 0L)
+        return(character(0))
+
+    idx <- match(supported_coef_names, unc_names)
+    missing <- supported_coef_names[is.na(idx)]
+    if (length(missing) > 0L)
+        cli::cli_abort(c(
+            "Could not align supported brms coefficients to unconstrained parameter names.",
+            "x" = "Missing from {.arg unc_names}: {.val {missing}}.",
+            "i" = "This likely indicates drift between brms naming and BridgeStan parameter naming."
+        ))
+
+    unc_names[idx]
 }
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -182,6 +302,8 @@ derive_parameter_prior <- function(prior, unc_names, can_stick) {
 #' @param parameter_prior Numeric vector or NULL.
 #' @param d Integer, total number of unconstrained parameters.
 #' @param unc_names Character vector, unconstrained parameter names.
+#' @param supported_coef_names Character vector of supported coefficient names
+#'   derived from brms metadata.
 #' @param prior brms prior data frame.
 #' @param subsampled Logical, whether subsampling is active.
 #'
@@ -190,7 +312,7 @@ derive_parameter_prior <- function(prior, unc_names, can_stick) {
 #'
 #' @keywords internal
 validate_brms_sticky <- function(sticky, can_stick, model_prior, parameter_prior,
-                                  d, unc_names, prior, subsampled) {
+                                  d, unc_names, supported_coef_names = NULL, prior, subsampled) {
     if (!isTRUE(sticky))
         return(list(sticky = FALSE, can_stick = NULL, model_prior = NULL, parameter_prior = NULL))
 
@@ -205,12 +327,24 @@ validate_brms_sticky <- function(sticky, can_stick, model_prior, parameter_prior
     if (is.null(model_prior) || !(is.bernoulli(model_prior) || is.betabernoulli(model_prior)))
         cli::cli_abort("{.arg model_prior} must be a {.cls bernoulli} or {.cls beta-bernoulli} object when {.arg sticky} is {.code TRUE}.")
 
+    supported_unc_names <- stickable_coef_names(unc_names, supported_coef_names = supported_coef_names)
+    if (length(supported_unc_names) == 0L)
+        cli::cli_abort("No supported population-level coefficients found for variable selection. Check the model formula.")
+
     # Build can_stick
-    can_stick_full <- map_can_stick(unc_names, user_can_stick = can_stick)
+    can_stick_full <- map_can_stick(
+        unc_names,
+        supported_coef_names = supported_coef_names,
+        user_can_stick = can_stick
+    )
     n_stickable <- sum(can_stick_full)
 
     if (n_stickable == 0L)
-        cli::cli_abort("No supported population-level coefficients found for variable selection. Check the model formula.")
+        cli::cli_abort(c(
+            "No coefficients are currently selected for sticky variable selection.",
+            "i" = "Supported coefficients: {.val {supported_unc_names}}.",
+            "i" = "Check {.arg can_stick}."
+        ))
 
     # Expand bernoulli prob
     if (is.bernoulli(model_prior)) {
@@ -242,6 +376,7 @@ validate_brms_sticky <- function(sticky, can_stick, model_prior, parameter_prior
     list(
         sticky = TRUE,
         can_stick = can_stick_full,
+        supported_coef_names = supported_unc_names,
         model_prior = model_prior,
         parameter_prior = parameter_prior
     )

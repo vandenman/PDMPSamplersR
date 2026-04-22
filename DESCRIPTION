@@ -32,6 +32,7 @@ Suggests:
     jsonlite,
     knitr,
     patchwork,
+    posterior,
     quarto,
     rstan,
     testthat (>= 3.0.0),

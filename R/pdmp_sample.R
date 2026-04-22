@@ -326,7 +326,7 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
                         n_chains = 1L, threaded = FALSE,
                         adaptive_scheme = c("diagonal", "fullrank")) {
 
-  # Validate file paths on R side before setting up Julia (fail fast)
+  # Validate file paths on R side before setting up Julia
   validate_type(path_to_stanmodel, type = "character", n = 1)
 
   if (is.list(standata)) {
@@ -351,7 +351,7 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
     cli::cli_abort(c(
       "{.arg standata} should be a JSON file path or a list that can be written to JSON.",
       "i" = "Got: {.path {standata_path}}",
-      "i" = "Use {.fn write_stan_json} to create a data file."
+      "i" = "Use {.fn write_stan_json} to create a data file or pass a list directly."
     ))
 
   check_for_julia_setup()

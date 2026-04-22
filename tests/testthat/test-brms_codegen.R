@@ -137,6 +137,8 @@ test_that("get_subsampled_family_bounds includes nu and phi", {
 # -- Stan function generation --------------------------------------------------
 
 test_that("subsampled bernoulli_logit function uses local mu indexing", {
+  skip_if_no_brms()
+
   codegen_info <- list(dpar_shapes = list())
   code <- PDMPSamplersR:::make_subsampled_stan_functions(
     brms::bernoulli(), codegen_info
@@ -150,6 +152,8 @@ test_that("subsampled bernoulli_logit function uses local mu indexing", {
 })
 
 test_that("subsampled poisson_log function has correct structure", {
+  skip_if_no_brms()
+
   codegen_info <- list(dpar_shapes = list())
   code <- PDMPSamplersR:::make_subsampled_stan_functions(
     poisson(), codegen_info
@@ -161,6 +165,8 @@ test_that("subsampled poisson_log function has correct structure", {
 })
 
 test_that("subsampled gaussian function includes scalar sigma", {
+  skip_if_no_brms()
+
   codegen_info <- list(dpar_shapes = list(sigma = "scalar"))
   code <- PDMPSamplersR:::make_subsampled_stan_functions(
     gaussian(), codegen_info
@@ -173,6 +179,8 @@ test_that("subsampled gaussian function includes scalar sigma", {
 })
 
 test_that("subsampled gaussian function includes vector sigma", {
+  skip_if_no_brms()
+
   codegen_info <- list(dpar_shapes = list(sigma = "vector"))
   code <- PDMPSamplersR:::make_subsampled_stan_functions(
     gaussian(), codegen_info
@@ -183,6 +191,8 @@ test_that("subsampled gaussian function includes vector sigma", {
 })
 
 test_that("subsampled negbinomial_log function includes scalar shape", {
+  skip_if_no_brms()
+
   codegen_info <- list(dpar_shapes = list(shape = "scalar"))
   code <- PDMPSamplersR:::make_subsampled_stan_functions(
     brms::negbinomial(), codegen_info
@@ -194,6 +204,8 @@ test_that("subsampled negbinomial_log function includes scalar shape", {
 })
 
 test_that("subsampled student function has correct call pattern", {
+  skip_if_no_brms()
+
   codegen_info <- list(dpar_shapes = list(sigma = "scalar", nu = "scalar"))
   code <- PDMPSamplersR:::make_subsampled_stan_functions(
     brms::student(), codegen_info
@@ -206,6 +218,8 @@ test_that("subsampled student function has correct call pattern", {
 })
 
 test_that("subsampled student function handles vector sigma", {
+  skip_if_no_brms()
+
   codegen_info <- list(dpar_shapes = list(sigma = "vector", nu = "scalar"))
   code <- PDMPSamplersR:::make_subsampled_stan_functions(
     brms::student(), codegen_info
@@ -215,6 +229,8 @@ test_that("subsampled student function handles vector sigma", {
 })
 
 test_that("subsampled gamma function has correct call pattern", {
+  skip_if_no_brms()
+
   codegen_info <- list(dpar_shapes = list(shape = "scalar"))
   code <- PDMPSamplersR:::make_subsampled_stan_functions(
     brms::brmsfamily("Gamma"), codegen_info
@@ -226,6 +242,8 @@ test_that("subsampled gamma function has correct call pattern", {
 })
 
 test_that("subsampled gamma function handles vector shape", {
+  skip_if_no_brms()
+
   codegen_info <- list(dpar_shapes = list(shape = "vector"))
   code <- PDMPSamplersR:::make_subsampled_stan_functions(
     brms::brmsfamily("Gamma"), codegen_info
@@ -235,6 +253,8 @@ test_that("subsampled gamma function handles vector shape", {
 })
 
 test_that("subsampled beta function has correct call pattern", {
+  skip_if_no_brms()
+
   codegen_info <- list(dpar_shapes = list(phi = "scalar"))
   code <- PDMPSamplersR:::make_subsampled_stan_functions(
     brms::brmsfamily("Beta"), codegen_info

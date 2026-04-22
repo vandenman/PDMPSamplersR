@@ -233,7 +233,9 @@ brm_pdmp <- function(
     brms_prior <- as.data.frame(brms::prior_summary(empty_fit), stringsAsFactors = FALSE)
     fe_names <- unique(brms_prior$coef[brms_prior$class == "b" & nzchar(brms_prior$coef)])
     supported_coef_names <- supported_b_coef_names(
-      fe_names = fe_names
+      fe_names = fe_names,
+      formula = formula,
+      data = data
     )
 
     data_for_names <- if (subsampled) data_full_file else data_file

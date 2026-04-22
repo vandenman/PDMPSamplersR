@@ -181,6 +181,58 @@ test_that("supported_b_coef_names supports metadata-only mode", {
   expect_equal(result, c("b.x1", "b.sx_1", "b.x1:x2"))
 })
 
+test_that("brm_pdmp sticky validation uses formula-aware support checks", {
+  testthat::skip_if_not_installed("brms")
+
+  df <- data.frame(
+    y = rnorm(8),
+    f = factor(rep(c("a", "b"), each = 4))
+  )
+  stan_file <- tempfile(fileext = ".stan")
+  on.exit(unlink(stan_file), add = TRUE)
+
+  testthat::local_mocked_bindings(
+    stancode = function(...) "parameters {} model {}",
+    standata = function(...) list(
+      Y = df$y,
+      X = matrix(1, nrow = nrow(df), ncol = 1)
+    ),
+    brm = function(..., empty = TRUE) structure(list(), class = "brmsfit"),
+    prior_summary = function(...) data.frame(
+      prior = "normal(0, 1)",
+      class = "b",
+      coef = "f_b",
+      stringsAsFactors = FALSE
+    ),
+    .package = "brms"
+  )
+  testthat::local_mocked_bindings(
+    check_for_julia_setup = function() NULL,
+    cached_stan_model = function(code) {
+      writeLines(code, stan_file)
+      stan_file
+    },
+    write_stan_json = function(data, file, always_decimal = FALSE) {
+      writeLines("{}", con = file)
+    },
+    .package = "PDMPSamplersR"
+  )
+  testthat::local_mocked_bindings(
+    julia_call = function(...) stop("SENTINEL_JULIA_CALL", call. = FALSE),
+    .package = "JuliaCall"
+  )
+
+  expect_error(
+    PDMPSamplersR::brm_pdmp(
+      y ~ f,
+      data = df,
+      sticky = TRUE,
+      model_prior = PDMPSamplersR::bernoulli(0.5)
+    ),
+    "numeric predictors only"
+  )
+})
+
 # ──────────────────────────────────────────────────────────────────────────────
 # stickable_coef_names
 # ──────────────────────────────────────────────────────────────────────────────

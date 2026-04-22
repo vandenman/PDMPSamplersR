@@ -39,6 +39,10 @@ brm_pdmp(
   use_fd_hvp = FALSE,
   post_warmup_simplify = FALSE,
   use_fd_hcv = FALSE,
+  sticky = FALSE,
+  can_stick = NULL,
+  model_prior = NULL,
+  kappa = NULL,
   stanvars = NULL,
   sample_prior = "no",
   save_model = NULL,
@@ -195,6 +199,30 @@ brm_pdmp(
   HCV correction (default: FALSE). Replaces the exact BridgeStan HVP at
   the anchor with a cheaper gradient-based FD approximation. Also
   disables HVP for grid thinning. Only used when \`use_hcv\` is TRUE.
+
+- sticky:
+
+  Logical; enable spike-and-slab variable selection for population-level
+  coefficients (default: FALSE). Requires \`model_prior\` to be set.
+
+- can_stick:
+
+  Optional logical vector indicating which non-intercept
+  population-level coefficients are candidates for selection. Length
+  must match the number of supported coefficients. If omitted, all
+  non-intercept population-level coefficients are candidates.
+
+- model_prior:
+
+  A \[bernoulli()\] or \[betabernoulli()\] object specifying the prior
+  on model space. Required when \`sticky = TRUE\`.
+
+- kappa:
+
+  Optional numeric vector of slab densities at zero for each stickable
+  coordinate (κ in the sticky PDMP literature). If omitted, derived
+  automatically from the brms prior specification (only \`normal(0, s)\`
+  and \`student_t(df, 0, s)\` are supported for automatic derivation).
 
 - stanvars:
 

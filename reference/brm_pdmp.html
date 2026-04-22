@@ -81,6 +81,10 @@ Returns a standard `brmsfit` object with all post-processing
 <span>  use_fd_hvp <span class="op">=</span> <span class="cn">FALSE</span>,</span>
 <span>  post_warmup_simplify <span class="op">=</span> <span class="cn">FALSE</span>,</span>
 <span>  use_fd_hcv <span class="op">=</span> <span class="cn">FALSE</span>,</span>
+<span>  sticky <span class="op">=</span> <span class="cn">FALSE</span>,</span>
+<span>  can_stick <span class="op">=</span> <span class="cn">NULL</span>,</span>
+<span>  model_prior <span class="op">=</span> <span class="cn">NULL</span>,</span>
+<span>  kappa <span class="op">=</span> <span class="cn">NULL</span>,</span>
 <span>  stanvars <span class="op">=</span> <span class="cn">NULL</span>,</span>
 <span>  sample_prior <span class="op">=</span> <span class="st">"no"</span>,</span>
 <span>  save_model <span class="op">=</span> <span class="cn">NULL</span>,</span>
@@ -241,6 +245,32 @@ HVP inside the HCV correction (default: FALSE). Replaces the exact
 BridgeStan HVP at the anchor with a cheaper gradient-based FD
 approximation. Also disables HVP for grid thinning. Only used when
 `use_hcv` is TRUE.</p></dd>
+
+
+<dt id="arg-sticky">sticky<a class="anchor" aria-label="anchor" href="#arg-sticky"></a></dt>
+<dd><p>Logical; enable spike-and-slab variable selection for
+population-level coefficients (default: FALSE). Requires
+`model_prior` to be set.</p></dd>
+
+
+<dt id="arg-can-stick">can_stick<a class="anchor" aria-label="anchor" href="#arg-can-stick"></a></dt>
+<dd><p>Optional logical vector indicating which non-intercept
+population-level coefficients are candidates for selection. Length
+must match the number of supported coefficients. If omitted, all
+non-intercept population-level coefficients are candidates.</p></dd>
+
+
+<dt id="arg-model-prior">model_prior<a class="anchor" aria-label="anchor" href="#arg-model-prior"></a></dt>
+<dd><p>A [bernoulli()] or [betabernoulli()] object
+specifying the prior on model space. Required when `sticky = TRUE`.</p></dd>
+
+
+<dt id="arg-kappa">kappa<a class="anchor" aria-label="anchor" href="#arg-kappa"></a></dt>
+<dd><p>Optional numeric vector of slab densities at zero for each
+stickable coordinate (κ in the sticky PDMP literature). If omitted,
+derived automatically from the brms prior specification (only
+`normal(0, s)` and `student_t(df, 0, s)` are supported for automatic
+derivation).</p></dd>
 
 
 <dt id="arg-stanvars">stanvars<a class="anchor" aria-label="anchor" href="#arg-stanvars"></a></dt>

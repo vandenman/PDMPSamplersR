@@ -93,6 +93,21 @@
   [`posterior_predict_subsampled_beta()`](https://vandenman.github.io/PDMPSamplersR/reference/posterior_predict_subsampled.md)
   : Posterior predictions for subsampled custom families
 
+## Variable selection
+
+- [`model_averaged_mean()`](https://vandenman.github.io/PDMPSamplersR/reference/model_averaged_mean.md)
+  : Model-averaged posterior means for stickable coefficients
+- [`inclusion_prob()`](https://vandenman.github.io/PDMPSamplersR/reference/inclusion_prob.md)
+  : Coefficient-wise posterior inclusion probabilities
+- [`check_inclusion_stability()`](https://vandenman.github.io/PDMPSamplersR/reference/check_inclusion_stability.md)
+  : Per-chain stability check for inclusion probability estimates
+- [`inclusion_bf()`](https://vandenman.github.io/PDMPSamplersR/reference/inclusion_bf.md)
+  : Inclusion Bayes factors for stickable coefficients
+- [`plot_inclusion()`](https://vandenman.github.io/PDMPSamplersR/reference/plot_inclusion.md)
+  : Plot posterior inclusion probabilities
+- [`median_probability_model()`](https://vandenman.github.io/PDMPSamplersR/reference/median_probability_model.md)
+  : Median probability model
+
 ## Setup
 
 - [`pdmpsamplers_setup()`](https://vandenman.github.io/PDMPSamplersR/reference/pdmpsamplers_setup.md)

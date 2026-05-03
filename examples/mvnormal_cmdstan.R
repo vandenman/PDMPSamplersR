@@ -335,11 +335,11 @@ prior_odds <- prior_inclusion_prob / (1 - prior_inclusion_prob)
 posterior_odds <- posterior_inclusion_prob / (1 - posterior_inclusion_prob)
 bayes_factor_10 <- posterior_odds / prior_odds
 
-# TODO: close but not close enough!
+# Finite-time PDMP estimates only approximate the analytic Bayes factor here.
 c(
   pdmp_bf = bayes_factor_10,
   analytic_bf = BayesFactor::extractBF(analytic_results, onlybf = TRUE)
 )
 
-# TODO: should be automatic with bridgestan!
+# BridgeStan does not expose this comparison automatically in this example.
 # mean(exp(result_ttest$samples[, 3]))

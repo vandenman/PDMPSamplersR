@@ -179,34 +179,48 @@ function r_cdf(chains::PDMPChains, q::Float64, specs::AbstractVector; chain::Int
     cdf(chains.traces[chain], q, transforms; coordinate)
 end
 
+const StatsValue = Union{Vector{Float64}, Matrix{Float64}}
+
+function _ct_ess_matrix(chains::PDMPChains)
+    n_chains = length(chains.traces)
+    n_chains == 0 && return zeros(0, 0)
+
+    d = length(first(chains.traces[1]).position)
+    ct_ess = fill(NaN, n_chains, d)
+
+    for i in 1:n_chains
+        try
+            ct_ess[i, :] .= ess(chains; chain=i)
+        catch
+        end
+    end
+
+    return ct_ess
+end
+
 function extract_stats(chains::PDMPChains)
     all = chains.stats
-    # TODO: should just return entire ess if we compute it here anyway...
-    ct_ess_per_chain = try
-        [minimum(ess(chains; chain=i)) for i in 1:length(chains.traces)]
+    ct_ess = try
+        _ct_ess_matrix(chains)
     catch
-        Float64[]
+        zeros(0, 0)
     end
-    ct_ess_min = isempty(ct_ess_per_chain) ? NaN : sum(ct_ess_per_chain)
-    # TODO: just return a vector for each chain and have the R user decide what they want
-    # insteady of Any just return vector{Float64}?
-    return Dict{String, Any}(
-        "reflections_events"    => sum(s -> s.reflections_events, all),
-        "reflections_accepted"  => sum(s -> s.reflections_accepted, all),
-        "refreshment_events"    => sum(s -> s.refreshment_events, all),
-        "sticky_events"         => sum(s -> s.sticky_events, all),
-        "gradient_calls"        => sum(s -> s.∇f_calls, all),
-        "hessian_calls"         => sum(s -> s.∇²f_calls, all),
-        "elapsed_time"          => sum(s -> s.elapsed_time, all),
-        "grid_builds"           => sum(s -> s.grid_builds, all),
-        "grid_shrinks"          => sum(s -> s.grid_shrinks, all),
-        "grid_grows"            => sum(s -> s.grid_grows, all),
-        "grid_early_stops"      => sum(s -> s.grid_early_stops, all),
-        "grid_points_evaluated" => sum(s -> s.grid_points_evaluated, all),
-        "grid_points_skipped"   => sum(s -> s.grid_points_skipped, all),
-        "grid_N_current"        => sum(s -> s.grid_N_current, all),
-        "ct_ess_min"            => ct_ess_min,
-        "ct_ess_per_chain"      => ct_ess_per_chain,
+    return Dict{String, StatsValue}(
+        "reflections_events"    => Float64[s.reflections_events for s in all],
+        "reflections_accepted"  => Float64[s.reflections_accepted for s in all],
+        "refreshment_events"    => Float64[s.refreshment_events for s in all],
+        "sticky_events"         => Float64[s.sticky_events for s in all],
+        "gradient_calls"        => Float64[s.∇f_calls for s in all],
+        "hessian_calls"         => Float64[s.∇²f_calls for s in all],
+        "elapsed_time"          => [s.elapsed_time for s in all],
+        "grid_builds"           => Float64[s.grid_builds for s in all],
+        "grid_shrinks"          => Float64[s.grid_shrinks for s in all],
+        "grid_grows"            => Float64[s.grid_grows for s in all],
+        "grid_early_stops"      => Float64[s.grid_early_stops for s in all],
+        "grid_points_evaluated" => Float64[s.grid_points_evaluated for s in all],
+        "grid_points_skipped"   => Float64[s.grid_points_skipped for s in all],
+        "grid_N_current"        => Float64[s.grid_N_current for s in all],
+        "ct_ess"                => ct_ess,
     )
 end
 

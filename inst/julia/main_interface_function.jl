@@ -7,6 +7,10 @@ export r_discretize, r_mean, r_var, r_std, r_cov, r_cor, r_quantile, r_median, r
 export r_inclusion_probs, extract_stats
 export r_chain_times, r_chain_positions, r_chain_velocities, r_chain_is_boomerang, r_chain_is_mutable_boomerang, r_chain_mu
 export r_from_skeleton
+export r_chain_is_factorized
+export r_chain_sparse_initial_time, r_chain_sparse_initial_position, r_chain_sparse_initial_velocity
+export r_chain_sparse_event_indices, r_chain_sparse_event_times, r_chain_sparse_event_positions, r_chain_sparse_event_velocities
+export r_from_sparse_skeleton
 export r_pdmp_stan, r_pdmp_custom, r_pdmp_custom_subsampled
 export write_cmdstan_csv, r_constrain_and_write_csv
 export r_pdmp_brms_subsampled, r_pdmp_stan_for_brms
@@ -196,6 +200,66 @@ function _dense_compact(chains::PDMPChains, chain::Int)
     trace = chains.traces[chain]
     dense = trace isa PDMPTrace ? trace : PDMPTrace(trace)
     PDMPSamplers.compact(dense)
+end
+
+function r_chain_is_factorized(chains::PDMPChains; chain::Int)
+    chains.traces[chain] isa PDMPSamplers.FactorizedTrace
+end
+
+function r_chain_sparse_initial_time(chains::PDMPChains; chain::Int)
+    Float64(chains.traces[chain].initial_state.time)
+end
+
+function r_chain_sparse_initial_position(chains::PDMPChains; chain::Int)
+    Vector{Float64}(chains.traces[chain].initial_state.position)
+end
+
+function r_chain_sparse_initial_velocity(chains::PDMPChains; chain::Int)
+    Vector{Float64}(chains.traces[chain].initial_state.velocity)
+end
+
+function r_chain_sparse_event_indices(chains::PDMPChains; chain::Int)
+    Int32[e.index for e in chains.traces[chain].events]
+end
+
+function r_chain_sparse_event_times(chains::PDMPChains; chain::Int)
+    Float64[e.time for e in chains.traces[chain].events]
+end
+
+function r_chain_sparse_event_positions(chains::PDMPChains; chain::Int)
+    Float64[e.position for e in chains.traces[chain].events]
+end
+
+function r_chain_sparse_event_velocities(chains::PDMPChains; chain::Int)
+    Float64[e.velocity for e in chains.traces[chain].events]
+end
+
+function r_from_sparse_skeleton(
+        initial_times_list::AbstractVector, initial_positions_list::AbstractVector,
+        initial_velocities_list::AbstractVector, event_indices_list::AbstractVector,
+        event_times_list::AbstractVector, event_positions_list::AbstractVector,
+        event_velocities_list::AbstractVector, is_boomerang_list::AbstractVector,
+        mu_list::AbstractVector)
+    n = length(initial_times_list)
+    traces = PDMPSamplers.FactorizedTrace[]
+    for i in 1:n
+        initial_time     = Float64(initial_times_list[i])
+        initial_position = Vector{Float64}(initial_positions_list[i])
+        initial_velocity = Vector{Float64}(initial_velocities_list[i])
+        d = length(initial_position)
+        is_boom = Bool(is_boomerang_list[i])
+        mu = Vector{Float64}(mu_list[i])
+        flow = is_boom ? Boomerang(I(d), mu) : ZigZag(I(d), zeros(d))
+        initial_state = PDMPEvent(initial_time, initial_position, initial_velocity)
+        events = PDMPSamplers.FactorizedEvent.(
+            Int.(event_indices_list[i]),
+            Float64.(event_times_list[i]),
+            Float64.(event_positions_list[i]),
+            Float64.(event_velocities_list[i]),
+        )
+        push!(traces, PDMPSamplers.FactorizedTrace(events, flow, initial_state))
+    end
+    PDMPChains(traces, PDMPSamplers.StatisticCounter[])
 end
 
 function r_chain_times(chains::PDMPChains; chain::Int)

@@ -10,14 +10,28 @@
         "i" = "Call {.fn materialize} before {.fn saveRDS} to enable reload.")
     )
   check_for_julia_setup()
-  JuliaCall::julia_call("r_from_skeleton",
-    lapply(x$skeleton, `[[`, "times"),
-    lapply(x$skeleton, `[[`, "positions"),
-    lapply(x$skeleton, `[[`, "velocities"),
-    lapply(x$skeleton, `[[`, "is_boomerang"),
-    lapply(x$skeleton, `[[`, "mu"),
-    lapply(x$skeleton, `[[`, "is_mutable")
-  )
+  if (isTRUE(x$skeleton[[1L]]$sparse)) {
+    JuliaCall::julia_call("r_from_sparse_skeleton",
+      lapply(x$skeleton, `[[`, "initial_time"),
+      lapply(x$skeleton, `[[`, "initial_position"),
+      lapply(x$skeleton, `[[`, "initial_velocity"),
+      lapply(x$skeleton, `[[`, "event_indices"),
+      lapply(x$skeleton, `[[`, "event_times"),
+      lapply(x$skeleton, `[[`, "event_positions"),
+      lapply(x$skeleton, `[[`, "event_velocities"),
+      lapply(x$skeleton, `[[`, "is_boomerang"),
+      lapply(x$skeleton, `[[`, "mu")
+    )
+  } else {
+    JuliaCall::julia_call("r_from_skeleton",
+      lapply(x$skeleton, `[[`, "times"),
+      lapply(x$skeleton, `[[`, "positions"),
+      lapply(x$skeleton, `[[`, "velocities"),
+      lapply(x$skeleton, `[[`, "is_boomerang"),
+      lapply(x$skeleton, `[[`, "mu"),
+      lapply(x$skeleton, `[[`, "is_mutable")
+    )
+  }
 }
 
 .check_pdmp <- function(x) {

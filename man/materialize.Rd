@@ -2,12 +2,9 @@
 % Please edit documentation in R/pdmp_result.R
 \name{materialize}
 \alias{materialize}
-\alias{materialize.pdmp_result}
 \title{Materialise a PDMP result for serialisation}
 \usage{
 materialize(x, ...)
-
-\method{materialize}{pdmp_result}(x, ...)
 }
 \arguments{
 \item{x}{A \code{pdmp_result}.}

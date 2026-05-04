@@ -5,6 +5,8 @@ using PDMPSamplers, LinearAlgebra, BridgeStan, Random, Statistics
 export build_flow, build_algorithm, wrap_sticky
 export r_discretize, r_mean, r_var, r_std, r_cov, r_cor, r_quantile, r_median, r_cdf, r_ess, r_summary_all
 export r_inclusion_probs, extract_stats
+export r_chain_times, r_chain_positions, r_chain_velocities, r_chain_is_boomerang, r_chain_is_mutable_boomerang, r_chain_mu
+export r_from_skeleton
 export r_pdmp_stan, r_pdmp_custom, r_pdmp_custom_subsampled
 export write_cmdstan_csv, r_constrain_and_write_csv
 export r_pdmp_brms_subsampled, r_pdmp_stan_for_brms
@@ -177,6 +179,76 @@ end
 function r_cdf(chains::PDMPChains, q::Float64, specs::AbstractVector; chain::Int = 1, coordinate::Int)
     transforms = _build_transforms(specs)
     cdf(chains.traces[chain], q, transforms; coordinate)
+end
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Skeleton extraction and reconstruction for saveRDS support
+# ──────────────────────────────────────────────────────────────────────────────
+#
+# JuliaCall only auto-converts simple Julia types to native R (scalars, plain
+# Vector{Float64}, Matrix{Float64}). Complex types (Dict, Vector{Dict}) are
+# returned as JuliaObject external pointers, which are invalidated by
+# saveRDS/readRDS. To keep the skeleton as native R data, extraction is done
+# field-by-field (one julia_call per field per chain), and reconstruction
+# accepts 5 parallel flat lists — one per field.
+
+function _dense_compact(chains::PDMPChains, chain::Int)
+    trace = chains.traces[chain]
+    dense = trace isa PDMPTrace ? trace : PDMPTrace(trace)
+    PDMPSamplers.compact(dense)
+end
+
+function r_chain_times(chains::PDMPChains; chain::Int)
+    Vector{Float64}(_dense_compact(chains, chain).times)
+end
+
+function r_chain_positions(chains::PDMPChains; chain::Int)
+    Matrix{Float64}(_dense_compact(chains, chain).positions)
+end
+
+function r_chain_velocities(chains::PDMPChains; chain::Int)
+    Matrix{Float64}(_dense_compact(chains, chain).velocities)
+end
+
+function r_chain_is_boomerang(chains::PDMPChains; chain::Int)
+    ct = _dense_compact(chains, chain)
+    PDMPSamplers._underlying_flow(ct.flow) isa AnyBoomerang
+end
+
+function r_chain_is_mutable_boomerang(chains::PDMPChains; chain::Int)
+    ct = _dense_compact(chains, chain)
+    PDMPSamplers._underlying_flow(ct.flow) isa MutableBoomerang
+end
+
+function r_chain_mu(chains::PDMPChains; chain::Int)
+    ct = _dense_compact(chains, chain)
+    base = PDMPSamplers._underlying_flow(ct.flow)
+    base isa AnyBoomerang ? Vector{Float64}(base.μ) : Float64[]
+end
+
+function r_from_skeleton(times_list::AbstractVector, positions_list::AbstractVector,
+                          velocities_list::AbstractVector, is_boomerang_list::AbstractVector,
+                          mu_list::AbstractVector, is_mutable_boomerang_list::AbstractVector)
+    n = length(times_list)
+    traces = PDMPTrace[]
+    for i in 1:n
+        times      = Vector{Float64}(times_list[i])
+        positions  = Matrix{Float64}(positions_list[i])
+        velocities = Matrix{Float64}(velocities_list[i])
+        d = size(positions, 1)
+        is_boom    = Bool(is_boomerang_list[i])
+        is_mutable = Bool(is_mutable_boomerang_list[i])
+        mu         = Vector{Float64}(mu_list[i])
+        flow = if is_mutable
+            MutableBoomerang(I(d), mu)
+        elseif is_boom
+            Boomerang(I(d), mu)
+        else
+            ZigZag(I(d), zeros(d))
+        end
+        push!(traces, PDMPTrace(times, positions, velocities, flow))
+    end
+    PDMPChains(traces, PDMPSamplers.StatisticCounter[])
 end
 
 const StatsValue = Union{Vector{Float64}, Matrix{Float64}}

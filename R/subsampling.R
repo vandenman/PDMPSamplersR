@@ -11,21 +11,7 @@
 #'   vector `indices` (1-based observation indices), and return a numeric vector
 #'   of length `d`.
 #' @param n_obs Integer, total number of observations in the dataset.
-#' @param d Integer, dimension of the parameter space.
 #' @param subsample_size Integer, number of observations per subsample.
-#' @param flow Character string specifying the flow type. One of `"ZigZag"`,
-#'   `"BouncyParticle"`, `"Boomerang"`, `"AdaptiveBoomerang"`,
-#'   `"PreconditionedZigZag"`, or `"PreconditionedBPS"`.
-#' @param algorithm Character string specifying the algorithm. One of
-#'   `"ThinningStrategy"`, `"GridThinningStrategy"`, or
-#'   `"RootsPoissonStrategy"`.
-#' @param T Numeric, total sampling time (default: 50000).
-#' @param t0 Numeric, initial time (default: 0.0).
-#' @param t_warmup Numeric, warmup time (default: 0.0).
-#' @param flow_mean Numeric vector of length d, mean for the flow (default: zero vector).
-#' @param flow_cov Numeric matrix of size d x d, covariance for the flow (default: identity).
-#' @param c0 Numeric, bound parameter (default: 1e-2).
-#' @param x0 Numeric vector of length d, initial position (default: random normal).
 #' @param hvp_sub Function for the subsampled Hessian-vector product (optional).
 #'   Takes `(x, v, indices)` and returns a numeric vector of length `d`.
 #'   If `NULL`, a finite-difference approximation is used.
@@ -34,13 +20,7 @@
 #'   Required when `use_full_gradient_for_reflections = TRUE`.
 #' @param use_full_gradient_for_reflections Logical, whether to use the full gradient
 #'   for reflection events (default: `FALSE`).
-#' @param grid_n Integer, number of grid points for GridThinningStrategy (default: 30).
-#' @param grid_t_max Numeric, maximum time for grid (default: 2.0).
-#' @param show_progress Logical, whether to show progress bar (default: `TRUE`).
-#' @param n_chains Integer, number of chains to run (default: 1).
-#' @param threaded Logical, whether to run chains in parallel (default: `FALSE`).
-#' @param adaptive_scheme Character string, adaptation scheme for AdaptiveBoomerang
-#'   (default: `"diagonal"`).
+#' @inheritParams pdmp_sample
 #'
 #' @return A \code{pdmp_result} object.
 #'
@@ -60,7 +40,8 @@ pdmp_sample_subsampled <- function(
     grid_n = 30, grid_t_max = 2.0,
     show_progress = TRUE,
     n_chains = 1L, threaded = FALSE,
-    adaptive_scheme = c("diagonal", "fullrank")) {
+    adaptive_scheme = c("diagonal", "fullrank"),
+    materialize = TRUE) {
 
   if (!rlang::is_function(grad_sub))
     cli::cli_abort("{.arg grad_sub} must be a function, not {.cls {class(grad_sub)}}.")
@@ -152,10 +133,12 @@ pdmp_sample_subsampled <- function(
     adaptive_scheme = adaptive_scheme
   );")
   if (is.environment(result)) result <- as.list(result)
-  new_pdmp_result(
+  result <- new_pdmp_result(
     chains   = result$chains,
     stats    = result$stats,
     d        = result$d,
     n_chains = result$n_chains
   )
+  if (materialize) result <- .materialize(result)
+  result
 }

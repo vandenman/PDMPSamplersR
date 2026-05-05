@@ -9,6 +9,16 @@ julia_project_exists <- function() {
   return(fs::dir_exists(project_dir) && fs::file_exists(fs::path(project_dir, "Project.toml")))
 }
 
+ensure_julia_runtime <- function(verbose = FALSE) {
+  if (verbose) {
+    JuliaCall::julia_setup(verbose = TRUE)
+  } else {
+    suppressMessages(JuliaCall::julia_setup(verbose = FALSE))
+  }
+
+  invisible(TRUE)
+}
+
 setup_julia_project <- function() {
   project_dir <- get_julia_project_dir()
   if (!fs::dir_exists(project_dir)) fs::dir_create(project_dir, recurse = TRUE)
@@ -226,8 +236,8 @@ load_interface_function <- function() {
 #' @details This function checks for the existence of the Julia project for PDMPSamplers.jl, and if it exists, loads it and the required packages. If it does not exist, it can either throw an error or attempt to set up the project, depending on the parameters. It is mostly useful for internal use to ensure the Julia environment is ready before calling any functions that depend on it, but can also be called directly by users if they want to check or set up the Julia project.
 #' @export
 check_for_julia_setup <- function(error_if_not_exists = FALSE, setup_if_not_exists = TRUE) {
+  ensure_julia_runtime()
 
-  # TODO: some check on Julia installation?
   if (julia_project_exists()) {
     load_julia_project()
     load_required_julia_packages()
@@ -271,7 +281,7 @@ load_required_julia_packages <- function() {
 #' @export
 pdmpsamplers_setup <- function(verbose = TRUE) {
   if (verbose) cli::cli_inform("Setting up Julia")
-  JuliaCall::julia_setup(verbose = verbose)#, install=FALSE, useRCall=FALSE)
+  ensure_julia_runtime(verbose = verbose)
   if (verbose) cli::cli_inform("Setting up Julia project for PDMPSamplers.jl")
   check_for_julia_setup()
 }

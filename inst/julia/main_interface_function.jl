@@ -5,6 +5,12 @@ using PDMPSamplers, LinearAlgebra, BridgeStan, Random, Statistics
 export build_flow, build_algorithm, wrap_sticky
 export r_discretize, r_mean, r_var, r_std, r_cov, r_cor, r_quantile, r_median, r_cdf, r_ess, r_summary_all
 export r_inclusion_probs, extract_stats
+export r_chain_times, r_chain_positions, r_chain_velocities, r_chain_is_boomerang, r_chain_is_mutable_boomerang, r_chain_mu
+export r_from_skeleton
+export r_chain_is_factorized
+export r_chain_sparse_initial_time, r_chain_sparse_initial_position, r_chain_sparse_initial_velocity
+export r_chain_sparse_event_indices, r_chain_sparse_event_times, r_chain_sparse_event_positions, r_chain_sparse_event_velocities
+export r_from_sparse_skeleton
 export r_pdmp_stan, r_pdmp_custom, r_pdmp_custom_subsampled
 export write_cmdstan_csv, r_constrain_and_write_csv
 export r_pdmp_brms_subsampled, r_pdmp_stan_for_brms
@@ -179,34 +185,177 @@ function r_cdf(chains::PDMPChains, q::Float64, specs::AbstractVector; chain::Int
     cdf(chains.traces[chain], q, transforms; coordinate)
 end
 
+# ──────────────────────────────────────────────────────────────────────────────
+# Skeleton extraction and reconstruction for saveRDS support
+# ──────────────────────────────────────────────────────────────────────────────
+#
+# JuliaCall only auto-converts simple Julia types to native R (scalars, plain
+# Vector{Float64}, Matrix{Float64}). Complex types (Dict, Vector{Dict}) are
+# returned as JuliaObject external pointers, which are invalidated by
+# saveRDS/readRDS. To keep the skeleton as native R data, extraction is done
+# field-by-field (one julia_call per field per chain), and reconstruction
+# accepts 5 parallel flat lists — one per field.
+
+function _dense_compact(chains::PDMPChains, chain::Int)
+    trace = chains.traces[chain]
+    dense = trace isa PDMPTrace ? trace : PDMPTrace(trace)
+    PDMPSamplers.compact(dense)
+end
+
+function r_chain_is_factorized(chains::PDMPChains; chain::Int)
+    chains.traces[chain] isa PDMPSamplers.FactorizedTrace
+end
+
+function r_chain_sparse_initial_time(chains::PDMPChains; chain::Int)
+    Float64(chains.traces[chain].initial_state.time)
+end
+
+function r_chain_sparse_initial_position(chains::PDMPChains; chain::Int)
+    Vector{Float64}(chains.traces[chain].initial_state.position)
+end
+
+function r_chain_sparse_initial_velocity(chains::PDMPChains; chain::Int)
+    Vector{Float64}(chains.traces[chain].initial_state.velocity)
+end
+
+function r_chain_sparse_event_indices(chains::PDMPChains; chain::Int)
+    Int32[e.index for e in chains.traces[chain].events]
+end
+
+function r_chain_sparse_event_times(chains::PDMPChains; chain::Int)
+    Float64[e.time for e in chains.traces[chain].events]
+end
+
+function r_chain_sparse_event_positions(chains::PDMPChains; chain::Int)
+    Float64[e.position for e in chains.traces[chain].events]
+end
+
+function r_chain_sparse_event_velocities(chains::PDMPChains; chain::Int)
+    Float64[e.velocity for e in chains.traces[chain].events]
+end
+
+function r_from_sparse_skeleton(
+        initial_times_list::AbstractVector, initial_positions_list::AbstractVector,
+        initial_velocities_list::AbstractVector, event_indices_list::AbstractVector,
+        event_times_list::AbstractVector, event_positions_list::AbstractVector,
+        event_velocities_list::AbstractVector, is_boomerang_list::AbstractVector,
+        mu_list::AbstractVector)
+    n = length(initial_times_list)
+    traces = PDMPSamplers.FactorizedTrace[]
+    sizehint!(traces, n)
+    for i in 1:n
+        initial_time     = Float64(initial_times_list[i])
+        initial_position = Vector{Float64}(initial_positions_list[i])
+        initial_velocity = Vector{Float64}(initial_velocities_list[i])
+        d = length(initial_position)
+        is_boom = Bool(is_boomerang_list[i])
+        mu = Vector{Float64}(mu_list[i])
+        flow = is_boom ? Boomerang(I(d), mu) : ZigZag(I(d), zeros(d))
+        initial_state = PDMPEvent(initial_time, initial_position, initial_velocity)
+        events = PDMPSamplers.FactorizedEvent.(
+            Int.(event_indices_list[i]),
+            Float64.(event_times_list[i]),
+            Float64.(event_positions_list[i]),
+            Float64.(event_velocities_list[i]),
+        )
+        push!(traces, PDMPSamplers.FactorizedTrace(events, flow, initial_state))
+    end
+    PDMPChains(traces, PDMPSamplers.StatisticCounter[])
+end
+
+function r_chain_times(chains::PDMPChains; chain::Int)
+    Vector{Float64}(_dense_compact(chains, chain).times)
+end
+
+function r_chain_positions(chains::PDMPChains; chain::Int)
+    Matrix{Float64}(_dense_compact(chains, chain).positions)
+end
+
+function r_chain_velocities(chains::PDMPChains; chain::Int)
+    Matrix{Float64}(_dense_compact(chains, chain).velocities)
+end
+
+function r_chain_is_boomerang(chains::PDMPChains; chain::Int)
+    PDMPSamplers._underlying_flow(chains.traces[chain].flow) isa AnyBoomerang
+end
+
+function r_chain_is_mutable_boomerang(chains::PDMPChains; chain::Int)
+    PDMPSamplers._underlying_flow(chains.traces[chain].flow) isa MutableBoomerang
+end
+
+function r_chain_mu(chains::PDMPChains; chain::Int)
+    base = PDMPSamplers._underlying_flow(chains.traces[chain].flow)
+    base isa AnyBoomerang ? Vector{Float64}(base.μ) : Float64[]
+end
+
+function r_from_skeleton(times_list::AbstractVector, positions_list::AbstractVector,
+                          velocities_list::AbstractVector, is_boomerang_list::AbstractVector,
+                          mu_list::AbstractVector, is_mutable_boomerang_list::AbstractVector)
+    n = length(times_list)
+    traces = PDMPTrace[]
+    sizehint!(traces, n)
+    for i in 1:n
+        times      = Vector{Float64}(times_list[i])
+        positions  = Matrix{Float64}(positions_list[i])
+        velocities = Matrix{Float64}(velocities_list[i])
+        d = size(positions, 1)
+        is_boom    = Bool(is_boomerang_list[i])
+        is_mutable = Bool(is_mutable_boomerang_list[i])
+        mu         = Vector{Float64}(mu_list[i])
+        flow = if is_mutable
+            MutableBoomerang(I(d), mu)
+        elseif is_boom
+            Boomerang(I(d), mu)
+        else
+            ZigZag(I(d), zeros(d))
+        end
+        push!(traces, PDMPTrace(times, positions, velocities, flow))
+    end
+    PDMPChains(traces, PDMPSamplers.StatisticCounter[])
+end
+
+const StatsValue = Union{Vector{Float64}, Matrix{Float64}}
+
+function _ct_ess_matrix(chains::PDMPChains)
+    n_chains = length(chains.traces)
+    n_chains == 0 && return zeros(0, 0)
+
+    d = length(first(chains.traces[1]).position)
+    ct_ess = fill(NaN, n_chains, d)
+
+    for i in 1:n_chains
+        try
+            ct_ess[i, :] .= ess(chains; chain=i)
+        catch
+        end
+    end
+
+    return ct_ess
+end
+
 function extract_stats(chains::PDMPChains)
     all = chains.stats
-    # TODO: should just return entire ess if we compute it here anyway...
-    ct_ess_per_chain = try
-        [minimum(ess(chains; chain=i)) for i in 1:length(chains.traces)]
+    ct_ess = try
+        _ct_ess_matrix(chains)
     catch
-        Float64[]
+        zeros(0, 0)
     end
-    ct_ess_min = isempty(ct_ess_per_chain) ? NaN : sum(ct_ess_per_chain)
-    # TODO: just return a vector for each chain and have the R user decide what they want
-    # insteady of Any just return vector{Float64}?
-    return Dict{String, Any}(
-        "reflections_events"    => sum(s -> s.reflections_events, all),
-        "reflections_accepted"  => sum(s -> s.reflections_accepted, all),
-        "refreshment_events"    => sum(s -> s.refreshment_events, all),
-        "sticky_events"         => sum(s -> s.sticky_events, all),
-        "gradient_calls"        => sum(s -> s.∇f_calls, all),
-        "hessian_calls"         => sum(s -> s.∇²f_calls, all),
-        "elapsed_time"          => sum(s -> s.elapsed_time, all),
-        "grid_builds"           => sum(s -> s.grid_builds, all),
-        "grid_shrinks"          => sum(s -> s.grid_shrinks, all),
-        "grid_grows"            => sum(s -> s.grid_grows, all),
-        "grid_early_stops"      => sum(s -> s.grid_early_stops, all),
-        "grid_points_evaluated" => sum(s -> s.grid_points_evaluated, all),
-        "grid_points_skipped"   => sum(s -> s.grid_points_skipped, all),
-        "grid_N_current"        => sum(s -> s.grid_N_current, all),
-        "ct_ess_min"            => ct_ess_min,
-        "ct_ess_per_chain"      => ct_ess_per_chain,
+    return Dict{String, StatsValue}(
+        "reflections_events"    => Float64[s.reflections_events for s in all],
+        "reflections_accepted"  => Float64[s.reflections_accepted for s in all],
+        "refreshment_events"    => Float64[s.refreshment_events for s in all],
+        "sticky_events"         => Float64[s.sticky_events for s in all],
+        "gradient_calls"        => Float64[s.∇f_calls for s in all],
+        "hessian_calls"         => Float64[s.∇²f_calls for s in all],
+        "elapsed_time"          => [s.elapsed_time for s in all],
+        "grid_builds"           => Float64[s.grid_builds for s in all],
+        "grid_shrinks"          => Float64[s.grid_shrinks for s in all],
+        "grid_grows"            => Float64[s.grid_grows for s in all],
+        "grid_early_stops"      => Float64[s.grid_early_stops for s in all],
+        "grid_points_evaluated" => Float64[s.grid_points_evaluated for s in all],
+        "grid_points_skipped"   => Float64[s.grid_points_skipped for s in all],
+        "grid_N_current"        => Float64[s.grid_N_current for s in all],
+        "ct_ess"                => ct_ess,
     )
 end
 

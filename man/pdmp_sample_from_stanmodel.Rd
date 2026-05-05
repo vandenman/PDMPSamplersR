@@ -27,7 +27,8 @@ pdmp_sample_from_stanmodel(
   show_progress = TRUE,
   n_chains = 1L,
   threaded = FALSE,
-  adaptive_scheme = c("diagonal", "fullrank")
+  adaptive_scheme = c("diagonal", "fullrank"),
+  materialize = TRUE
 )
 }
 \arguments{
@@ -89,6 +90,12 @@ diagonal preconditioner during warmup and also require
 \item{adaptive_scheme}{Character string, adaptation scheme for AdaptiveBoomerang.
 One of "diagonal" (default, O(d) per update) or "fullrank" (O(d^3) per update,
 better for correlated targets). Ignored for other flow types.}
+
+\item{materialize}{Logical. If \code{TRUE} (default), the chain skeleton is
+immediately extracted from Julia into R so that \code{saveRDS()} /
+\code{readRDS()} work without any extra steps. Set to \code{FALSE} to skip
+the extraction and keep only the live Julia reference.
+This can save time and memory if you don't need to save the result or if you plan to call \code{materialize()} manually later.}
 }
 \value{
 A \code{pdmp_result} object. Use \code{mean}, \code{var},

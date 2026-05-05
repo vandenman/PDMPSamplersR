@@ -27,7 +27,8 @@ pdmp_sample_subsampled(
   show_progress = TRUE,
   n_chains = 1L,
   threaded = FALSE,
-  adaptive_scheme = c("diagonal", "fullrank")
+  adaptive_scheme = c("diagonal", "fullrank"),
+  materialize = TRUE
 )
 }
 \arguments{
@@ -38,27 +39,31 @@ of length `d`.}
 
 \item{n_obs}{Integer, total number of observations in the dataset.}
 
-\item{d}{Integer, dimension of the parameter space.}
+\item{d}{Integer, dimension of the problem.}
 
 \item{subsample_size}{Integer, number of observations per subsample.}
 
-\item{flow}{Character string specifying the flow type. One of `"ZigZag"`,
-`"BouncyParticle"`, `"Boomerang"`, `"AdaptiveBoomerang"`,
-`"PreconditionedZigZag"`, or `"PreconditionedBPS"`.}
+\item{flow}{Character string specifying the flow type. One of "ZigZag",
+"BouncyParticle", "Boomerang", "AdaptiveBoomerang", "PreconditionedZigZag",
+or "PreconditionedBPS".
+The `"AdaptiveBoomerang"` flow learns its reference (mean and precision)
+during warmup and requires `"GridThinningStrategy"` as the algorithm.
+The `"PreconditionedZigZag"` and `"PreconditionedBPS"` flows learn a
+diagonal preconditioner during warmup and also require
+`"GridThinningStrategy"` as the algorithm.}
 
 \item{algorithm}{Character string specifying the algorithm. One of
-`"ThinningStrategy"`, `"GridThinningStrategy"`, or
-`"RootsPoissonStrategy"`.}
+"ThinningStrategy", "GridThinningStrategy", or "RootsPoissonStrategy".}
 
 \item{T}{Numeric, total sampling time (default: 50000).}
 
 \item{t0}{Numeric, initial time (default: 0.0).}
 
-\item{t_warmup}{Numeric, warmup time (default: 0.0).}
+\item{t_warmup}{Numeric, warmup time (default: 0.0). Events during warmup are discarded.}
 
-\item{flow_mean}{Numeric vector of length d, mean for the flow (default: zero vector).}
+\item{flow_mean}{Numeric vector of length d, mean vector for the flow (default: zero vector).}
 
-\item{flow_cov}{Numeric matrix of size d x d, covariance for the flow (default: identity).}
+\item{flow_cov}{Numeric matrix of size d x d, covariance matrix for the flow (default: identity matrix).}
 
 \item{c0}{Numeric, bound parameter (default: 1e-2).}
 
@@ -77,16 +82,23 @@ for reflection events (default: `FALSE`).}
 
 \item{grid_n}{Integer, number of grid points for GridThinningStrategy (default: 30).}
 
-\item{grid_t_max}{Numeric, maximum time for grid (default: 2.0).}
+\item{grid_t_max}{Numeric, maximum time for grid in GridThinningStrategy (default: 2.0).}
 
-\item{show_progress}{Logical, whether to show progress bar (default: `TRUE`).}
+\item{show_progress}{Logical, whether to show progress bar (default: TRUE).}
 
 \item{n_chains}{Integer, number of chains to run (default: 1).}
 
-\item{threaded}{Logical, whether to run chains in parallel (default: `FALSE`).}
+\item{threaded}{Logical, whether to run chains in parallel (default: FALSE).}
 
-\item{adaptive_scheme}{Character string, adaptation scheme for AdaptiveBoomerang
-(default: `"diagonal"`).}
+\item{adaptive_scheme}{Character string, adaptation scheme for AdaptiveBoomerang.
+One of "diagonal" (default, O(d) per update) or "fullrank" (O(d^3) per update,
+better for correlated targets). Ignored for other flow types.}
+
+\item{materialize}{Logical. If \code{TRUE} (default), the chain skeleton is
+immediately extracted from Julia into R so that \code{saveRDS()} /
+\code{readRDS()} work without any extra steps. Set to \code{FALSE} to skip
+the extraction and keep only the live Julia reference.
+This can save time and memory if you don't need to save the result or if you plan to call \code{materialize()} manually later.}
 }
 \value{
 A \code{pdmp_result} object.

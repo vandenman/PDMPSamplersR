@@ -164,6 +164,11 @@ validate_pdmp_params <- function(d, flow, algorithm, T, t0 = 0.0, t_warmup = 0.0
 #' @param adaptive_scheme Character string, adaptation scheme for AdaptiveBoomerang.
 #'   One of "diagonal" (default, O(d) per update) or "fullrank" (O(d^3) per update,
 #'   better for correlated targets). Ignored for other flow types.
+#' @param materialize Logical. If \code{TRUE} (default), the chain skeleton is
+#'   immediately extracted from Julia into R so that \code{saveRDS()} /
+#'   \code{readRDS()} work without any extra steps. Set to \code{FALSE} to skip
+#'   the extraction and keep only the live Julia reference.
+#'   This can save time and memory if you don't need to save the result or if you plan to call \code{materialize()} manually later.
 #'
 #' @return A \code{pdmp_result} object. Use \code{mean}, \code{var},
 #'   \code{quantile}, etc. for continuous-time estimators, or
@@ -181,7 +186,8 @@ pdmp_sample <- function(f, d,
                         grid_n = 30, grid_t_max = 2.0,
                         show_progress = TRUE,
                         n_chains = 1L, threaded = FALSE,
-                        adaptive_scheme = c("diagonal", "fullrank")) {
+                        adaptive_scheme = c("diagonal", "fullrank"),
+                        materialize = TRUE) {
 
   # Validate function argument (fail fast before Julia setup)
   if (!rlang::is_function(f)) {
@@ -253,12 +259,14 @@ pdmp_sample <- function(f, d,
     adaptive_scheme = adaptive_scheme
   );")
   if (is.environment(result)) result <- as.list(result)
-  new_pdmp_result(
+  result <- new_pdmp_result(
     chains   = result$chains,
     stats    = result$stats,
     d        = result$d,
     n_chains = result$n_chains
   )
+  if (materialize) result <- .materialize(result)
+  result
 
 }
 
@@ -277,37 +285,7 @@ pdmp_sample <- function(f, d,
 #' @param standata Either a character path to the Stan data file (JSON format),
 #'   or a named list that will be written to a temporary JSON file via
 #'   [write_stan_json()].
-#' @param flow Character string specifying the flow type. One of "ZigZag",
-#'   "BouncyParticle", "Boomerang", "AdaptiveBoomerang", "PreconditionedZigZag",
-#'   or "PreconditionedBPS".
-#'   The `"AdaptiveBoomerang"` flow learns its reference (mean and precision)
-#'   during warmup and requires `"GridThinningStrategy"` as the algorithm.
-#'   The `"PreconditionedZigZag"` and `"PreconditionedBPS"` flows learn a
-#'   diagonal preconditioner during warmup and also require
-#'   `"GridThinningStrategy"` as the algorithm.
-#' @param algorithm Character string specifying the algorithm. One of
-#'   "ThinningStrategy", "GridThinningStrategy", or "RootsPoissonStrategy".
-#' @param T Numeric, total sampling time (default: 50000).
-#' @param t0 Numeric, initial time (default: 0.0).
-#' @param t_warmup Numeric, warmup time (default: 0.0). Events during warmup are discarded.
-#' @param flow_mean Numeric vector of length d, mean vector for the flow (default: zero vector).
-#' @param flow_cov Numeric matrix of size d x d, covariance matrix for the flow (default: identity matrix).
-#' @param c0 Numeric, bound parameter (default: 1e-2).
-#' @param x0 Numeric vector of length d, initial position (default: random normal).
-#' @param theta0 Numeric vector of length d, initial velocity (default: random based on the flow).
-#' @param sticky Logical, whether to use sticky sampling (default: FALSE).
-#' @param can_stick Logical vector of length d, which coordinates can stick (default: all FALSE).
-#' @param model_prior Prior distribution object for model selection. Should be of class
-#'   'bernoulli' or 'beta-bernoulli' (default: NULL).
-#' @param parameter_prior Numeric vector of length d, prior parameters for sticky sampling (default: NULL).
-#' @param grid_n Integer, number of grid points for GridThinningStrategy (default: 30).
-#' @param grid_t_max Numeric, maximum time for grid in GridThinningStrategy (default: 2.0).
-#' @param show_progress Logical, whether to show progress bar (default: TRUE).
-#' @param n_chains Integer, number of chains to run (default: 1).
-#' @param threaded Logical, whether to run chains in parallel (default: FALSE).
-#' @param adaptive_scheme Character string, adaptation scheme for AdaptiveBoomerang.
-#'   One of "diagonal" (default, O(d) per update) or "fullrank" (O(d^3) per update,
-#'   better for correlated targets). Ignored for other flow types.
+#' @inheritParams pdmp_sample
 #'
 #' @return A \code{pdmp_result} object. Use \code{mean}, \code{var},
 #'   \code{quantile}, etc. for continuous-time estimators, or
@@ -324,7 +302,8 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
                         grid_n = 30, grid_t_max = 2.0,
                         show_progress = TRUE,
                         n_chains = 1L, threaded = FALSE,
-                        adaptive_scheme = c("diagonal", "fullrank")) {
+                        adaptive_scheme = c("diagonal", "fullrank"),
+                        materialize = TRUE) {
 
   # Validate file paths on R side before setting up Julia
   validate_type(path_to_stanmodel, type = "character", n = 1)
@@ -387,10 +366,12 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
     adaptive_scheme = adaptive_scheme
   );")
   if (is.environment(result)) result <- as.list(result)
-  new_pdmp_result(
+  result <- new_pdmp_result(
     chains   = result$chains,
     stats    = result$stats,
     d        = result$d,
     n_chains = result$n_chains
   )
+  if (materialize) result <- .materialize(result)
+  result
 }

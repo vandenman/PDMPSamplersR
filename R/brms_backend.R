@@ -1,3 +1,57 @@
+random_effect_subsampling_diagnostics <- function(sdata, subsample_size) {
+  N <- sdata$N %||% 0L
+  if (!is.numeric(subsample_size) || length(subsample_size) != 1L ||
+      !is.numeric(N) || length(N) != 1L || subsample_size <= 0L || subsample_size >= N) {
+    return(data.frame())
+  }
+
+  z_names <- grep("^Z_[0-9]+_[0-9]+$", names(sdata), value = TRUE)
+  if (length(z_names) == 0L) return(data.frame())
+
+  out <- lapply(z_names, function(name) {
+    Z <- sdata[[name]]
+    if (!is.matrix(Z) || nrow(Z) != N || ncol(Z) == 0L) return(NULL)
+
+    support <- colSums(abs(Z) > 0)
+    support <- support[is.finite(support) & support > 0]
+    if (length(support) == 0L) return(NULL)
+
+    min_support <- min(support)
+    data.frame(
+      block = name,
+      n_columns = ncol(Z),
+      min_support = min_support,
+      expected_support = subsample_size * min_support / N,
+      p_zero = stats::dhyper(0L, min_support, N - min_support, subsample_size)
+    )
+  })
+
+  out <- Filter(Negate(is.null), out)
+  if (length(out) == 0L) return(data.frame())
+  do.call(rbind, out)
+}
+
+warn_if_low_random_effect_subsampling_support <- function(sdata, subsample_size) {
+  diag <- random_effect_subsampling_diagnostics(sdata, subsample_size)
+  if (!nrow(diag)) return(invisible(NULL))
+
+  worst_idx <- which.min(diag$expected_support)
+  worst <- diag[worst_idx, , drop = FALSE]
+  if (worst$expected_support[[1]] >= 5 && worst$p_zero[[1]] <= 0.01) {
+    return(invisible(NULL))
+  }
+
+  cli::cli_warn(c(
+    "Subsampled random-effects gradients may be unstable for this model.",
+    "x" = "The sparsest random-effects design block {.code {worst$block[[1]]}} has minimum support {worst$min_support[[1]]} observations per coefficient in the full data, but only an expected {formatC(worst$expected_support[[1]], digits = 2, format = 'f')} observations per minibatch at {.arg subsample_size} = {subsample_size}.",
+    "i" = "A coefficient in that block is absent from a minibatch with probability about {formatC(worst$p_zero[[1]], digits = 3, format = 'f')}.",
+    "i" = "This mainly affects group-level parameters: fixed effects can look stable while random effects still drift.",
+    "i" = "Consider increasing {.arg subsample_size} or using full-data gradients for hierarchical models."
+  ))
+
+  invisible(NULL)
+}
+
 #' Fit a brms model using PDMP samplers
 #'
 #' Uses PDMPSamplers.jl as a sampling backend for brms models.
@@ -194,6 +248,10 @@ brm_pdmp <- function(
                           sample_prior = sample_prior, ...)
 
   if (subsampled) {
+    warn_if_low_random_effect_subsampling_support(sdata, subsample_size)
+  }
+
+  if (subsampled) {
     scode_ext <- make_ext_cpp_stancode(scode, formula, data, family,
                                        prior, stanvars, sample_prior, ...)
     Y_full <- as.numeric(sdata$Y)
@@ -328,6 +386,7 @@ brm_pdmp <- function(
   empty_fit <- brms::rename_pars(empty_fit)
   attr(empty_fit, "sampling_time") <- sampling_time
   attr(empty_fit, "pdmp_stats") <- pdmp_stats
+  class(empty_fit) <- unique(c("pdmp_brmsfit", class(empty_fit)))
 
   if (isTRUE(sticky_args$sticky) && !is.null(jl_result$inclusion_probs)) {
     incl_list <- build_sticky_inclusion_probs(
@@ -344,9 +403,7 @@ brm_pdmp <- function(
       unc_names = unc_names,
       model_prior = sticky_args$model_prior
     )
-    # TODO: perhaps we should use a custom class for pdmps in general
-    # so that we can use continuous time estimators whenever available.
-    class(empty_fit) <- c("sticky_brmsfit", class(empty_fit))
+    class(empty_fit) <- unique(c("sticky_brmsfit", class(empty_fit)))
   }
 
   empty_fit

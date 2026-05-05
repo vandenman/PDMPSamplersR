@@ -32,6 +32,7 @@ reference:
       - write_stan_json
   - title: Results
     contents:
+      - materialize
       - mean.pdmp_result
       - median.pdmp_result
       - var.pdmp_result

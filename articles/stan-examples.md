@@ -409,5 +409,35 @@ tibble(
     # A tibble: 2 × 2
       method   bayes_factor
       <chr>           <dbl>
-    1 PDMP             1.33
+    1 PDMP             1.36
     2 Analytic         1.34
+
+## Saving and loading results
+
+`pdmp_result` objects hold a pointer to the PDMP trace that lives in
+Julia. This pointer only remains valid as long as the Julia process
+lives, so naively calling
+[`saveRDS()`](https://rdrr.io/r/base/readRDS.html) on a bare result and
+later [`readRDS()`](https://rdrr.io/r/base/readRDS.html) leaves that
+pointer dangling and every subsequent estimator call fails.
+
+By default, all sampling functions (`pdmp_sample`,
+`pdmp_sample_from_stanmodel`, `pdmp_sample_subsampled`) immediately copy
+the chain skeleton, i.e., the event times, positions, and velocities,
+from Julia to R. This costs a little bit of extra time and memory but
+does mean that [`saveRDS()`](https://rdrr.io/r/base/readRDS.html) /
+[`readRDS()`](https://rdrr.io/r/base/readRDS.html) work out of the box
+
+If you want to skip the upfront copy, for example when running many
+short exploratory chains that you will never save, or when memory
+constrained in a large model, pass `materialize = FALSE`:
+
+``` r
+result <- pdmp_sample(neg_grad, d = d, materialize = FALSE)
+# result$chains is a live Julia reference; calling saveRDS on this will not work
+```
+
+You can still call
+[`materialize()`](https://vandenman.github.io/PDMPSamplersR/reference/materialize.md)
+manually at any later point to extract the skeleton and enable `saveRDS`
+and `readRDS` functionality.

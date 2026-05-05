@@ -13,6 +13,8 @@
 
 ## Results
 
+- [`materialize()`](https://vandenman.github.io/PDMPSamplersR/reference/materialize.md)
+  : Materialise a PDMP result for serialisation
 - [`mean(`*`<pdmp_result>`*`)`](https://vandenman.github.io/PDMPSamplersR/reference/mean.pdmp_result.md)
   : Continuous-time mean of PDMP trace
 - [`median(`*`<pdmp_result>`*`)`](https://vandenman.github.io/PDMPSamplersR/reference/median.pdmp_result.md)

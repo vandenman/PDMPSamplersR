@@ -69,7 +69,8 @@ using the PDMPSamplers.jl Julia package with BridgeStan integration.</p>
 <span>  show_progress <span class="op">=</span> <span class="cn">TRUE</span>,</span>
 <span>  n_chains <span class="op">=</span> <span class="fl">1L</span>,</span>
 <span>  threaded <span class="op">=</span> <span class="cn">FALSE</span>,</span>
-<span>  adaptive_scheme <span class="op">=</span> <span class="fu"><a href="https://rdrr.io/r/base/c.html" class="external-link">c</a></span><span class="op">(</span><span class="st">"diagonal"</span>, <span class="st">"fullrank"</span><span class="op">)</span></span>
+<span>  adaptive_scheme <span class="op">=</span> <span class="fu"><a href="https://rdrr.io/r/base/c.html" class="external-link">c</a></span><span class="op">(</span><span class="st">"diagonal"</span>, <span class="st">"fullrank"</span><span class="op">)</span>,</span>
+<span>  materialize <span class="op">=</span> <span class="cn">TRUE</span></span>
 <span><span class="op">)</span></span></code></pre></div>
     </div>
 
@@ -178,6 +179,14 @@ diagonal preconditioner during warmup and also require
 <dd><p>Character string, adaptation scheme for AdaptiveBoomerang.
 One of "diagonal" (default, O(d) per update) or "fullrank" (O(d^3) per update,
 better for correlated targets). Ignored for other flow types.</p></dd>
+
+
+<dt id="arg-materialize">materialize<a class="anchor" aria-label="anchor" href="#arg-materialize"></a></dt>
+<dd><p>Logical. If <code>TRUE</code> (default), the chain skeleton is
+immediately extracted from Julia into R so that <code><a href="https://rdrr.io/r/base/readRDS.html" class="external-link">saveRDS()</a></code> /
+<code><a href="https://rdrr.io/r/base/readRDS.html" class="external-link">readRDS()</a></code> work without any extra steps. Set to <code>FALSE</code> to skip
+the extraction and keep only the live Julia reference.
+This can save time and memory if you don't need to save the result or if you plan to call <code><a href="materialize.html">materialize()</a></code> manually later.</p></dd>
 
 </dl></div>
     <div class="section level2">

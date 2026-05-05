@@ -30,7 +30,8 @@ pdmp_sample_from_stanmodel(
   show_progress = TRUE,
   n_chains = 1L,
   threaded = FALSE,
-  adaptive_scheme = c("diagonal", "fullrank")
+  adaptive_scheme = c("diagonal", "fullrank"),
+  materialize = TRUE
 )
 ```
 
@@ -144,6 +145,18 @@ pdmp_sample_from_stanmodel(
   Character string, adaptation scheme for AdaptiveBoomerang. One of
   "diagonal" (default, O(d) per update) or "fullrank" (O(d^3) per
   update, better for correlated targets). Ignored for other flow types.
+
+- materialize:
+
+  Logical. If `TRUE` (default), the chain skeleton is immediately
+  extracted from Julia into R so that
+  [`saveRDS()`](https://rdrr.io/r/base/readRDS.html) /
+  [`readRDS()`](https://rdrr.io/r/base/readRDS.html) work without any
+  extra steps. Set to `FALSE` to skip the extraction and keep only the
+  live Julia reference. This can save time and memory if you don't need
+  to save the result or if you plan to call
+  [`materialize()`](https://vandenman.github.io/PDMPSamplersR/reference/materialize.md)
+  manually later.
 
 ## Value
 

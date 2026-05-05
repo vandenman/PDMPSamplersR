@@ -32,7 +32,8 @@ pdmp_sample_subsampled(
   show_progress = TRUE,
   n_chains = 1L,
   threaded = FALSE,
-  adaptive_scheme = c("diagonal", "fullrank")
+  adaptive_scheme = c("diagonal", "fullrank"),
+  materialize = TRUE
 )
 ```
 
@@ -51,7 +52,7 @@ pdmp_sample_subsampled(
 
 - d:
 
-  Integer, dimension of the parameter space.
+  Integer, dimension of the problem.
 
 - subsample_size:
 
@@ -59,15 +60,19 @@ pdmp_sample_subsampled(
 
 - flow:
 
-  Character string specifying the flow type. One of \`"ZigZag"\`,
-  \`"BouncyParticle"\`, \`"Boomerang"\`, \`"AdaptiveBoomerang"\`,
-  \`"PreconditionedZigZag"\`, or \`"PreconditionedBPS"\`.
+  Character string specifying the flow type. One of "ZigZag",
+  "BouncyParticle", "Boomerang", "AdaptiveBoomerang",
+  "PreconditionedZigZag", or "PreconditionedBPS". The
+  \`"AdaptiveBoomerang"\` flow learns its reference (mean and precision)
+  during warmup and requires \`"GridThinningStrategy"\` as the
+  algorithm. The \`"PreconditionedZigZag"\` and \`"PreconditionedBPS"\`
+  flows learn a diagonal preconditioner during warmup and also require
+  \`"GridThinningStrategy"\` as the algorithm.
 
 - algorithm:
 
-  Character string specifying the algorithm. One of
-  \`"ThinningStrategy"\`, \`"GridThinningStrategy"\`, or
-  \`"RootsPoissonStrategy"\`.
+  Character string specifying the algorithm. One of "ThinningStrategy",
+  "GridThinningStrategy", or "RootsPoissonStrategy".
 
 - T:
 
@@ -79,16 +84,18 @@ pdmp_sample_subsampled(
 
 - t_warmup:
 
-  Numeric, warmup time (default: 0.0).
+  Numeric, warmup time (default: 0.0). Events during warmup are
+  discarded.
 
 - flow_mean:
 
-  Numeric vector of length d, mean for the flow (default: zero vector).
+  Numeric vector of length d, mean vector for the flow (default: zero
+  vector).
 
 - flow_cov:
 
-  Numeric matrix of size d x d, covariance for the flow (default:
-  identity).
+  Numeric matrix of size d x d, covariance matrix for the flow (default:
+  identity matrix).
 
 - c0:
 
@@ -121,11 +128,11 @@ pdmp_sample_subsampled(
 
 - grid_t_max:
 
-  Numeric, maximum time for grid (default: 2.0).
+  Numeric, maximum time for grid in GridThinningStrategy (default: 2.0).
 
 - show_progress:
 
-  Logical, whether to show progress bar (default: \`TRUE\`).
+  Logical, whether to show progress bar (default: TRUE).
 
 - n_chains:
 
@@ -133,12 +140,25 @@ pdmp_sample_subsampled(
 
 - threaded:
 
-  Logical, whether to run chains in parallel (default: \`FALSE\`).
+  Logical, whether to run chains in parallel (default: FALSE).
 
 - adaptive_scheme:
 
-  Character string, adaptation scheme for AdaptiveBoomerang (default:
-  \`"diagonal"\`).
+  Character string, adaptation scheme for AdaptiveBoomerang. One of
+  "diagonal" (default, O(d) per update) or "fullrank" (O(d^3) per
+  update, better for correlated targets). Ignored for other flow types.
+
+- materialize:
+
+  Logical. If `TRUE` (default), the chain skeleton is immediately
+  extracted from Julia into R so that
+  [`saveRDS()`](https://rdrr.io/r/base/readRDS.html) /
+  [`readRDS()`](https://rdrr.io/r/base/readRDS.html) work without any
+  extra steps. Set to `FALSE` to skip the extraction and keep only the
+  live Julia reference. This can save time and memory if you don't need
+  to save the result or if you plan to call
+  [`materialize()`](https://vandenman.github.io/PDMPSamplersR/reference/materialize.md)
+  manually later.
 
 ## Value
 

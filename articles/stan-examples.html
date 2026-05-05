@@ -479,10 +479,21 @@
 <pre><code># A tibble: 2 × 2
   method   bayes_factor
   &lt;chr&gt;           &lt;dbl&gt;
-1 PDMP             1.33
+1 PDMP             1.36
 2 Analytic         1.34</code></pre>
 </div>
 </div>
+</section><section class="level2"><h2 id="saving-and-loading-results">Saving and loading results<a class="anchor" aria-label="anchor" href="#saving-and-loading-results"></a>
+</h2>
+<p><code>pdmp_result</code> objects hold a pointer to the PDMP trace that lives in Julia. This pointer only remains valid as long as the Julia process lives, so naively calling <code><a href="https://rdrr.io/r/base/readRDS.html" class="external-link">saveRDS()</a></code> on a bare result and later <code><a href="https://rdrr.io/r/base/readRDS.html" class="external-link">readRDS()</a></code> leaves that pointer dangling and every subsequent estimator call fails.</p>
+<p>By default, all sampling functions (<code>pdmp_sample</code>, <code>pdmp_sample_from_stanmodel</code>, <code>pdmp_sample_subsampled</code>) immediately copy the chain skeleton, i.e., the event times, positions, and velocities, from Julia to R. This costs a little bit of extra time and memory but does mean that <code><a href="https://rdrr.io/r/base/readRDS.html" class="external-link">saveRDS()</a></code> / <code><a href="https://rdrr.io/r/base/readRDS.html" class="external-link">readRDS()</a></code> work out of the box</p>
+<p>If you want to skip the upfront copy, for example when running many short exploratory chains that you will never save, or when memory constrained in a large model, pass <code>materialize = FALSE</code>:</p>
+<div class="cell">
+<div class="sourceCode cell-code" id="cb18"><pre class="downlit sourceCode r">
+<code class="sourceCode R"><span><span class="va">result</span> <span class="op">&lt;-</span> <span class="fu"><a href="../reference/pdmp_sample.html">pdmp_sample</a></span><span class="op">(</span><span class="va">neg_grad</span>, d <span class="op">=</span> <span class="va">d</span>, materialize <span class="op">=</span> <span class="cn">FALSE</span><span class="op">)</span></span>
+<span><span class="co"># result$chains is a live Julia reference; calling saveRDS on this will not work</span></span></code></pre></div>
+</div>
+<p>You can still call <code><a href="../reference/materialize.html">materialize()</a></code> manually at any later point to extract the skeleton and enable <code>saveRDS</code> and <code>readRDS</code> functionality.</p>
 </section><script id="quarto-html-after-body" type="application/javascript">
   window.document.addEventListener("DOMContentLoaded", function (event) {
       var localhostRegex = new RegExp(/^(?:http|https):\/\/localhost\:?[0-9]*\//);

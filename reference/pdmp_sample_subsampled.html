@@ -78,7 +78,8 @@ overhead.</p>
 <span>  show_progress <span class="op">=</span> <span class="cn">TRUE</span>,</span>
 <span>  n_chains <span class="op">=</span> <span class="fl">1L</span>,</span>
 <span>  threaded <span class="op">=</span> <span class="cn">FALSE</span>,</span>
-<span>  adaptive_scheme <span class="op">=</span> <span class="fu"><a href="https://rdrr.io/r/base/c.html" class="external-link">c</a></span><span class="op">(</span><span class="st">"diagonal"</span>, <span class="st">"fullrank"</span><span class="op">)</span></span>
+<span>  adaptive_scheme <span class="op">=</span> <span class="fu"><a href="https://rdrr.io/r/base/c.html" class="external-link">c</a></span><span class="op">(</span><span class="st">"diagonal"</span>, <span class="st">"fullrank"</span><span class="op">)</span>,</span>
+<span>  materialize <span class="op">=</span> <span class="cn">TRUE</span></span>
 <span><span class="op">)</span></span></code></pre></div>
     </div>
 
@@ -98,7 +99,7 @@ of length `d`.</p></dd>
 
 
 <dt id="arg-d">d<a class="anchor" aria-label="anchor" href="#arg-d"></a></dt>
-<dd><p>Integer, dimension of the parameter space.</p></dd>
+<dd><p>Integer, dimension of the problem.</p></dd>
 
 
 <dt id="arg-subsample-size">subsample_size<a class="anchor" aria-label="anchor" href="#arg-subsample-size"></a></dt>
@@ -106,15 +107,19 @@ of length `d`.</p></dd>
 
 
 <dt id="arg-flow">flow<a class="anchor" aria-label="anchor" href="#arg-flow"></a></dt>
-<dd><p>Character string specifying the flow type. One of `"ZigZag"`,
-`"BouncyParticle"`, `"Boomerang"`, `"AdaptiveBoomerang"`,
-`"PreconditionedZigZag"`, or `"PreconditionedBPS"`.</p></dd>
+<dd><p>Character string specifying the flow type. One of "ZigZag",
+"BouncyParticle", "Boomerang", "AdaptiveBoomerang", "PreconditionedZigZag",
+or "PreconditionedBPS".
+The `"AdaptiveBoomerang"` flow learns its reference (mean and precision)
+during warmup and requires `"GridThinningStrategy"` as the algorithm.
+The `"PreconditionedZigZag"` and `"PreconditionedBPS"` flows learn a
+diagonal preconditioner during warmup and also require
+`"GridThinningStrategy"` as the algorithm.</p></dd>
 
 
 <dt id="arg-algorithm">algorithm<a class="anchor" aria-label="anchor" href="#arg-algorithm"></a></dt>
 <dd><p>Character string specifying the algorithm. One of
-`"ThinningStrategy"`, `"GridThinningStrategy"`, or
-`"RootsPoissonStrategy"`.</p></dd>
+"ThinningStrategy", "GridThinningStrategy", or "RootsPoissonStrategy".</p></dd>
 
 
 <dt id="arg-t">T<a class="anchor" aria-label="anchor" href="#arg-t"></a></dt>
@@ -126,15 +131,15 @@ of length `d`.</p></dd>
 
 
 <dt id="arg-t-warmup">t_warmup<a class="anchor" aria-label="anchor" href="#arg-t-warmup"></a></dt>
-<dd><p>Numeric, warmup time (default: 0.0).</p></dd>
+<dd><p>Numeric, warmup time (default: 0.0). Events during warmup are discarded.</p></dd>
 
 
 <dt id="arg-flow-mean">flow_mean<a class="anchor" aria-label="anchor" href="#arg-flow-mean"></a></dt>
-<dd><p>Numeric vector of length d, mean for the flow (default: zero vector).</p></dd>
+<dd><p>Numeric vector of length d, mean vector for the flow (default: zero vector).</p></dd>
 
 
 <dt id="arg-flow-cov">flow_cov<a class="anchor" aria-label="anchor" href="#arg-flow-cov"></a></dt>
-<dd><p>Numeric matrix of size d x d, covariance for the flow (default: identity).</p></dd>
+<dd><p>Numeric matrix of size d x d, covariance matrix for the flow (default: identity matrix).</p></dd>
 
 
 <dt id="arg-c-">c0<a class="anchor" aria-label="anchor" href="#arg-c-"></a></dt>
@@ -167,11 +172,11 @@ for reflection events (default: `FALSE`).</p></dd>
 
 
 <dt id="arg-grid-t-max">grid_t_max<a class="anchor" aria-label="anchor" href="#arg-grid-t-max"></a></dt>
-<dd><p>Numeric, maximum time for grid (default: 2.0).</p></dd>
+<dd><p>Numeric, maximum time for grid in GridThinningStrategy (default: 2.0).</p></dd>
 
 
 <dt id="arg-show-progress">show_progress<a class="anchor" aria-label="anchor" href="#arg-show-progress"></a></dt>
-<dd><p>Logical, whether to show progress bar (default: `TRUE`).</p></dd>
+<dd><p>Logical, whether to show progress bar (default: TRUE).</p></dd>
 
 
 <dt id="arg-n-chains">n_chains<a class="anchor" aria-label="anchor" href="#arg-n-chains"></a></dt>
@@ -179,12 +184,21 @@ for reflection events (default: `FALSE`).</p></dd>
 
 
 <dt id="arg-threaded">threaded<a class="anchor" aria-label="anchor" href="#arg-threaded"></a></dt>
-<dd><p>Logical, whether to run chains in parallel (default: `FALSE`).</p></dd>
+<dd><p>Logical, whether to run chains in parallel (default: FALSE).</p></dd>
 
 
 <dt id="arg-adaptive-scheme">adaptive_scheme<a class="anchor" aria-label="anchor" href="#arg-adaptive-scheme"></a></dt>
-<dd><p>Character string, adaptation scheme for AdaptiveBoomerang
-(default: `"diagonal"`).</p></dd>
+<dd><p>Character string, adaptation scheme for AdaptiveBoomerang.
+One of "diagonal" (default, O(d) per update) or "fullrank" (O(d^3) per update,
+better for correlated targets). Ignored for other flow types.</p></dd>
+
+
+<dt id="arg-materialize">materialize<a class="anchor" aria-label="anchor" href="#arg-materialize"></a></dt>
+<dd><p>Logical. If <code>TRUE</code> (default), the chain skeleton is
+immediately extracted from Julia into R so that <code><a href="https://rdrr.io/r/base/readRDS.html" class="external-link">saveRDS()</a></code> /
+<code><a href="https://rdrr.io/r/base/readRDS.html" class="external-link">readRDS()</a></code> work without any extra steps. Set to <code>FALSE</code> to skip
+the extraction and keep only the live Julia reference.
+This can save time and memory if you don't need to save the result or if you plan to call <code><a href="materialize.html">materialize()</a></code> manually later.</p></dd>
 
 </dl></div>
     <div class="section level2">

@@ -330,7 +330,7 @@ result_ttest <- PDMPSamplersR::pdmp_sample_from_stanmodel(
 )
 
 prior_inclusion_prob <- 0.5
-posterior_inclusion_prob <- mean(result_ttest$samples[, 2] != 0)
+posterior_inclusion_prob <- inclusion_probs(result_ttest)[2]
 prior_odds <- prior_inclusion_prob / (1 - prior_inclusion_prob)
 posterior_odds <- posterior_inclusion_prob / (1 - posterior_inclusion_prob)
 bayes_factor_10 <- posterior_odds / prior_odds

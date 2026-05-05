@@ -141,3 +141,22 @@ test_that("ZigZag sparse round-trip preserves estimators and is O(N) not O(d x N
   dense_size   <- (2L * d + 1L) * n_events  # d positions + d velocities + 1 time per event
   expect_lt(sparse_size, dense_size)
 })
+
+test_that("Boomerang with non-zero centering round-trip preserves estimators", {
+  skip_if_no_pdmp_julia_backend()
+
+  mu <- c(2.0, -1.0)
+  neg_grad <- function(x) x - mu
+  result <- pdmp_sample(neg_grad, d = 2, flow = "Boomerang", T = 2000,
+                        flow_mean = mu, show_progress = FALSE)
+
+  m <- materialize(result)
+  tmp <- tempfile(fileext = ".rds")
+  on.exit(unlink(tmp))
+  saveRDS(m, tmp)
+  rel <- readRDS(tmp)
+
+  expect_equal(mean(rel),                    mean(result),                    tolerance = 1e-8)
+  expect_equal(var(rel),                     var(result),                     tolerance = 1e-8)
+  expect_equal(cdf(rel, 0.5, coordinate = 1L), cdf(result, 0.5, coordinate = 1L), tolerance = 1e-8)
+})

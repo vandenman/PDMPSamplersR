@@ -13,7 +13,7 @@ ensure_julia_runtime <- function(verbose = FALSE) {
   if (verbose) {
     JuliaCall::julia_setup(verbose = TRUE)
   } else {
-    invisible(capture.output(JuliaCall::julia_setup(verbose = FALSE), type = "message"))
+    suppressMessages(JuliaCall::julia_setup(verbose = FALSE))
   }
 
   invisible(TRUE)

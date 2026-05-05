@@ -242,6 +242,7 @@ function r_from_sparse_skeleton(
         mu_list::AbstractVector)
     n = length(initial_times_list)
     traces = PDMPSamplers.FactorizedTrace[]
+    sizehint!(traces, n)
     for i in 1:n
         initial_time     = Float64(initial_times_list[i])
         initial_position = Vector{Float64}(initial_positions_list[i])
@@ -275,18 +276,15 @@ function r_chain_velocities(chains::PDMPChains; chain::Int)
 end
 
 function r_chain_is_boomerang(chains::PDMPChains; chain::Int)
-    ct = _dense_compact(chains, chain)
-    PDMPSamplers._underlying_flow(ct.flow) isa AnyBoomerang
+    PDMPSamplers._underlying_flow(chains.traces[chain].flow) isa AnyBoomerang
 end
 
 function r_chain_is_mutable_boomerang(chains::PDMPChains; chain::Int)
-    ct = _dense_compact(chains, chain)
-    PDMPSamplers._underlying_flow(ct.flow) isa MutableBoomerang
+    PDMPSamplers._underlying_flow(chains.traces[chain].flow) isa MutableBoomerang
 end
 
 function r_chain_mu(chains::PDMPChains; chain::Int)
-    ct = _dense_compact(chains, chain)
-    base = PDMPSamplers._underlying_flow(ct.flow)
+    base = PDMPSamplers._underlying_flow(chains.traces[chain].flow)
     base isa AnyBoomerang ? Vector{Float64}(base.μ) : Float64[]
 end
 
@@ -295,6 +293,7 @@ function r_from_skeleton(times_list::AbstractVector, positions_list::AbstractVec
                           mu_list::AbstractVector, is_mutable_boomerang_list::AbstractVector)
     n = length(times_list)
     traces = PDMPTrace[]
+    sizehint!(traces, n)
     for i in 1:n
         times      = Vector{Float64}(times_list[i])
         positions  = Matrix{Float64}(positions_list[i])

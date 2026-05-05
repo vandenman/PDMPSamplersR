@@ -19,12 +19,15 @@ new_pdmp_result <- function(chains, stats, d, n_chains, skeleton = NULL) {
 #' with \code{saveRDS()} and all estimators continue to work after reloading,
 #' provided Julia is set up before the first estimator call.
 #'
+#' This only needs to be called manually when the result was created with
+#' \code{materialize = FALSE}; all sampling functions materialise the trace
+#' automatically by default.
+#'
 #' @param x A \code{pdmp_result}.
-#' @param ... Ignored.
 #' @returns A \code{pdmp_result} with \code{$chains = NULL} and
 #'   \code{$skeleton} populated.
 #' @export
-materialize <- function(x, ...) {
+materialize <- function(x) {
   .check_pdmp(x)
   chains <- if (!is.null(x$chains)) x$chains else .ensure_chains(x)
   n <- x$n_chains

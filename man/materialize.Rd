@@ -4,12 +4,10 @@
 \alias{materialize}
 \title{Materialise a PDMP result for serialisation}
 \usage{
-materialize(x, ...)
+materialize(x)
 }
 \arguments{
 \item{x}{A \code{pdmp_result}.}
-
-\item{...}{Ignored.}
 }
 \value{
 A \code{pdmp_result} with \code{$chains = NULL} and
@@ -20,4 +18,9 @@ Copies the chain skeleton (event times, positions, velocities) from Julia
 into R and drops the live Julia reference. The returned object can be saved
 with \code{saveRDS()} and all estimators continue to work after reloading,
 provided Julia is set up before the first estimator call.
+}
+\details{
+This only needs to be called manually when the result was created with
+\code{materialize = FALSE}; all sampling functions materialise the trace
+automatically by default.
 }

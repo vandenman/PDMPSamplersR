@@ -169,6 +169,19 @@ validate_pdmp_params <- function(d, flow, algorithm, T, t0 = 0.0, t_warmup = 0.0
 #'   \code{readRDS()} work without any extra steps. Set to \code{FALSE} to skip
 #'   the extraction and keep only the live Julia reference.
 #'   This can save time and memory if you don't need to save the result or if you plan to call \code{materialize()} manually later.
+#' @param support_boundary_mode Character string, how to handle support-boundary
+#'   violations where the target or gradient becomes undefined during forward
+#'   trajectory probing. One of \code{"error"} (default, fail fast) or
+#'   \code{"line_search"} (localize the first invalid time via bisection, then
+#'   error). The \code{"line_search"} mode is for diagnostics and boundary
+#'   localization, not for silently continuing past invalid regions.
+#' @param support_boundary_max_bisection_steps Integer, maximum bisection
+#'   iterations for \code{support_boundary_mode = "line_search"} (default: 60).
+#' @param support_boundary_time_rtol Numeric, relative tolerance for bisection
+#'   (default: 1e-8).
+#' @param support_boundary_time_atol Numeric, absolute tolerance for bisection
+#'   (default: 1e-10).
+#'   This can save time and memory if you don't need to save the result or if you plan to call \code{materialize()} manually later.
 #'
 #' @return A \code{pdmp_result} object. Use \code{mean}, \code{var},
 #'   \code{quantile}, etc. for continuous-time estimators, or
@@ -187,7 +200,11 @@ pdmp_sample <- function(f, d,
                         show_progress = TRUE,
                         n_chains = 1L, threaded = FALSE,
                         adaptive_scheme = c("diagonal", "fullrank"),
-                        materialize = TRUE) {
+                        materialize = TRUE,
+                        support_boundary_mode = c("error", "line_search"),
+                        support_boundary_max_bisection_steps = 60L,
+                        support_boundary_time_rtol = 1e-8,
+                        support_boundary_time_atol = 1e-10) {
 
   # Validate function argument (fail fast before Julia setup)
   if (!rlang::is_function(f)) {
@@ -240,6 +257,12 @@ pdmp_sample <- function(f, d,
 
   check_for_julia_setup()
 
+  # Validate support-boundary parameters
+  support_boundary_mode <- match.arg(support_boundary_mode)
+  validate_type(support_boundary_max_bisection_steps, type = "integer", n = 1, positive = TRUE)
+  validate_type(support_boundary_time_rtol, type = "double", n = 1, positive = TRUE)
+  validate_type(support_boundary_time_atol, type = "double", n = 1, positive = TRUE)
+
   # Pass arguments to Julia
   for (nm in names(params))
     JuliaCall::julia_assign(nm, params[[nm]])
@@ -256,7 +279,11 @@ pdmp_sample <- function(f, d,
     sticky = sticky, can_stick = can_stick,
     model_prior = model_prior, parameter_prior = parameter_prior,
     show_progress = show_progress, n_chains = n_chains, threaded = threaded,
-    adaptive_scheme = adaptive_scheme
+    adaptive_scheme = adaptive_scheme,
+    support_boundary_mode = support_boundary_mode,
+    support_boundary_max_bisection_steps = support_boundary_max_bisection_steps,
+    support_boundary_time_rtol = support_boundary_time_rtol,
+    support_boundary_time_atol = support_boundary_time_atol
   );")
   if (is.environment(result)) result <- as.list(result)
   result <- new_pdmp_result(
@@ -303,7 +330,11 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
                         show_progress = TRUE,
                         n_chains = 1L, threaded = FALSE,
                         adaptive_scheme = c("diagonal", "fullrank"),
-                        materialize = TRUE) {
+                        materialize = TRUE,
+                        support_boundary_mode = c("error", "line_search"),
+                        support_boundary_max_bisection_steps = 60L,
+                        support_boundary_time_rtol = 1e-8,
+                        support_boundary_time_atol = 1e-10) {
 
   # Validate file paths on R side before setting up Julia
   validate_type(path_to_stanmodel, type = "character", n = 1)
@@ -352,6 +383,12 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
                                  grid_n, grid_t_max, n_chains, threaded,
                                  adaptive_scheme = adaptive_scheme)
 
+  # Validate support-boundary parameters
+  support_boundary_mode <- match.arg(support_boundary_mode)
+  validate_type(support_boundary_max_bisection_steps, type = "integer", n = 1, positive = TRUE)
+  validate_type(support_boundary_time_rtol, type = "double", n = 1, positive = TRUE)
+  validate_type(support_boundary_time_atol, type = "double", n = 1, positive = TRUE)
+
   # Pass arguments to Julia
   for (nm in names(params))
     JuliaCall::julia_assign(nm, params[[nm]])
@@ -363,7 +400,11 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
     sticky = sticky, can_stick = can_stick,
     model_prior = model_prior, parameter_prior = parameter_prior,
     show_progress = show_progress, n_chains = n_chains, threaded = threaded,
-    adaptive_scheme = adaptive_scheme
+    adaptive_scheme = adaptive_scheme,
+    support_boundary_mode = support_boundary_mode,
+    support_boundary_max_bisection_steps = support_boundary_max_bisection_steps,
+    support_boundary_time_rtol = support_boundary_time_rtol,
+    support_boundary_time_atol = support_boundary_time_atol
   );")
   if (is.environment(result)) result <- as.list(result)
   result <- new_pdmp_result(

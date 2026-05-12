@@ -355,6 +355,11 @@ function extract_stats(chains::PDMPChains)
         "grid_points_evaluated" => Float64[s.grid_points_evaluated for s in all],
         "grid_points_skipped"   => Float64[s.grid_points_skipped for s in all],
         "grid_N_current"        => Float64[s.grid_N_current for s in all],
+        "lazy_fallback_low_tightness" => Float64[s.lazy_fallback_low_tightness for s in all],
+        "lazy_fallback_bound_violation" => Float64[s.lazy_fallback_bound_violation for s in all],
+        "lazy_proposal_attempts" => Float64[s.lazy_proposal_attempts for s in all],
+        "lazy_proposal_rejections" => Float64[s.lazy_proposal_rejections for s in all],
+        "grid_resets_from_dynamics_adaptation" => Float64[s.grid_resets_from_dynamics_adaptation for s in all],
         "ct_ess"                => ct_ess,
     )
 end
@@ -394,7 +399,11 @@ function r_pdmp_stan(
         show_progress::Bool = true,
         n_chains::Int = 1,
         threaded::Bool = false,
-        adaptive_scheme::String = "diagonal"
+        adaptive_scheme::String = "diagonal",
+        support_boundary_mode::String = "error",
+        support_boundary_max_bisection_steps::Int = 60,
+        support_boundary_time_rtol::Float64 = 1e-8,
+        support_boundary_time_atol::Float64 = 1e-10
     )
 
     d = model.d
@@ -404,8 +413,16 @@ function r_pdmp_stan(
     alg0 = build_algorithm(algorithm_type; c0, d, grid_n, grid_t_max)
     alg = wrap_sticky(alg0, sticky, model_prior, parameter_prior, can_stick)
 
+    sbmode = Symbol(support_boundary_mode)
+    sbopts = SupportBoundaryOptions(;
+        max_bisection_steps = support_boundary_max_bisection_steps,
+        time_rtol = support_boundary_time_rtol,
+        time_atol = support_boundary_time_atol,
+    )
+
     chains = pdmp_sample(x0, flow, model, alg, t0, T, t_warmup;
-                         progress = show_progress, n_chains = n_chains, threaded = threaded)
+                         progress = show_progress, n_chains = n_chains, threaded = threaded,
+                         support_boundary_mode = sbmode, support_boundary_options = sbopts)
     return _pack_result(chains)
 end
 
@@ -431,7 +448,11 @@ function r_pdmp_custom(
         show_progress::Bool = true,
         n_chains::Int = 1,
         threaded::Bool = false,
-        adaptive_scheme::String = "diagonal"
+        adaptive_scheme::String = "diagonal",
+        support_boundary_mode::String = "error",
+        support_boundary_max_bisection_steps::Int = 60,
+        support_boundary_time_rtol::Float64 = 1e-8,
+        support_boundary_time_atol::Float64 = 1e-10
     )
 
     hvp = if !isnothing(hessian)
@@ -458,8 +479,16 @@ function r_pdmp_custom(
     alg0 = build_algorithm(algorithm_type; c0, d, grid_n, grid_t_max)
     alg = wrap_sticky(alg0, sticky, model_prior, parameter_prior, can_stick)
 
+    sbmode = Symbol(support_boundary_mode)
+    sbopts = SupportBoundaryOptions(;
+        max_bisection_steps = support_boundary_max_bisection_steps,
+        time_rtol = support_boundary_time_rtol,
+        time_atol = support_boundary_time_atol,
+    )
+
     chains = pdmp_sample(x0, flow, model, alg, t0, T, t_warmup;
-                         progress = show_progress, n_chains = n_chains, threaded = threaded)
+                         progress = show_progress, n_chains = n_chains, threaded = threaded,
+                         support_boundary_mode = sbmode, support_boundary_options = sbopts)
     return _pack_result(chains)
 end
 

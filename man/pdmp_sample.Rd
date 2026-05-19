@@ -29,7 +29,8 @@ pdmp_sample(
   n_chains = 1L,
   threaded = FALSE,
   adaptive_scheme = c("diagonal", "fullrank"),
-  materialize = TRUE
+  materialize = TRUE,
+  support_boundary = support_boundary_control()
 )
 }
 \arguments{
@@ -97,6 +98,9 @@ immediately extracted from Julia into R so that \code{saveRDS()} /
 \code{readRDS()} work without any extra steps. Set to \code{FALSE} to skip
 the extraction and keep only the live Julia reference.
 This can save time and memory if you don't need to save the result or if you plan to call \code{materialize()} manually later.}
+
+\item{support_boundary}{A list created by \code{support_boundary_control()} that
+controls support-boundary diagnostics and heuristic event/refresh recovery.}
 }
 \value{
 A \code{pdmp_result} object. Use \code{mean}, \code{var},

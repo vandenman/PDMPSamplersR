@@ -345,6 +345,9 @@ function extract_stats(chains::PDMPChains)
         "reflections_accepted"  => Float64[s.reflections_accepted for s in all],
         "refreshment_events"    => Float64[s.refreshment_events for s in all],
         "sticky_events"         => Float64[s.sticky_events for s in all],
+        "support_boundary_events" => Float64[s.support_boundary_events for s in all],
+        "support_boundary_refresh_attempts" => Float64[s.support_boundary_refresh_attempts for s in all],
+        "support_boundary_refresh_failures" => Float64[s.support_boundary_refresh_failures for s in all],
         "gradient_calls"        => Float64[s.∇f_calls for s in all],
         "hessian_calls"         => Float64[s.∇²f_calls for s in all],
         "elapsed_time"          => [s.elapsed_time for s in all],
@@ -403,7 +406,11 @@ function r_pdmp_stan(
         support_boundary_mode::String = "error",
         support_boundary_max_bisection_steps::Int = 60,
         support_boundary_time_rtol::Float64 = 1e-8,
-        support_boundary_time_atol::Float64 = 1e-10
+        support_boundary_time_atol::Float64 = 1e-10,
+        support_boundary_clip_fraction::Float64 = 1 - 1e-10,
+        support_boundary_max_refresh_attempts::Int = 20,
+        support_boundary_refresh_probe_time::Float64 = 1e-4,
+        support_boundary_min_safe_time::Float64 = 1e-12
     )
 
     d = model.d
@@ -413,16 +420,20 @@ function r_pdmp_stan(
     alg0 = build_algorithm(algorithm_type; c0, d, grid_n, grid_t_max)
     alg = wrap_sticky(alg0, sticky, model_prior, parameter_prior, can_stick)
 
-    sbmode = Symbol(support_boundary_mode)
     sbopts = SupportBoundaryOptions(;
+        mode = Symbol(support_boundary_mode),
         max_bisection_steps = support_boundary_max_bisection_steps,
         time_rtol = support_boundary_time_rtol,
         time_atol = support_boundary_time_atol,
+        clip_fraction = support_boundary_clip_fraction,
+        max_refresh_attempts = support_boundary_max_refresh_attempts,
+        refresh_probe_time = support_boundary_refresh_probe_time,
+        min_safe_time = support_boundary_min_safe_time,
     )
 
     chains = pdmp_sample(x0, flow, model, alg, t0, T, t_warmup;
                          progress = show_progress, n_chains = n_chains, threaded = threaded,
-                         support_boundary_mode = sbmode, support_boundary_options = sbopts)
+                         support_boundary_options = sbopts)
     return _pack_result(chains)
 end
 
@@ -452,7 +463,11 @@ function r_pdmp_custom(
         support_boundary_mode::String = "error",
         support_boundary_max_bisection_steps::Int = 60,
         support_boundary_time_rtol::Float64 = 1e-8,
-        support_boundary_time_atol::Float64 = 1e-10
+        support_boundary_time_atol::Float64 = 1e-10,
+        support_boundary_clip_fraction::Float64 = 1 - 1e-10,
+        support_boundary_max_refresh_attempts::Int = 20,
+        support_boundary_refresh_probe_time::Float64 = 1e-4,
+        support_boundary_min_safe_time::Float64 = 1e-12
     )
 
     hvp = if !isnothing(hessian)
@@ -479,16 +494,20 @@ function r_pdmp_custom(
     alg0 = build_algorithm(algorithm_type; c0, d, grid_n, grid_t_max)
     alg = wrap_sticky(alg0, sticky, model_prior, parameter_prior, can_stick)
 
-    sbmode = Symbol(support_boundary_mode)
     sbopts = SupportBoundaryOptions(;
+        mode = Symbol(support_boundary_mode),
         max_bisection_steps = support_boundary_max_bisection_steps,
         time_rtol = support_boundary_time_rtol,
         time_atol = support_boundary_time_atol,
+        clip_fraction = support_boundary_clip_fraction,
+        max_refresh_attempts = support_boundary_max_refresh_attempts,
+        refresh_probe_time = support_boundary_refresh_probe_time,
+        min_safe_time = support_boundary_min_safe_time,
     )
 
     chains = pdmp_sample(x0, flow, model, alg, t0, T, t_warmup;
                          progress = show_progress, n_chains = n_chains, threaded = threaded,
-                         support_boundary_mode = sbmode, support_boundary_options = sbopts)
+                         support_boundary_options = sbopts)
     return _pack_result(chains)
 end
 

@@ -123,6 +123,123 @@ validate_pdmp_params <- function(d, flow, algorithm, T, t0 = 0.0, t_warmup = 0.0
   ))
 }
 
+#' Support Boundary Control
+#'
+#' Build a control list for support-boundary handling in PDMP samplers.
+#'
+#' @param mode Character string, how to handle support-boundary violations where
+#'   the target or gradient becomes undefined during forward trajectory probing.
+#'   One of \code{"error"} (default, fail fast), \code{"line_search"}
+#'   (localize the first invalid time via bisection, then error), or
+#'   \code{"line_search_truncated_refresh"} (heuristic BPS-family recovery that
+#'   first searches for ordinary events before the localized boundary, handles
+#'   such an event if one occurs first, and otherwise refreshes velocity at a
+#'   valid interior point).
+#' @param max_bisection_steps Integer, maximum bisection iterations.
+#' @param time_rtol Numeric, relative tolerance for bisection.
+#' @param time_atol Numeric, absolute tolerance for bisection.
+#' @param clip_fraction Numeric in \code{(0, 1]}, fraction of the last-valid time
+#'   used as a safe interior point after localization. The truncated-refresh mode
+#'   may apply an additional conservative cap before refreshing.
+#' @param max_refresh_attempts Integer, maximum number of refreshed velocities to
+#'   try if \code{mode = "line_search_truncated_refresh"} reaches the support
+#'   boundary before an ordinary event.
+#' @param refresh_probe_time Numeric, short forward probe time used to reject
+#'   immediately invalid refreshed velocities. A value of zero disables the
+#'   probe; otherwise the Julia fallback may use a slightly longer scale-aware
+#'   probe.
+#' @param min_safe_time Numeric, minimum time gap used when clipping away from the
+#'   localized boundary.
+#'
+#' @return A list suitable for the \code{support_boundary} argument.
+#'
+#' @export
+support_boundary_control <- function(mode = c("error", "line_search", "line_search_truncated_refresh"),
+                                     max_bisection_steps = 60L,
+                                     time_rtol = 1e-8,
+                                     time_atol = 1e-10,
+                                     clip_fraction = 1 - 1e-10,
+                                     max_refresh_attempts = 20L,
+                                     refresh_probe_time = 1e-4,
+                                     min_safe_time = 1e-12) {
+  mode <- match.arg(mode)
+  max_bisection_steps <- cast_integer(max_bisection_steps, n = 1)
+  max_refresh_attempts <- cast_integer(max_refresh_attempts, n = 1)
+
+  validate_type(max_bisection_steps, type = "integer", n = 1)
+  validate_type(time_rtol, type = "double", n = 1)
+  validate_type(time_atol, type = "double", n = 1)
+  validate_type(clip_fraction, type = "double", n = 1, positive = TRUE)
+  validate_type(max_refresh_attempts, type = "integer", n = 1)
+  validate_type(refresh_probe_time, type = "double", n = 1)
+  validate_type(min_safe_time, type = "double", n = 1)
+
+  if (max_bisection_steps < 0)
+    cli::cli_abort("Argument {.arg max_bisection_steps} must be non-negative.")
+  if (time_rtol < 0)
+    cli::cli_abort("Argument {.arg time_rtol} must be non-negative.")
+  if (time_atol < 0)
+    cli::cli_abort("Argument {.arg time_atol} must be non-negative.")
+  if (clip_fraction > 1)
+    cli::cli_abort("Argument {.arg clip_fraction} must be in (0, 1].")
+  if (max_refresh_attempts < 0)
+    cli::cli_abort("Argument {.arg max_refresh_attempts} must be non-negative.")
+  if (refresh_probe_time < 0)
+    cli::cli_abort("Argument {.arg refresh_probe_time} must be non-negative.")
+  if (min_safe_time < 0)
+    cli::cli_abort("Argument {.arg min_safe_time} must be non-negative.")
+
+  structure(
+    list(
+      mode = mode,
+      max_bisection_steps = max_bisection_steps,
+      time_rtol = time_rtol,
+      time_atol = time_atol,
+      clip_fraction = clip_fraction,
+      max_refresh_attempts = max_refresh_attempts,
+      refresh_probe_time = refresh_probe_time,
+      min_safe_time = min_safe_time
+    ),
+    class = "pdmp_support_boundary_control"
+  )
+}
+
+validate_support_boundary_control <- function(support_boundary) {
+  if (is.null(support_boundary))
+    return(support_boundary_control())
+  if (!is.list(support_boundary))
+    cli::cli_abort("Argument {.arg support_boundary} must be a list created by {.fn support_boundary_control}.")
+
+  defaults <- support_boundary_control()
+  unknown <- setdiff(names(support_boundary), names(defaults))
+  if (length(unknown) > 0) {
+    cli::cli_abort(c(
+      "Unknown field{?s} in {.arg support_boundary}.",
+      "x" = "Got {.field {unknown}}."
+    ))
+  }
+
+  do.call(support_boundary_control, utils::modifyList(defaults, support_boundary))
+}
+
+rethrow_pdmp_julia_error <- function(err) {
+  msg <- conditionMessage(err)
+  if (grepl("SupportBoundaryError:", msg, fixed = TRUE)) {
+    stop(structure(
+      list(message = msg, call = conditionCall(err), parent = err),
+      class = c("pdmp_support_boundary_error", class(err))
+    ))
+  }
+  stop(err)
+}
+
+eval_pdmp_julia <- function(code) {
+  tryCatch(
+    JuliaCall::julia_eval(code),
+    error = rethrow_pdmp_julia_error
+  )
+}
+
 #' PDMP Sampling
 #'
 #' Performs Piecewise Deterministic Markov Process (PDMP) sampling using the
@@ -169,19 +286,8 @@ validate_pdmp_params <- function(d, flow, algorithm, T, t0 = 0.0, t_warmup = 0.0
 #'   \code{readRDS()} work without any extra steps. Set to \code{FALSE} to skip
 #'   the extraction and keep only the live Julia reference.
 #'   This can save time and memory if you don't need to save the result or if you plan to call \code{materialize()} manually later.
-#' @param support_boundary_mode Character string, how to handle support-boundary
-#'   violations where the target or gradient becomes undefined during forward
-#'   trajectory probing. One of \code{"error"} (default, fail fast) or
-#'   \code{"line_search"} (localize the first invalid time via bisection, then
-#'   error). The \code{"line_search"} mode is for diagnostics and boundary
-#'   localization, not for silently continuing past invalid regions.
-#' @param support_boundary_max_bisection_steps Integer, maximum bisection
-#'   iterations for \code{support_boundary_mode = "line_search"} (default: 60).
-#' @param support_boundary_time_rtol Numeric, relative tolerance for bisection
-#'   (default: 1e-8).
-#' @param support_boundary_time_atol Numeric, absolute tolerance for bisection
-#'   (default: 1e-10).
-#'   This can save time and memory if you don't need to save the result or if you plan to call \code{materialize()} manually later.
+#' @param support_boundary A list created by \code{support_boundary_control()} that
+#'   controls support-boundary diagnostics and heuristic event/refresh recovery.
 #'
 #' @return A \code{pdmp_result} object. Use \code{mean}, \code{var},
 #'   \code{quantile}, etc. for continuous-time estimators, or
@@ -201,10 +307,7 @@ pdmp_sample <- function(f, d,
                         n_chains = 1L, threaded = FALSE,
                         adaptive_scheme = c("diagonal", "fullrank"),
                         materialize = TRUE,
-                        support_boundary_mode = c("error", "line_search"),
-                        support_boundary_max_bisection_steps = 60L,
-                        support_boundary_time_rtol = 1e-8,
-                        support_boundary_time_atol = 1e-10) {
+                        support_boundary = support_boundary_control()) {
 
   # Validate function argument (fail fast before Julia setup)
   if (!rlang::is_function(f)) {
@@ -257,11 +360,7 @@ pdmp_sample <- function(f, d,
 
   check_for_julia_setup()
 
-  # Validate support-boundary parameters
-  support_boundary_mode <- match.arg(support_boundary_mode)
-  validate_type(support_boundary_max_bisection_steps, type = "integer", n = 1, positive = TRUE)
-  validate_type(support_boundary_time_rtol, type = "double", n = 1, positive = TRUE)
-  validate_type(support_boundary_time_atol, type = "double", n = 1, positive = TRUE)
+  support_boundary <- validate_support_boundary_control(support_boundary)
 
   # Pass arguments to Julia
   for (nm in names(params))
@@ -270,8 +369,16 @@ pdmp_sample <- function(f, d,
   JuliaCall::julia_assign("f", f)
   JuliaCall::julia_command("grad!(out, x) = out .= f(x);")
   JuliaCall::julia_assign("hessian_f", hessian)
+  JuliaCall::julia_assign("support_boundary_mode", support_boundary$mode)
+  JuliaCall::julia_assign("support_boundary_max_bisection_steps", support_boundary$max_bisection_steps)
+  JuliaCall::julia_assign("support_boundary_time_rtol", support_boundary$time_rtol)
+  JuliaCall::julia_assign("support_boundary_time_atol", support_boundary$time_atol)
+  JuliaCall::julia_assign("support_boundary_clip_fraction", support_boundary$clip_fraction)
+  JuliaCall::julia_assign("support_boundary_max_refresh_attempts", support_boundary$max_refresh_attempts)
+  JuliaCall::julia_assign("support_boundary_refresh_probe_time", support_boundary$refresh_probe_time)
+  JuliaCall::julia_assign("support_boundary_min_safe_time", support_boundary$min_safe_time)
 
-  result <- JuliaCall::julia_eval("r_pdmp_custom(
+  result <- eval_pdmp_julia("r_pdmp_custom(
     grad!, d, x0, flow, algorithm, flow_mean, flow_cov;
     c0 = c0, grid_n = grid_n, grid_t_max = grid_t_max,
     t0 = t0, T = T, t_warmup = t_warmup,
@@ -283,7 +390,11 @@ pdmp_sample <- function(f, d,
     support_boundary_mode = support_boundary_mode,
     support_boundary_max_bisection_steps = support_boundary_max_bisection_steps,
     support_boundary_time_rtol = support_boundary_time_rtol,
-    support_boundary_time_atol = support_boundary_time_atol
+    support_boundary_time_atol = support_boundary_time_atol,
+    support_boundary_clip_fraction = support_boundary_clip_fraction,
+    support_boundary_max_refresh_attempts = support_boundary_max_refresh_attempts,
+    support_boundary_refresh_probe_time = support_boundary_refresh_probe_time,
+    support_boundary_min_safe_time = support_boundary_min_safe_time
   );")
   if (is.environment(result)) result <- as.list(result)
   result <- new_pdmp_result(
@@ -331,10 +442,7 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
                         n_chains = 1L, threaded = FALSE,
                         adaptive_scheme = c("diagonal", "fullrank"),
                         materialize = TRUE,
-                        support_boundary_mode = c("error", "line_search"),
-                        support_boundary_max_bisection_steps = 60L,
-                        support_boundary_time_rtol = 1e-8,
-                        support_boundary_time_atol = 1e-10) {
+                        support_boundary = support_boundary_control()) {
 
   # Validate file paths on R side before setting up Julia
   validate_type(path_to_stanmodel, type = "character", n = 1)
@@ -383,17 +491,21 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
                                  grid_n, grid_t_max, n_chains, threaded,
                                  adaptive_scheme = adaptive_scheme)
 
-  # Validate support-boundary parameters
-  support_boundary_mode <- match.arg(support_boundary_mode)
-  validate_type(support_boundary_max_bisection_steps, type = "integer", n = 1, positive = TRUE)
-  validate_type(support_boundary_time_rtol, type = "double", n = 1, positive = TRUE)
-  validate_type(support_boundary_time_atol, type = "double", n = 1, positive = TRUE)
+  support_boundary <- validate_support_boundary_control(support_boundary)
 
   # Pass arguments to Julia
   for (nm in names(params))
     JuliaCall::julia_assign(nm, params[[nm]])
+  JuliaCall::julia_assign("support_boundary_mode", support_boundary$mode)
+  JuliaCall::julia_assign("support_boundary_max_bisection_steps", support_boundary$max_bisection_steps)
+  JuliaCall::julia_assign("support_boundary_time_rtol", support_boundary$time_rtol)
+  JuliaCall::julia_assign("support_boundary_time_atol", support_boundary$time_atol)
+  JuliaCall::julia_assign("support_boundary_clip_fraction", support_boundary$clip_fraction)
+  JuliaCall::julia_assign("support_boundary_max_refresh_attempts", support_boundary$max_refresh_attempts)
+  JuliaCall::julia_assign("support_boundary_refresh_probe_time", support_boundary$refresh_probe_time)
+  JuliaCall::julia_assign("support_boundary_min_safe_time", support_boundary$min_safe_time)
 
-  result <- JuliaCall::julia_eval("r_pdmp_stan(
+  result <- eval_pdmp_julia("r_pdmp_stan(
     _pdmp_model, x0, flow, algorithm, flow_mean, flow_cov;
     c0 = c0, grid_n = grid_n, grid_t_max = grid_t_max,
     t0 = t0, T = T, t_warmup = t_warmup,
@@ -404,7 +516,11 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
     support_boundary_mode = support_boundary_mode,
     support_boundary_max_bisection_steps = support_boundary_max_bisection_steps,
     support_boundary_time_rtol = support_boundary_time_rtol,
-    support_boundary_time_atol = support_boundary_time_atol
+    support_boundary_time_atol = support_boundary_time_atol,
+    support_boundary_clip_fraction = support_boundary_clip_fraction,
+    support_boundary_max_refresh_attempts = support_boundary_max_refresh_attempts,
+    support_boundary_refresh_probe_time = support_boundary_refresh_probe_time,
+    support_boundary_min_safe_time = support_boundary_min_safe_time
   );")
   if (is.environment(result)) result <- as.list(result)
   result <- new_pdmp_result(

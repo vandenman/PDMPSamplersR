@@ -96,6 +96,60 @@ test_that("pdmp_sample rejects invalid gradient function", {
   expect_error(pdmp_sample(function(x) x[1], d = 2, flow = "ZigZag", T = 100), "length")
 })
 
+test_that("pdmp_sample forwards support-boundary diagnostics", {
+  skip_on_cran()
+  skip_if_no_julia()
+
+  d <- 2
+  neg_grad <- function(x) {
+    if (x[1] >= 1) stop("Outside support")
+    x
+  }
+  neg_hess <- function(x) diag(d)
+
+  expect_error(
+    pdmp_sample(
+      neg_grad, d = d, flow = "BouncyParticle",
+      algorithm = "GridThinningStrategy", T = 10,
+      x0 = c(0, 0), theta0 = c(1, 0), hessian = neg_hess,
+      show_progress = FALSE, materialize = FALSE,
+      support_boundary = support_boundary_control(
+        mode = "line_search",
+        max_bisection_steps = 3
+      )
+    ),
+    "SupportBoundaryError|Boundary localized",
+    class = "pdmp_support_boundary_error"
+  )
+})
+
+test_that("pdmp_sample accepts line_search_truncated_refresh for BPS-family flows", {
+  skip_on_cran()
+  skip_if_no_julia()
+
+  d <- 2
+  neg_grad <- function(x) {
+    if (x[1] >= 1) stop("Outside support")
+    x
+  }
+  neg_hess <- function(x) diag(d)
+
+  result <- pdmp_sample(
+    neg_grad, d = d, flow = "BouncyParticle",
+    algorithm = "GridThinningStrategy", T = 5,
+    x0 = c(0, 0), theta0 = c(1, 0), hessian = neg_hess,
+    show_progress = FALSE, materialize = FALSE,
+    support_boundary = support_boundary_control(
+      mode = "line_search_truncated_refresh",
+      max_refresh_attempts = 200,
+      refresh_probe_time = 1e-4
+    )
+  )
+
+  expect_s3_class(result, "pdmp_result")
+  expect_gte(result$stats$support_boundary_events[[1]], 1)
+})
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Smoke tests for all dynamics (just check they run, not correctness)
 # ──────────────────────────────────────────────────────────────────────────────

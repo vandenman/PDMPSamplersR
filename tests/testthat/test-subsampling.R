@@ -30,7 +30,7 @@ make_logistic_target <- function(X, y, prior_mean, prior_prec) {
 
 test_that("pdmp_sample_subsampled runs on logistic regression (ZigZag)", {
   skip_on_cran()
-  skip_if_no_julia()
+  skip_if_no_pdmp_julia_backend()
 
   set.seed(2024)
   n <- 200
@@ -74,7 +74,7 @@ test_that("pdmp_sample_subsampled runs on logistic regression (ZigZag)", {
 
 test_that("pdmp_sample_subsampled with full gradient for reflections", {
   skip_on_cran()
-  skip_if_no_julia()
+  skip_if_no_pdmp_julia_backend()
 
   set.seed(42)
   n <- 200
@@ -145,7 +145,7 @@ test_that("pdmp_sample_subsampled validates inputs", {
 
 test_that("pdmp_sample_subsampled matches full gradient pdmp_sample (logistic)", {
   skip_on_cran()
-  skip_if_no_julia()
+  skip_if_no_pdmp_julia_backend()
 
   set.seed(2024)
   n <- 200

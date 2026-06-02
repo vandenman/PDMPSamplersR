@@ -25,6 +25,7 @@ brm_pdmp(
   discretize_dt = NULL,
   n_chains = 1L,
   threaded = FALSE,
+  seed = NULL,
   compute_lp = FALSE,
   subsample_size = NULL,
   n_anchor_updates = 10L,
@@ -88,6 +89,9 @@ for automatic (yields ~1000 samples).}
 chains, `Rhat` and multi-chain diagnostics become available.}
 
 \item{threaded}{Logical; run chains in parallel (default: FALSE).}
+
+\item{seed}{NULL (default) or a non-negative integer seed passed through to
+Julia's sampler RNG.}
 
 \item{compute_lp}{Logical; compute `lp__` via `BridgeStan::log_density()`
 for each sample (default: FALSE). Adds overhead but enables

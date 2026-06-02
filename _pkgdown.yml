@@ -29,6 +29,7 @@ reference:
       - pdmp_sample
       - pdmp_sample_subsampled
       - pdmp_sample_from_stanmodel
+      - support_boundary_control
       - write_stan_json
   - title: Results
     contents:

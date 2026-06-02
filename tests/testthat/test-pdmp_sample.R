@@ -3,7 +3,7 @@
 
 test_that("pdmp_sample runs with a simple normal gradient", {
   skip_on_cran()
-  skip_if_no_julia()
+  skip_if_no_pdmp_julia_backend()
 
   d <- 2
   neg_grad <- function(x) x
@@ -23,7 +23,7 @@ test_that("pdmp_sample runs with a simple normal gradient", {
 
 test_that("pdmp_sample with BouncyParticle flow", {
   skip_on_cran()
-  skip_if_no_julia()
+  skip_if_no_pdmp_julia_backend()
 
   d <- 3
   neg_grad <- function(x) x
@@ -39,7 +39,7 @@ test_that("pdmp_sample with BouncyParticle flow", {
 
 test_that("pdmp_sample with GridThinningStrategy", {
   skip_on_cran()
-  skip_if_no_julia()
+  skip_if_no_pdmp_julia_backend()
 
   d <- 2
   neg_grad <- function(x) x
@@ -57,7 +57,7 @@ test_that("pdmp_sample with GridThinningStrategy", {
 
 test_that("pdmp_sample with multiple chains", {
   skip_on_cran()
-  skip_if_no_julia()
+  skip_if_no_pdmp_julia_backend()
 
   d <- 2
   neg_grad <- function(x) x
@@ -76,9 +76,31 @@ test_that("pdmp_sample with multiple chains", {
   expect_equal(ncol(samples_2), d)
 })
 
+test_that("pdmp_sample with a seed returns an identical trace twice", {
+  skip_on_cran()
+  skip_if_no_pdmp_julia_backend()
+
+  d <- 2
+  neg_grad <- function(x) x
+  x0 <- c(0.25, -0.75)
+
+  result_1 <- pdmp_sample(
+    neg_grad, d = d, flow = "ZigZag", T = 500,
+    x0 = x0, seed = 42, show_progress = FALSE
+  )
+  result_2 <- pdmp_sample(
+    neg_grad, d = d, flow = "ZigZag", T = 500,
+    x0 = x0, seed = 42, show_progress = FALSE
+  )
+
+  expect_identical(result_1$skeleton[[1]]$times, result_2$skeleton[[1]]$times)
+  expect_identical(result_1$skeleton[[1]]$positions, result_2$skeleton[[1]]$positions)
+  expect_identical(result_1$skeleton[[1]]$velocities, result_2$skeleton[[1]]$velocities)
+})
+
 test_that("pdmp_sample posterior mean is reasonable for standard normal", {
   skip_on_cran()
-  skip_if_no_julia()
+  skip_if_no_pdmp_julia_backend()
 
   d <- 2
   neg_grad <- function(x) x
@@ -96,13 +118,67 @@ test_that("pdmp_sample rejects invalid gradient function", {
   expect_error(pdmp_sample(function(x) x[1], d = 2, flow = "ZigZag", T = 100), "length")
 })
 
+test_that("pdmp_sample forwards support-boundary diagnostics", {
+  skip_on_cran()
+  skip_if_no_pdmp_julia_backend()
+
+  d <- 2
+  neg_grad <- function(x) {
+    if (x[1] >= 1) stop("Outside support")
+    x
+  }
+  neg_hess <- function(x) diag(d)
+
+  expect_error(
+    pdmp_sample(
+      neg_grad, d = d, flow = "BouncyParticle",
+      algorithm = "GridThinningStrategy", T = 10,
+      x0 = c(0, 0), theta0 = c(1, 0), hessian = neg_hess,
+      show_progress = FALSE, materialize = FALSE, seed = 42,
+      support_boundary = support_boundary_control(
+        mode = "line_search",
+        max_bisection_steps = 3
+      )
+    ),
+    "SupportBoundaryError|Boundary localized",
+    class = "pdmp_support_boundary_error"
+  )
+})
+
+test_that("pdmp_sample accepts line_search_truncated_refresh for BPS-family flows", {
+  skip_on_cran()
+  skip_if_no_pdmp_julia_backend()
+
+  d <- 2
+  neg_grad <- function(x) {
+    if (x[1] >= 1) stop("Outside support")
+    x
+  }
+  neg_hess <- function(x) diag(d)
+
+  result <- pdmp_sample(
+    neg_grad, d = d, flow = "BouncyParticle",
+    algorithm = "GridThinningStrategy", T = 5,
+    x0 = c(0, 0), theta0 = c(1, 0), hessian = neg_hess,
+    show_progress = FALSE, materialize = FALSE, seed = 42,
+    support_boundary = support_boundary_control(
+      mode = "line_search_truncated_refresh",
+      max_refresh_attempts = 200,
+      refresh_probe_time = 1e-4
+    )
+  )
+
+  expect_s3_class(result, "pdmp_result")
+  expect_gte(result$stats$support_boundary_events[[1]], 1)
+})
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Smoke tests for all dynamics (just check they run, not correctness)
 # ──────────────────────────────────────────────────────────────────────────────
 
 test_that("pdmp_sample runs with Boomerang flow", {
   skip_on_cran()
-  skip_if_no_julia()
+  skip_if_no_pdmp_julia_backend()
 
   d <- 2
   neg_grad <- function(x) x
@@ -117,7 +193,7 @@ test_that("pdmp_sample runs with Boomerang flow", {
 
 test_that("pdmp_sample runs with AdaptiveBoomerang (diagonal)", {
   skip_on_cran()
-  skip_if_no_julia()
+  skip_if_no_pdmp_julia_backend()
 
   d <- 2
   neg_grad <- function(x) x
@@ -133,7 +209,7 @@ test_that("pdmp_sample runs with AdaptiveBoomerang (diagonal)", {
 
 test_that("pdmp_sample runs with AdaptiveBoomerang (fullrank)", {
   skip_on_cran()
-  skip_if_no_julia()
+  skip_if_no_pdmp_julia_backend()
 
   d <- 2
   neg_grad <- function(x) x
@@ -149,7 +225,7 @@ test_that("pdmp_sample runs with AdaptiveBoomerang (fullrank)", {
 
 test_that("pdmp_sample runs with PreconditionedZigZag", {
   skip_on_cran()
-  skip_if_no_julia()
+  skip_if_no_pdmp_julia_backend()
 
   d <- 2
   neg_grad <- function(x) x
@@ -164,7 +240,7 @@ test_that("pdmp_sample runs with PreconditionedZigZag", {
 
 test_that("pdmp_sample runs with PreconditionedBPS", {
   skip_on_cran()
-  skip_if_no_julia()
+  skip_if_no_pdmp_julia_backend()
 
   d <- 2
   neg_grad <- function(x) x

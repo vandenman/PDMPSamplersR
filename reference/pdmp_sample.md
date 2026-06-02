@@ -30,8 +30,10 @@ pdmp_sample(
   show_progress = TRUE,
   n_chains = 1L,
   threaded = FALSE,
+  seed = NULL,
   adaptive_scheme = c("diagonal", "fullrank"),
-  materialize = TRUE
+  materialize = TRUE,
+  support_boundary = support_boundary_control()
 )
 ```
 
@@ -143,6 +145,11 @@ pdmp_sample(
 
   Logical, whether to run chains in parallel (default: FALSE).
 
+- seed:
+
+  NULL (default) or a non-negative integer seed passed through to
+  Julia's sampler RNG.
+
 - adaptive_scheme:
 
   Character string, adaptation scheme for AdaptiveBoomerang. One of
@@ -160,6 +167,13 @@ pdmp_sample(
   to save the result or if you plan to call
   [`materialize()`](https://vandenman.github.io/PDMPSamplersR/reference/materialize.md)
   manually later.
+
+- support_boundary:
+
+  A list created by
+  [`support_boundary_control()`](https://vandenman.github.io/PDMPSamplersR/reference/support_boundary_control.md)
+  that controls support-boundary diagnostics and heuristic event/refresh
+  recovery.
 
 ## Value
 

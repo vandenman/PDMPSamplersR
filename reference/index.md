@@ -8,6 +8,8 @@
   : PDMP sampling with subsampled gradients
 - [`pdmp_sample_from_stanmodel()`](https://vandenman.github.io/PDMPSamplersR/reference/pdmp_sample_from_stanmodel.md)
   : PDMP Sampling from Stan Model
+- [`support_boundary_control()`](https://vandenman.github.io/PDMPSamplersR/reference/support_boundary_control.md)
+  : Support Boundary Control
 - [`write_stan_json()`](https://vandenman.github.io/PDMPSamplersR/reference/write_stan_json.md)
   : Write data to a JSON file readable by Stan
 

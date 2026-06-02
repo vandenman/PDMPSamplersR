@@ -28,6 +28,7 @@ brm_pdmp(
   discretize_dt = NULL,
   n_chains = 1L,
   threaded = FALSE,
+  seed = NULL,
   compute_lp = FALSE,
   subsample_size = NULL,
   n_anchor_updates = 10L,
@@ -131,6 +132,11 @@ brm_pdmp(
 - threaded:
 
   Logical; run chains in parallel (default: FALSE).
+
+- seed:
+
+  NULL (default) or a non-negative integer seed passed through to
+  Julia's sampler RNG.
 
 - compute_lp:
 

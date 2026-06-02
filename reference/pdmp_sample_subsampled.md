@@ -32,6 +32,7 @@ pdmp_sample_subsampled(
   show_progress = TRUE,
   n_chains = 1L,
   threaded = FALSE,
+  seed = NULL,
   adaptive_scheme = c("diagonal", "fullrank"),
   materialize = TRUE
 )
@@ -141,6 +142,11 @@ pdmp_sample_subsampled(
 - threaded:
 
   Logical, whether to run chains in parallel (default: FALSE).
+
+- seed:
+
+  NULL (default) or a non-negative integer seed passed through to
+  Julia's sampler RNG.
 
 - adaptive_scheme:
 

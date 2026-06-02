@@ -136,6 +136,11 @@ validate_pdmp_params <- function(d, flow, algorithm, T, t0 = 0.0, t_warmup = 0.0
 #'
 #' Build a control list for support-boundary handling in PDMP samplers.
 #'
+#' Both \code{"line_search"} and \code{"line_search_truncated_refresh"} probe
+#' along the linear ray \eqn{x_0 + t v} and are therefore only valid for
+#' BPS/ZigZag-family flows with linear dynamics. For non-linear flows (e.g.,
+#' Boomerang) these modes fall back to \code{"error"} behavior.
+#'
 #' @param mode Character string, how to handle support-boundary violations where
 #'   the target or gradient becomes undefined during forward trajectory probing.
 #'   One of \code{"error"} (default, fail fast), \code{"line_search"}

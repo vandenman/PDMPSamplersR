@@ -53,3 +53,9 @@ A list suitable for the \code{support_boundary} argument.
 \description{
 Build a control list for support-boundary handling in PDMP samplers.
 }
+\details{
+Both \code{"line_search"} and \code{"line_search_truncated_refresh"} probe
+along the linear ray \eqn{x_0 + t v} and are therefore only valid for
+BPS/ZigZag-family flows with linear dynamics. For non-linear flows (e.g.,
+Boomerang) these modes fall back to \code{"error"} behavior.
+}

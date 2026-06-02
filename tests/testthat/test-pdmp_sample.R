@@ -134,7 +134,7 @@ test_that("pdmp_sample forwards support-boundary diagnostics", {
       neg_grad, d = d, flow = "BouncyParticle",
       algorithm = "GridThinningStrategy", T = 10,
       x0 = c(0, 0), theta0 = c(1, 0), hessian = neg_hess,
-      show_progress = FALSE, materialize = FALSE,
+      show_progress = FALSE, materialize = FALSE, seed = 42,
       support_boundary = support_boundary_control(
         mode = "line_search",
         max_bisection_steps = 3

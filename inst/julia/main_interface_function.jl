@@ -421,6 +421,7 @@ function r_pdmp_stan(
     alg = wrap_sticky(alg0, sticky, model_prior, parameter_prior, can_stick)
 
     sbopts = SupportBoundaryOptions(;
+        detect_boundaries = support_boundary_mode != "error",
         mode = Symbol(support_boundary_mode),
         max_bisection_steps = support_boundary_max_bisection_steps,
         time_rtol = support_boundary_time_rtol,
@@ -495,6 +496,7 @@ function r_pdmp_custom(
     alg = wrap_sticky(alg0, sticky, model_prior, parameter_prior, can_stick)
 
     sbopts = SupportBoundaryOptions(;
+        detect_boundaries = support_boundary_mode != "error",
         mode = Symbol(support_boundary_mode),
         max_bisection_steps = support_boundary_max_bisection_steps,
         time_rtol = support_boundary_time_rtol,

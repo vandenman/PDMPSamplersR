@@ -4,7 +4,7 @@ validate_pdmp_params <- function(d, flow, algorithm, T, t0 = 0.0, t_warmup = 0.0
                                 x0 = NULL, theta0 = NULL, show_progress = TRUE,
                                 sticky = FALSE, can_stick = NULL, model_prior = NULL, parameter_prior = NULL,
                                 grid_n = 30, grid_t_max = 2.0,
-                                n_chains = 1L, threaded = FALSE,
+                                n_chains = 1L, threaded = FALSE, seed = NULL,
                                 adaptive_scheme = "diagonal") {
 
   # Validate basic parameters
@@ -49,6 +49,15 @@ validate_pdmp_params <- function(d, flow, algorithm, T, t0 = 0.0, t_warmup = 0.0
   n_chains <- cast_integer(n_chains, n = 1)
   validate_type(n_chains, type = "integer", n = 1, positive = TRUE)
   validate_type(threaded, type = "logical", n = 1)
+  if (!is.null(seed)) {
+    if (!rlang::is_integerish(seed, n = 1)) {
+      cli::cli_abort("Argument {.arg seed} must be NULL or an integerish scalar.")
+    }
+    seed <- as.integer(seed)
+    if (seed < 0) {
+      cli::cli_abort("Argument {.arg seed} must be non-negative.")
+    }
+  }
 
   # Handle and validate flow_mean and flow_cov
   if (is.null(flow_mean)) {
@@ -118,7 +127,7 @@ validate_pdmp_params <- function(d, flow, algorithm, T, t0 = 0.0, t_warmup = 0.0
     x0 = x0, theta0 = theta0, show_progress = show_progress,
     sticky = sticky, can_stick = can_stick, model_prior = model_prior, parameter_prior = parameter_prior,
     grid_n = grid_n, grid_t_max = grid_t_max,
-    n_chains = n_chains, threaded = threaded,
+    n_chains = n_chains, threaded = threaded, seed = seed,
     adaptive_scheme = adaptive_scheme
   ))
 }
@@ -278,6 +287,8 @@ eval_pdmp_julia <- function(code) {
 #' @param show_progress Logical, whether to show progress bar (default: TRUE).
 #' @param n_chains Integer, number of chains to run (default: 1).
 #' @param threaded Logical, whether to run chains in parallel (default: FALSE).
+#' @param seed NULL (default) or a non-negative integer seed passed through to
+#'   Julia's sampler RNG.
 #' @param adaptive_scheme Character string, adaptation scheme for AdaptiveBoomerang.
 #'   One of "diagonal" (default, O(d) per update) or "fullrank" (O(d^3) per update,
 #'   better for correlated targets). Ignored for other flow types.
@@ -304,7 +315,7 @@ pdmp_sample <- function(f, d,
                         sticky = FALSE, can_stick = NULL, model_prior = NULL, parameter_prior = NULL,
                         grid_n = 30, grid_t_max = 2.0,
                         show_progress = TRUE,
-                        n_chains = 1L, threaded = FALSE,
+                        n_chains = 1L, threaded = FALSE, seed = NULL,
                         adaptive_scheme = c("diagonal", "fullrank"),
                         materialize = TRUE,
                         support_boundary = support_boundary_control()) {
@@ -321,7 +332,7 @@ pdmp_sample <- function(f, d,
   params <- validate_pdmp_params(d, flow, algorithm, T, t0, t_warmup, flow_mean, flow_cov,
                                 c0, x0, theta0, show_progress,
                                 sticky, can_stick, model_prior, parameter_prior,
-                                grid_n, grid_t_max, n_chains, threaded,
+                                grid_n, grid_t_max, n_chains, threaded, seed,
                                 adaptive_scheme = adaptive_scheme)
 
   # Test the function with a sample input
@@ -386,6 +397,7 @@ pdmp_sample <- function(f, d,
     sticky = sticky, can_stick = can_stick,
     model_prior = model_prior, parameter_prior = parameter_prior,
     show_progress = show_progress, n_chains = n_chains, threaded = threaded,
+    seed = seed,
     adaptive_scheme = adaptive_scheme,
     support_boundary_mode = support_boundary_mode,
     support_boundary_max_bisection_steps = support_boundary_max_bisection_steps,
@@ -439,7 +451,7 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
                         sticky = FALSE, can_stick = NULL, model_prior = NULL, parameter_prior = NULL,
                         grid_n = 30, grid_t_max = 2.0,
                         show_progress = TRUE,
-                        n_chains = 1L, threaded = FALSE,
+                        n_chains = 1L, threaded = FALSE, seed = NULL,
                         adaptive_scheme = c("diagonal", "fullrank"),
                         materialize = TRUE,
                         support_boundary = support_boundary_control()) {
@@ -488,7 +500,7 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
   params <- validate_pdmp_params(d, flow, algorithm, T, t0, t_warmup, flow_mean, flow_cov,
                                  c0, x0, theta0, show_progress,
                                  sticky, can_stick, model_prior, parameter_prior,
-                                 grid_n, grid_t_max, n_chains, threaded,
+                                 grid_n, grid_t_max, n_chains, threaded, seed,
                                  adaptive_scheme = adaptive_scheme)
 
   support_boundary <- validate_support_boundary_control(support_boundary)
@@ -512,6 +524,7 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
     sticky = sticky, can_stick = can_stick,
     model_prior = model_prior, parameter_prior = parameter_prior,
     show_progress = show_progress, n_chains = n_chains, threaded = threaded,
+    seed = seed,
     adaptive_scheme = adaptive_scheme,
     support_boundary_mode = support_boundary_mode,
     support_boundary_max_bisection_steps = support_boundary_max_bisection_steps,

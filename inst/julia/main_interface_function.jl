@@ -402,6 +402,7 @@ function r_pdmp_stan(
         show_progress::Bool = true,
         n_chains::Int = 1,
         threaded::Bool = false,
+        seed::Union{Integer, Nothing} = nothing,
         adaptive_scheme::String = "diagonal",
         support_boundary_mode::String = "error",
         support_boundary_max_bisection_steps::Int = 60,
@@ -434,6 +435,7 @@ function r_pdmp_stan(
 
     chains = pdmp_sample(x0, flow, model, alg, t0, T, t_warmup;
                          progress = show_progress, n_chains = n_chains, threaded = threaded,
+                         seed = seed,
                          support_boundary_options = sbopts)
     return _pack_result(chains)
 end
@@ -460,6 +462,7 @@ function r_pdmp_custom(
         show_progress::Bool = true,
         n_chains::Int = 1,
         threaded::Bool = false,
+        seed::Union{Integer, Nothing} = nothing,
         adaptive_scheme::String = "diagonal",
         support_boundary_mode::String = "error",
         support_boundary_max_bisection_steps::Int = 60,
@@ -509,6 +512,7 @@ function r_pdmp_custom(
 
     chains = pdmp_sample(x0, flow, model, alg, t0, T, t_warmup;
                          progress = show_progress, n_chains = n_chains, threaded = threaded,
+                         seed = seed,
                          support_boundary_options = sbopts)
     return _pack_result(chains)
 end
@@ -539,6 +543,7 @@ function r_pdmp_custom_subsampled(
         show_progress::Bool = true,
         n_chains::Int = 1,
         threaded::Bool = false,
+        seed::Union{Integer, Nothing} = nothing,
         adaptive_scheme::String = "diagonal"
     )
 
@@ -590,7 +595,7 @@ function r_pdmp_custom_subsampled(
     alg = build_algorithm(algorithm_type; c0, d, grid_n, grid_t_max)
 
     chains = pdmp_sample(x0, flow, model, alg, t0, T, t_warmup;
-                         progress = show_progress, n_chains, threaded)
+                         progress = show_progress, n_chains, threaded, seed)
     return _pack_result(chains)
 end
 
@@ -1137,6 +1142,7 @@ function r_pdmp_brms_subsampled(
         show_progress::Bool = true,
         n_chains::Int = 1,
         threaded::Bool = false,
+        seed::Union{Integer, Nothing} = nothing,
         compute_lp::Bool = false,
         resample_dt::Float64 = 0.0,
         hvp_mode::String = "scaled",
@@ -1239,10 +1245,10 @@ function r_pdmp_brms_subsampled(
             push!(models, model_i)
         end
         chains = pdmp_sample(d, flow, models, alg, t0, T, t_warmup;
-                             progress=show_progress, threaded)
+                             progress=show_progress, threaded, seed)
     elseif n_chains == 1
         chains = pdmp_sample(d, flow, [model], alg, t0, T, t_warmup;
-                             progress=show_progress, adapter)
+                             progress=show_progress, adapter, seed)
     else
         all_traces = []
         all_stats = []
@@ -1257,7 +1263,7 @@ function r_pdmp_brms_subsampled(
                 a_i = PDMPSamplers.default_adapter(flow, m_i.grad, ba_i, t_warmup / 10, t_warmup, t0)
             end
             ch_i = pdmp_sample(d, deepcopy(flow), [m_i], alg, t0, T, t_warmup;
-                               progress=(i == 1 && show_progress), adapter=a_i)
+                               progress=(i == 1 && show_progress), adapter=a_i, seed=isnothing(seed) ? nothing : seed + i - 1)
             push!(all_traces, ch_i.traces[1])
             push!(all_stats, ch_i.stats[1])
         end
@@ -1311,6 +1317,7 @@ function r_pdmp_stan_for_brms(
         show_progress::Bool = true,
         n_chains::Int = 1,
         threaded::Bool = false,
+        seed::Union{Integer, Nothing} = nothing,
         compute_lp::Bool = false,
         use_fd_hvp::Bool = false,
         post_warmup_simplify::Bool = false,
@@ -1331,7 +1338,7 @@ function r_pdmp_stan_for_brms(
     alg = wrap_sticky(alg0, sticky, model_prior, parameter_prior, can_stick)
 
     chains = pdmp_sample(d, flow, model, alg, t0, T, t_warmup;
-                         progress = show_progress, n_chains, threaded)
+                         progress = show_progress, n_chains, threaded, seed)
 
     stats = extract_stats(chains)
     n_ch = length(chains.traces)

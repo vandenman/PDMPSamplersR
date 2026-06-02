@@ -27,6 +27,7 @@ pdmp_sample_from_stanmodel(
   show_progress = TRUE,
   n_chains = 1L,
   threaded = FALSE,
+  seed = NULL,
   adaptive_scheme = c("diagonal", "fullrank"),
   materialize = TRUE,
   support_boundary = support_boundary_control()
@@ -87,6 +88,9 @@ diagonal preconditioner during warmup and also require
 \item{n_chains}{Integer, number of chains to run (default: 1).}
 
 \item{threaded}{Logical, whether to run chains in parallel (default: FALSE).}
+
+\item{seed}{NULL (default) or a non-negative integer seed passed through to
+Julia's sampler RNG.}
 
 \item{adaptive_scheme}{Character string, adaptation scheme for AdaptiveBoomerang.
 One of "diagonal" (default, O(d) per update) or "fullrank" (O(d^3) per update,

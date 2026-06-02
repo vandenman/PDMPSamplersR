@@ -81,6 +81,8 @@ warn_if_low_random_effect_subsampling_support <- function(sdata, subsample_size)
 #' @param n_chains Integer number of chains (default: 1). With multiple
 #'   chains, `Rhat` and multi-chain diagnostics become available.
 #' @param threaded Logical; run chains in parallel (default: FALSE).
+#' @param seed NULL (default) or a non-negative integer seed passed through to
+#'   Julia's sampler RNG.
 #' @param compute_lp Logical; compute `lp__` via `BridgeStan::log_density()`
 #'   for each sample (default: FALSE). Adds overhead but enables
 #'   `bridge_sampler()` and populates the `lp__` diagnostic column.
@@ -173,7 +175,7 @@ brm_pdmp <- function(
     grid_n = 30, grid_t_max = 2.0,
     show_progress = TRUE,
     discretize_dt = NULL,
-    n_chains = 1L, threaded = FALSE,
+    n_chains = 1L, threaded = FALSE, seed = NULL,
     compute_lp = FALSE,
     subsample_size = NULL,
     n_anchor_updates = 10L,
@@ -203,6 +205,15 @@ brm_pdmp <- function(
   algorithm <- match.arg(algorithm)
   adaptive_scheme <- match.arg(adaptive_scheme)
   hvp_mode <- match.arg(hvp_mode)
+  if (!is.null(seed)) {
+    if (!rlang::is_integerish(seed, n = 1)) {
+      cli::cli_abort("Argument {.arg seed} must be NULL or an integerish scalar.")
+    }
+    seed <- as.integer(seed)
+    if (seed < 0) {
+      cli::cli_abort("Argument {.arg seed} must be non-negative.")
+    }
+  }
   subsampled <- !is.null(subsample_size)
   N <- nrow(data)
 
@@ -335,6 +346,7 @@ brm_pdmp <- function(
       show_progress = show_progress,
       n_chains = as.integer(n_chains),
       threaded = threaded,
+      seed = seed,
       compute_lp = compute_lp,
       resample_dt = jl_resample_dt,
       hvp_mode = hvp_mode,
@@ -366,6 +378,7 @@ brm_pdmp <- function(
       show_progress = show_progress,
       n_chains = as.integer(n_chains),
       threaded = threaded,
+      seed = seed,
       compute_lp = compute_lp,
       use_fd_hvp = use_fd_hvp,
       post_warmup_simplify = post_warmup_simplify,

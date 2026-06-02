@@ -39,7 +39,7 @@ pdmp_sample_subsampled <- function(
     use_full_gradient_for_reflections = FALSE,
     grid_n = 30, grid_t_max = 2.0,
     show_progress = TRUE,
-    n_chains = 1L, threaded = FALSE,
+    n_chains = 1L, threaded = FALSE, seed = NULL,
     adaptive_scheme = c("diagonal", "fullrank"),
     materialize = TRUE) {
 
@@ -59,7 +59,7 @@ pdmp_sample_subsampled <- function(
     d, flow, algorithm, T, t0, t_warmup, flow_mean, flow_cov,
     c0, x0, theta0 = NULL, show_progress,
     sticky = FALSE, can_stick = NULL, model_prior = NULL, parameter_prior = NULL,
-    grid_n, grid_t_max, n_chains, threaded,
+    grid_n, grid_t_max, n_chains, threaded, seed,
     adaptive_scheme = adaptive_scheme
   )
 
@@ -130,6 +130,7 @@ pdmp_sample_subsampled <- function(
     c0 = c0, grid_n = grid_n, grid_t_max = grid_t_max,
     t0 = t0, T = T, t_warmup = t_warmup,
     show_progress = show_progress, n_chains = n_chains, threaded = threaded,
+    seed = seed,
     adaptive_scheme = adaptive_scheme
   );")
   if (is.environment(result)) result <- as.list(result)

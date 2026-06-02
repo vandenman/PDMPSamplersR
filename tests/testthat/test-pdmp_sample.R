@@ -3,7 +3,7 @@
 
 test_that("pdmp_sample runs with a simple normal gradient", {
   skip_on_cran()
-  skip_if_no_julia()
+  skip_if_no_pdmp_julia_backend()
 
   d <- 2
   neg_grad <- function(x) x
@@ -23,7 +23,7 @@ test_that("pdmp_sample runs with a simple normal gradient", {
 
 test_that("pdmp_sample with BouncyParticle flow", {
   skip_on_cran()
-  skip_if_no_julia()
+  skip_if_no_pdmp_julia_backend()
 
   d <- 3
   neg_grad <- function(x) x
@@ -39,7 +39,7 @@ test_that("pdmp_sample with BouncyParticle flow", {
 
 test_that("pdmp_sample with GridThinningStrategy", {
   skip_on_cran()
-  skip_if_no_julia()
+  skip_if_no_pdmp_julia_backend()
 
   d <- 2
   neg_grad <- function(x) x
@@ -57,7 +57,7 @@ test_that("pdmp_sample with GridThinningStrategy", {
 
 test_that("pdmp_sample with multiple chains", {
   skip_on_cran()
-  skip_if_no_julia()
+  skip_if_no_pdmp_julia_backend()
 
   d <- 2
   neg_grad <- function(x) x
@@ -78,7 +78,7 @@ test_that("pdmp_sample with multiple chains", {
 
 test_that("pdmp_sample with a seed returns an identical trace twice", {
   skip_on_cran()
-  skip_if_no_julia()
+  skip_if_no_pdmp_julia_backend()
 
   d <- 2
   neg_grad <- function(x) x
@@ -100,7 +100,7 @@ test_that("pdmp_sample with a seed returns an identical trace twice", {
 
 test_that("pdmp_sample posterior mean is reasonable for standard normal", {
   skip_on_cran()
-  skip_if_no_julia()
+  skip_if_no_pdmp_julia_backend()
 
   d <- 2
   neg_grad <- function(x) x
@@ -120,7 +120,7 @@ test_that("pdmp_sample rejects invalid gradient function", {
 
 test_that("pdmp_sample forwards support-boundary diagnostics", {
   skip_on_cran()
-  skip_if_no_julia()
+  skip_if_no_pdmp_julia_backend()
 
   d <- 2
   neg_grad <- function(x) {
@@ -147,7 +147,7 @@ test_that("pdmp_sample forwards support-boundary diagnostics", {
 
 test_that("pdmp_sample accepts line_search_truncated_refresh for BPS-family flows", {
   skip_on_cran()
-  skip_if_no_julia()
+  skip_if_no_pdmp_julia_backend()
 
   d <- 2
   neg_grad <- function(x) {
@@ -160,7 +160,7 @@ test_that("pdmp_sample accepts line_search_truncated_refresh for BPS-family flow
     neg_grad, d = d, flow = "BouncyParticle",
     algorithm = "GridThinningStrategy", T = 5,
     x0 = c(0, 0), theta0 = c(1, 0), hessian = neg_hess,
-    show_progress = FALSE, materialize = FALSE,
+    show_progress = FALSE, materialize = FALSE, seed = 42,
     support_boundary = support_boundary_control(
       mode = "line_search_truncated_refresh",
       max_refresh_attempts = 200,
@@ -178,7 +178,7 @@ test_that("pdmp_sample accepts line_search_truncated_refresh for BPS-family flow
 
 test_that("pdmp_sample runs with Boomerang flow", {
   skip_on_cran()
-  skip_if_no_julia()
+  skip_if_no_pdmp_julia_backend()
 
   d <- 2
   neg_grad <- function(x) x
@@ -193,7 +193,7 @@ test_that("pdmp_sample runs with Boomerang flow", {
 
 test_that("pdmp_sample runs with AdaptiveBoomerang (diagonal)", {
   skip_on_cran()
-  skip_if_no_julia()
+  skip_if_no_pdmp_julia_backend()
 
   d <- 2
   neg_grad <- function(x) x
@@ -209,7 +209,7 @@ test_that("pdmp_sample runs with AdaptiveBoomerang (diagonal)", {
 
 test_that("pdmp_sample runs with AdaptiveBoomerang (fullrank)", {
   skip_on_cran()
-  skip_if_no_julia()
+  skip_if_no_pdmp_julia_backend()
 
   d <- 2
   neg_grad <- function(x) x
@@ -225,7 +225,7 @@ test_that("pdmp_sample runs with AdaptiveBoomerang (fullrank)", {
 
 test_that("pdmp_sample runs with PreconditionedZigZag", {
   skip_on_cran()
-  skip_if_no_julia()
+  skip_if_no_pdmp_julia_backend()
 
   d <- 2
   neg_grad <- function(x) x
@@ -240,7 +240,7 @@ test_that("pdmp_sample runs with PreconditionedZigZag", {
 
 test_that("pdmp_sample runs with PreconditionedBPS", {
   skip_on_cran()
-  skip_if_no_julia()
+  skip_if_no_pdmp_julia_backend()
 
   d <- 2
   neg_grad <- function(x) x

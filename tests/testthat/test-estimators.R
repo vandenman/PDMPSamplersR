@@ -75,7 +75,7 @@ test_that("estimator methods reject non-pdmp objects", {
 # ─── Continuous-time estimator integration tests ─────────────────────────────
 
 test_that("mean, var, sd produce correct-length output", {
-  skip_if_no_julia()
+  skip_if_no_pdmp_julia_backend()
 
   d <- 3
   neg_grad <- function(x) x
@@ -96,7 +96,7 @@ test_that("mean, var, sd produce correct-length output", {
 })
 
 test_that("cov and cor produce correct-dimension output", {
-  skip_if_no_julia()
+  skip_if_no_pdmp_julia_backend()
 
   d <- 2
   neg_grad <- function(x) x
@@ -113,7 +113,7 @@ test_that("cov and cor produce correct-dimension output", {
 })
 
 test_that("quantile and median return correct types", {
-  skip_if_no_julia()
+  skip_if_no_pdmp_julia_backend()
 
   d <- 2
   neg_grad <- function(x) x
@@ -128,7 +128,7 @@ test_that("quantile and median return correct types", {
 })
 
 test_that("ess returns positive values", {
-  skip_if_no_julia()
+  skip_if_no_pdmp_julia_backend()
 
   d <- 2
   neg_grad <- function(x) x
@@ -141,7 +141,7 @@ test_that("ess returns positive values", {
 })
 
 test_that("cdf returns value in [0, 1]", {
-  skip_if_no_julia()
+  skip_if_no_pdmp_julia_backend()
 
   d <- 2
   neg_grad <- function(x) x
@@ -154,7 +154,7 @@ test_that("cdf returns value in [0, 1]", {
 })
 
 test_that("inclusion_probs returns correct-length output", {
-  skip_if_no_julia()
+  skip_if_no_pdmp_julia_backend()
 
   d <- 2
   neg_grad <- function(x) x
@@ -170,7 +170,7 @@ test_that("inclusion_probs returns correct-length output", {
 # ─── Transformed estimators ─────────────────────────────────────────────────
 
 test_that("mean with lower_transform produces positive values", {
-  skip_if_no_julia()
+  skip_if_no_pdmp_julia_backend()
 
   d <- 2
   neg_grad <- function(x) x
@@ -185,7 +185,7 @@ test_that("mean with lower_transform produces positive values", {
 })
 
 test_that("mean with identity_transform matches unconstrained mean", {
-  skip_if_no_julia()
+  skip_if_no_pdmp_julia_backend()
 
   d <- 2
   neg_grad <- function(x) x
@@ -199,7 +199,7 @@ test_that("mean with identity_transform matches unconstrained mean", {
 })
 
 test_that("var with transforms returns non-negative values", {
-  skip_if_no_julia()
+  skip_if_no_pdmp_julia_backend()
 
   d <- 2
   neg_grad <- function(x) x
@@ -213,7 +213,7 @@ test_that("var with transforms returns non-negative values", {
 })
 
 test_that("quantile with transforms respects monotonicity", {
-  skip_if_no_julia()
+  skip_if_no_pdmp_julia_backend()
 
   d <- 2
   neg_grad <- function(x) x
@@ -231,7 +231,7 @@ test_that("quantile with transforms respects monotonicity", {
 # ─── Discretize ─────────────────────────────────────────────────────────────
 
 test_that("discretize with explicit dt works", {
-  skip_if_no_julia()
+  skip_if_no_pdmp_julia_backend()
 
   d <- 2
   neg_grad <- function(x) x

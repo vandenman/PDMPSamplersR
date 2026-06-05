@@ -1,14 +1,6 @@
 # Integration tests that require Julia to be set up.
 # These tests are skipped if Julia is not available.
 
-if (!exists("with_seed", envir = asNamespace("PDMPSamplersR"), inherits = FALSE) &&
-    requireNamespace("pkgload", quietly = TRUE)) {
-  pkgload::load_all(".", quiet = TRUE)
-}
-
-pdmp_sample <- PDMPSamplersR::pdmp_sample
-with_seed <- get("with_seed", envir = asNamespace("PDMPSamplersR"), inherits = FALSE)
-
 expect_identical_skeleton <- function(result_1, result_2) {
   expect_identical(result_1$skeleton[[1]]$times, result_2$skeleton[[1]]$times)
   expect_identical(result_1$skeleton[[1]]$positions, result_2$skeleton[[1]]$positions)
@@ -16,6 +8,9 @@ expect_identical_skeleton <- function(result_1, result_2) {
 }
 
 test_that("with_seed evaluates code reproducibly and restores R RNG state", {
+
+  with_seed <- get("with_seed", envir = asNamespace("PDMPSamplersR"), inherits = FALSE)
+
   set.seed(2026)
   seed_before <- .Random.seed
   kind_before <- RNGkind()

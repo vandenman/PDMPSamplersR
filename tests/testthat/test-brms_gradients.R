@@ -279,6 +279,12 @@ make_gamma_shape_fe_data <- function(n = 50, seed = 240) {
 # ==============================================================================
 # Gradient test specs (table-driven)
 # ==============================================================================
+if (!requireNamespace("brms", quietly = TRUE)) {
+  test_that("brms gradient tests require brms", {
+    testthat::skip_if_not_installed("brms")
+  })
+} else {
+
 # Each spec defines a gradient test case. The fulldata and subsample loops
 # iterate over these specs to generate test_that blocks automatically.
 #
@@ -850,3 +856,4 @@ test_that("posterior: poisson y ~ x + s(z) (standard)", {
   compare_posteriors(fit_pdmp, fit_stan)
 })
 } # ---- end commented-out posterior tests ----
+}

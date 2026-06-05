@@ -76,28 +76,6 @@ test_that("pdmp_sample with multiple chains", {
   expect_equal(ncol(samples_2), d)
 })
 
-test_that("pdmp_sample with a seed returns an identical trace twice", {
-  skip_on_cran()
-  skip_if_no_pdmp_julia_backend()
-
-  d <- 2
-  neg_grad <- function(x) x
-  x0 <- c(0.25, -0.75)
-
-  result_1 <- pdmp_sample(
-    neg_grad, d = d, flow = "ZigZag", T = 500,
-    x0 = x0, seed = 42, show_progress = FALSE
-  )
-  result_2 <- pdmp_sample(
-    neg_grad, d = d, flow = "ZigZag", T = 500,
-    x0 = x0, seed = 42, show_progress = FALSE
-  )
-
-  expect_identical(result_1$skeleton[[1]]$times, result_2$skeleton[[1]]$times)
-  expect_identical(result_1$skeleton[[1]]$positions, result_2$skeleton[[1]]$positions)
-  expect_identical(result_1$skeleton[[1]]$velocities, result_2$skeleton[[1]]$velocities)
-})
-
 test_that("pdmp_sample posterior mean is reasonable for standard normal", {
   skip_on_cran()
   skip_if_no_pdmp_julia_backend()

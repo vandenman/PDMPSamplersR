@@ -54,9 +54,133 @@ jobs:
       # Force RcppParallel to bypass TBB and use tinythread to avoid segfaults on macOS-latest.
       # Set via GITHUB_ENV so it propagates into R CMD check sub-processes
       # (which may ignore ~/.Renviron under --as-cran).
+      # - name: Configure R environment for macOS
+      #   if: matrix.config.os == 'macOS-latest'
+      #   run: echo 'RCPP_PARALLEL_BACKEND=tinythread' >> "$GITHUB_ENV"
+
       - name: Configure R environment for macOS
         if: matrix.config.os == 'macOS-latest'
-        run: echo 'RCPP_PARALLEL_BACKEND=tinythread' >> "$GITHUB_ENV"
+        shell: bash
+        run: |
+          {
+            echo 'RCPP_PARALLEL_USE_TBB=0'
+            echo 'RCPP_PARALLEL_BACKEND=tinythread'
+          } >> "$GITHUB_ENV"
+
+      - name: Diagnose native package loading on macOS
+        if: matrix.config.os == 'macOS-latest'
+        shell: Rscript {0}
+        run: |
+          cat("=== Environment ===\n")
+          vars <- c(
+            "RCPP_PARALLEL_USE_TBB",
+            "RCPP_PARALLEL_BACKEND",
+            "TBB_NUM_THREADS",
+            "OMP_NUM_THREADS",
+            "OPENBLAS_NUM_THREADS",
+            "MKL_NUM_THREADS",
+            "JULIA_NUM_THREADS"
+          )
+          for (v in vars) {
+            cat(v, "=", Sys.getenv(v, unset = "<unset>"), "\n", sep = "")
+          }
+
+          cat("\n=== Package versions ===\n")
+          pkgs <- c("RcppParallel", "rstan", "StanHeaders", "brms", "JuliaCall", "PDMPSamplersR")
+          for (p in pkgs) {
+            if (requireNamespace(p, quietly = TRUE)) {
+              cat(p, as.character(utils::packageVersion(p)), "\n")
+            } else {
+              cat(p, "<not installed>\n")
+            }
+          }
+
+          print_dlls <- function(stage) {
+            cat("\n=== Loaded DLLs:", stage, "===\n")
+            dlls <- getLoadedDLLs()
+            nms <- names(dlls)
+
+            hits <- grep(
+              "tbb|stan|RcppParallel|julia|JuliaCall|libjulia|tbbmalloc",
+              nms,
+              value = TRUE,
+              ignore.case = TRUE
+            )
+
+            if (!length(hits)) {
+              cat("<none>\n")
+              return(invisible(NULL))
+            }
+
+            for (nm in hits) {
+              path <- tryCatch(dlls[[nm]][["path"]], error = function(e) NA_character_)
+              cat(nm, "=>", path, "\n")
+            }
+
+            invisible(NULL)
+          }
+
+          print_dlls("initial")
+
+          cat("\n=== RcppParallel library directory ===\n")
+          if (requireNamespace("RcppParallel", quietly = TRUE)) {
+            lib <- system.file("lib", package = "RcppParallel")
+            cat("lib dir:", lib, "\n")
+            cat("files matching tbb/thread:\n")
+            print(list.files(lib, pattern = "tbb|thread", full.names = TRUE, ignore.case = TRUE))
+
+            cat("\nLoading RcppParallel...\n")
+            suppressPackageStartupMessages(library(RcppParallel))
+
+            cat("RcppParallel::defaultNumThreads(): ",
+                RcppParallel::defaultNumThreads(), "\n", sep = "")
+
+            RcppParallel::setThreadOptions(numThreads = 1)
+
+            cat("After setThreadOptions(numThreads = 1): ",
+                RcppParallel::defaultNumThreads(), "\n", sep = "")
+
+            cat("RcppParallel::LdFlags():\n")
+            print(RcppParallel::LdFlags())
+          } else {
+            cat("RcppParallel not installed.\n")
+          }
+
+          print_dlls("after RcppParallel")
+
+          cat("\nLoading rstan if installed...\n")
+          if (requireNamespace("rstan", quietly = TRUE)) {
+            suppressPackageStartupMessages(library(rstan))
+          } else {
+            cat("rstan not installed.\n")
+          }
+
+          print_dlls("after rstan")
+
+          cat("\nLoading brms if installed...\n")
+          if (requireNamespace("brms", quietly = TRUE)) {
+            suppressPackageStartupMessages(library(brms))
+          } else {
+            cat("brms not installed.\n")
+          }
+
+          print_dlls("after brms")
+
+          cat("\nLoading JuliaCall if installed...\n")
+          if (requireNamespace("JuliaCall", quietly = TRUE)) {
+            suppressPackageStartupMessages(library(JuliaCall))
+            JuliaCall::julia_setup(installJulia = FALSE)
+          } else {
+            cat("JuliaCall not installed.\n")
+          }
+
+          print_dlls("after JuliaCall")
+
+          cat("\n=== Loaded namespaces of interest ===\n")
+          print(intersect(
+            loadedNamespaces(),
+            c("RcppParallel", "rstan", "StanHeaders", "brms", "JuliaCall", "PDMPSamplersR")
+          ))
 
       - uses: r-lib/actions/check-r-package@v2
         if: matrix.config.os == 'macOS-latest'

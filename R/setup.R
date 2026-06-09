@@ -1,8 +1,46 @@
+get_config <- function(key) {
+  # naming convention mimiced from renv:
+  # 1. If an R option of the form renv.config.<name> is available, then that option's value will be used;
+  # 2. If an environment variable of the form RENV_CONFIG_<NAME> is available, then that option's value will be used;
+  # 3. Otherwise, the default for that particular configuration value is used.
+
+  # this is quite general and only used for the julia project location for now.
+  # note that this function is only used to extract the config value but does not set the default
+
+  lowercasekey <- tolower(key)
+
+  invalid_key <- !startsWith(lowercasekey, "pdmpsamplersr_config_")
+  if (invalid_key) {
+    cli::cli_abort("Invalid config key: {key}. Config keys must start with 'PDMPSAMPLERSR_CONFIG_' or 'pdmpsamplersr_config_'.")
+  }
+
+  value <- getOption(lowercasekey, default = NULL)
+  if (is.null(value)) {
+    value <- Sys.getenv(toupper(key), unset = "")
+    if (value == "") {
+      return(NULL)
+    } else {
+      return(value)
+    }
+  } else {
+    if (!is.character(value) || length(value) != 1) {
+      cli::cli_abort("Invalid config value for {key}: must be a single string.")
+    }
+    return(value)
+  }
+}
+
+
 get_julia_project_dir <- function() {
+  return(get_config("PDMPSAMPLERSR_CONFIG_JULIA_PROJECT_DIR") %||% default_julia_project_dir())
+}
+
+default_julia_project_dir <- function() {
   cache_dir <- fs::path_expand(rappdirs::user_cache_dir("PDMPSamplersR"))
   project_dir <- fs::path(cache_dir, "_juliaProject")
   return(project_dir)
 }
+
 
 julia_project_exists <- function() {
   project_dir <- get_julia_project_dir()

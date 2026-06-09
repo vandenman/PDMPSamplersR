@@ -88,6 +88,7 @@ runs:
         julia --project="$PROJECT_DIR" -e '
           import Pkg
           Pkg.add(url="https://github.com/vandenman/PDMPSamplers.jl")
+          Pkg.add("LinearAlgebra")
           Pkg.add("BridgeStan")
           Pkg.precompile()
           using PDMPSamplers, LinearAlgebra, BridgeStan

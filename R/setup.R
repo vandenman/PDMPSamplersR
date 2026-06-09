@@ -124,7 +124,14 @@ setup_julia_project <- function() {
 
 load_julia_project <- function() {
   project_dir <- get_julia_project_dir()
-  JuliaCall::julia_command(sprintf('Base.active_project() == joinpath("%1$s", "Project.toml") || Pkg.activate("%1$s");', project_dir))
+  JuliaCall::julia_command(sprintf(
+  # ensure pkg is imported as a precaution
+  '
+  begin
+    import Pkg
+    Base.active_project() == joinpath("%1$s", "Project.toml") || Pkg.activate("%1$s");
+  end
+  ', project_dir))
 }
 
 .pdmp_env <- new.env(parent = emptyenv())

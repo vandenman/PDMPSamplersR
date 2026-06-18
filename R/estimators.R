@@ -11,7 +11,7 @@
     )
   check_for_julia_setup()
   if (isTRUE(x$skeleton[[1L]]$sparse)) {
-    JuliaCall::julia_call("r_from_sparse_skeleton",
+    .pdmpsamplers_julia_call("r_from_sparse_skeleton",
       lapply(x$skeleton, `[[`, "initial_time"),
       lapply(x$skeleton, `[[`, "initial_position"),
       lapply(x$skeleton, `[[`, "initial_velocity"),
@@ -23,7 +23,7 @@
       lapply(x$skeleton, `[[`, "mu")
     )
   } else {
-    JuliaCall::julia_call("r_from_skeleton",
+    .pdmpsamplers_julia_call("r_from_skeleton",
       lapply(x$skeleton, `[[`, "times"),
       lapply(x$skeleton, `[[`, "positions"),
       lapply(x$skeleton, `[[`, "velocities"),
@@ -71,9 +71,9 @@ mean.pdmp_result <- function(x, transforms = NULL, chain = 1L, ...) {
   chains <- .ensure_chains(x)
   specs  <- .transform_specs(transforms)
   if (is.null(specs))
-    JuliaCall::julia_call("r_mean", chains, chain = chain)
+    .pdmpsamplers_julia_call("r_mean", chains, chain = chain)
   else
-    JuliaCall::julia_call("r_mean", chains, specs, chain = chain)
+    .pdmpsamplers_julia_call("r_mean", chains, specs, chain = chain)
 }
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -104,9 +104,9 @@ var.pdmp_result <- function(x, transforms = NULL, chain = 1L, ...) {
   chains <- .ensure_chains(x)
   specs  <- .transform_specs(transforms)
   if (is.null(specs))
-    JuliaCall::julia_call("r_var", chains, chain = chain)
+    .pdmpsamplers_julia_call("r_var", chains, chain = chain)
   else
-    JuliaCall::julia_call("r_var", chains, specs, chain = chain)
+    .pdmpsamplers_julia_call("r_var", chains, specs, chain = chain)
 }
 
 #' Standard deviation
@@ -126,9 +126,9 @@ sd.pdmp_result <- function(x, transforms = NULL, chain = 1L, ...) {
   chains <- .ensure_chains(x)
   specs  <- .transform_specs(transforms)
   if (is.null(specs))
-    JuliaCall::julia_call("r_std", chains, chain = chain)
+    .pdmpsamplers_julia_call("r_std", chains, chain = chain)
   else
-    JuliaCall::julia_call("r_std", chains, specs, chain = chain)
+    .pdmpsamplers_julia_call("r_std", chains, specs, chain = chain)
 }
 
 #' Covariance matrix
@@ -150,7 +150,7 @@ cov.default <- function(x, ...) stats::cov(x, ...)
 #' @export
 cov.pdmp_result <- function(x, chain = 1L, ...) {
   .check_pdmp(x)
-  JuliaCall::julia_call("r_cov", .ensure_chains(x), chain = chain)
+  .pdmpsamplers_julia_call("r_cov", .ensure_chains(x), chain = chain)
 }
 
 #' Correlation matrix
@@ -169,7 +169,7 @@ cor.default <- function(x, ...) stats::cor(x, ...)
 #' @export
 cor.pdmp_result <- function(x, chain = 1L, ...) {
   .check_pdmp(x)
-  JuliaCall::julia_call("r_cor", .ensure_chains(x), chain = chain)
+  .pdmpsamplers_julia_call("r_cor", .ensure_chains(x), chain = chain)
 }
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -193,9 +193,9 @@ quantile.pdmp_result <- function(x, probs, transforms = NULL, chain = 1L, coordi
   chains <- .ensure_chains(x)
   specs  <- .transform_specs(transforms)
   if (is.null(specs))
-    JuliaCall::julia_call("r_quantile", chains, probs, chain = chain, coordinate = coordinate)
+    .pdmpsamplers_julia_call("r_quantile", chains, probs, chain = chain, coordinate = coordinate)
   else
-    JuliaCall::julia_call("r_quantile", chains, probs, specs, chain = chain, coordinate = coordinate)
+    .pdmpsamplers_julia_call("r_quantile", chains, probs, specs, chain = chain, coordinate = coordinate)
 }
 
 #' Continuous-time median of PDMP trace
@@ -210,9 +210,9 @@ median.pdmp_result <- function(x, na.rm = FALSE, transforms = NULL, chain = 1L, 
   chains <- .ensure_chains(x)
   specs  <- .transform_specs(transforms)
   if (is.null(specs))
-    JuliaCall::julia_call("r_median", chains, chain = chain, coordinate = coordinate)
+    .pdmpsamplers_julia_call("r_median", chains, chain = chain, coordinate = coordinate)
   else
-    JuliaCall::julia_call("r_median", chains, specs, chain = chain, coordinate = coordinate)
+    .pdmpsamplers_julia_call("r_median", chains, specs, chain = chain, coordinate = coordinate)
 }
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -237,7 +237,7 @@ ess <- function(x, ...) UseMethod("ess")
 #' @export
 ess.pdmp_result <- function(x, chain = 1L, n_batches = 0L, ...) {
   .check_pdmp(x)
-  JuliaCall::julia_call("r_ess", .ensure_chains(x), chain = chain, n_batches = as.integer(n_batches))
+  .pdmpsamplers_julia_call("r_ess", .ensure_chains(x), chain = chain, n_batches = as.integer(n_batches))
 }
 
 #' Empirical CDF
@@ -263,9 +263,9 @@ cdf.pdmp_result <- function(x, q, coordinate, transforms = NULL, chain = 1L, ...
   chains <- .ensure_chains(x)
   specs  <- .transform_specs(transforms)
   if (is.null(specs))
-    JuliaCall::julia_call("r_cdf", chains, q, chain = chain, coordinate = coordinate)
+    .pdmpsamplers_julia_call("r_cdf", chains, q, chain = chain, coordinate = coordinate)
   else
-    JuliaCall::julia_call("r_cdf", chains, q, specs, chain = chain, coordinate = coordinate)
+    .pdmpsamplers_julia_call("r_cdf", chains, q, specs, chain = chain, coordinate = coordinate)
 }
 
 #' Marginal inclusion probabilities
@@ -285,7 +285,7 @@ inclusion_probs <- function(x, ...) UseMethod("inclusion_probs")
 #' @export
 inclusion_probs.pdmp_result <- function(x, chain = 1L, ...) {
   .check_pdmp(x)
-  JuliaCall::julia_call("r_inclusion_probs", .ensure_chains(x), chain = chain)
+  .pdmpsamplers_julia_call("r_inclusion_probs", .ensure_chains(x), chain = chain)
 }
 
 #' Discretize a PDMP trace
@@ -311,7 +311,7 @@ discretize.pdmp_result <- function(x, dt = NULL, chain = 1L, ...) {
   .check_pdmp(x)
   chains <- .ensure_chains(x)
   if (is.null(dt))
-    JuliaCall::julia_call("r_discretize", chains, chain = chain)
+    .pdmpsamplers_julia_call("r_discretize", chains, chain = chain)
   else
-    JuliaCall::julia_call("r_discretize", chains, dt = dt, chain = chain)
+    .pdmpsamplers_julia_call("r_discretize", chains, dt = dt, chain = chain)
 }

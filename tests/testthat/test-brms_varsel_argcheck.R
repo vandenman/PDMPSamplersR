@@ -215,11 +215,8 @@ test_that("brm_pdmp sticky validation uses formula-aware support checks", {
     write_stan_json = function(data, file, always_decimal = FALSE) {
       writeLines("{}", con = file)
     },
+    .pdmpsamplers_julia_eval = function(...) stop("SENTINEL_JULIA_CALL", call. = FALSE),
     .package = "PDMPSamplersR"
-  )
-  testthat::local_mocked_bindings(
-    julia_call = function(...) stop("SENTINEL_JULIA_CALL", call. = FALSE),
-    .package = "JuliaCall"
   )
 
   expect_error(

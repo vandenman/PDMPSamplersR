@@ -39,4 +39,4 @@ Suggests:
     tibble
 Config/testthat/edition: 3
 VignetteBuilder: quarto
-RoxygenNote: 7.3.3
+Config/roxygen2/version: 8.0.0

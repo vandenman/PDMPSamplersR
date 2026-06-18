@@ -89,8 +89,9 @@ diagonal preconditioner during warmup and also require
 
 \item{threaded}{Logical, whether to run chains in parallel (default: FALSE).}
 
-\item{seed}{NULL (default) or a non-negative integer seed passed through to
-Julia's sampler RNG.}
+\item{seed}{NULL (default) or a non-negative integer seed. The seed controls
+Julia's sampler RNG and any generated default initial position when
+\code{x0 = NULL}.}
 
 \item{adaptive_scheme}{Character string, adaptation scheme for AdaptiveBoomerang.
 One of "diagonal" (default, O(d) per update) or "fullrank" (O(d^3) per update,

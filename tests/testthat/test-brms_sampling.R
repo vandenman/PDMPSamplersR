@@ -70,7 +70,8 @@ test_that("brm_pdmp: gaussian y ~ x", {
 
   fit_reference <- brms::brm(y ~ x, data = df, family = gaussian(),
                              chains = 1, iter = 2000, warmup = 1000,
-                             silent = 2, refresh = 0)
+                             backend = brms_backend(), silent = 2,
+                             refresh = 0)
 
   compare_posteriors(fit, fit_reference,
                      tols = c("Estimate" = .15, "Est.Error" = .25,
@@ -100,7 +101,8 @@ test_that("brm_pdmp: logistic regression", {
 
   fit_reference <- brms::brm(y ~ x, data = df, family = brms::bernoulli(),
                              chains = 1, iter = 2000, warmup = 1000,
-                             silent = 2, refresh = 0)
+                             backend = brms_backend(), silent = 2,
+                             refresh = 0)
 
   compare_posteriors(fit, fit_reference,
                      tols = c("Estimate" = .15, "Est.Error" = .25,
@@ -129,7 +131,8 @@ test_that("brm_pdmp: Poisson regression", {
 
   fit_reference <- brms::brm(y ~ x, data = df, family = poisson(),
                              chains = 1, iter = 2000, warmup = 1000,
-                             silent = 2, refresh = 0)
+                             backend = brms_backend(), silent = 2,
+                             refresh = 0)
 
   compare_posteriors(fit, fit_reference,
                      tols = c("Estimate" = .15, "Est.Error" = .25,
@@ -145,6 +148,7 @@ test_that("brm_pdmp: Poisson regression in epileptic patients", {
     data = epilepsy, family = poisson(),
     prior = brms::prior(normal(0, 10), class = b) +
             brms::prior(cauchy(0, 2), class = sd),
+    backend = brms_backend(),
     silent = 2, refresh = 0
   )
 
@@ -206,7 +210,7 @@ test_that("brm_pdmp: compute_lp populates lp__", {
                   compute_lp = TRUE)
 
   expect_s3_class(fit, "brmsfit")
-  lp <- rstan::extract(fit$fit, pars = "lp__")$lp__
+  lp <- posterior::as_draws_df(fit)$lp__
   expect_true(all(is.finite(lp)))
   expect_true(all(lp < 0))
 })

@@ -1,3 +1,25 @@
+with_seed <- function(code, seed = NULL) {
+  if (is.null(seed)) {
+    return(force(code))
+  }
+
+  old_kind <- RNGkind()
+  had_seed <- exists(".Random.seed", envir = .GlobalEnv, mode = "integer", inherits = FALSE)
+  old_seed <- if (had_seed) get(".Random.seed", envir = .GlobalEnv, mode = "integer", inherits = FALSE) else NULL
+
+  on.exit({
+    do.call(RNGkind, as.list(old_kind))
+    if (had_seed) {
+      assign(".Random.seed", old_seed, envir = .GlobalEnv)
+    } else if (exists(".Random.seed", envir = .GlobalEnv, mode = "integer", inherits = FALSE)) {
+      rm(".Random.seed", envir = .GlobalEnv)
+    }
+  }, add = TRUE)
+
+  set.seed(seed)
+  force(code)
+}
+
 # Internal function to validate and prepare common PDMP parameters
 validate_pdmp_params <- function(d, flow, algorithm, T, t0 = 0.0, t_warmup = 0.0,
                                 flow_mean = NULL, flow_cov = NULL, c0 = 1e-2,
@@ -77,7 +99,7 @@ validate_pdmp_params <- function(d, flow, algorithm, T, t0 = 0.0, t_warmup = 0.0
 
   # Validate x0
   if (is.null(x0)) {
-    x0 <- stats::rnorm(d)
+    x0 <- with_seed(stats::rnorm(d), seed = seed)
   } else {
     validate_type(x0, type = "double", n = d)
   }
@@ -236,24 +258,6 @@ validate_support_boundary_control <- function(support_boundary) {
   do.call(support_boundary_control, utils::modifyList(defaults, support_boundary))
 }
 
-rethrow_pdmp_julia_error <- function(err) {
-  msg <- conditionMessage(err)
-  if (grepl("SupportBoundaryError:", msg, fixed = TRUE)) {
-    stop(structure(
-      list(message = msg, call = conditionCall(err), parent = err),
-      class = c("pdmp_support_boundary_error", class(err))
-    ))
-  }
-  stop(err)
-}
-
-eval_pdmp_julia <- function(code) {
-  tryCatch(
-    JuliaCall::julia_eval(code),
-    error = rethrow_pdmp_julia_error
-  )
-}
-
 #' PDMP Sampling
 #'
 #' Performs Piecewise Deterministic Markov Process (PDMP) sampling using the
@@ -292,8 +296,9 @@ eval_pdmp_julia <- function(code) {
 #' @param show_progress Logical, whether to show progress bar (default: TRUE).
 #' @param n_chains Integer, number of chains to run (default: 1).
 #' @param threaded Logical, whether to run chains in parallel (default: FALSE).
-#' @param seed NULL (default) or a non-negative integer seed passed through to
-#'   Julia's sampler RNG.
+#' @param seed NULL (default) or a non-negative integer seed. The seed controls
+#'   Julia's sampler RNG and any generated default initial position when
+#'   \code{x0 = NULL}.
 #' @param adaptive_scheme Character string, adaptation scheme for AdaptiveBoomerang.
 #'   One of "diagonal" (default, O(d) per update) or "fullrank" (O(d^3) per update,
 #'   better for correlated targets). Ignored for other flow types.
@@ -394,7 +399,7 @@ pdmp_sample <- function(f, d,
   JuliaCall::julia_assign("support_boundary_refresh_probe_time", support_boundary$refresh_probe_time)
   JuliaCall::julia_assign("support_boundary_min_safe_time", support_boundary$min_safe_time)
 
-  result <- eval_pdmp_julia("r_pdmp_custom(
+  result <- .pdmpsamplers_julia_eval("r_pdmp_custom(
     grad!, d, x0, flow, algorithm, flow_mean, flow_cov;
     c0 = c0, grid_n = grid_n, grid_t_max = grid_t_max,
     t0 = t0, T = T, t_warmup = t_warmup,
@@ -522,7 +527,7 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
   JuliaCall::julia_assign("support_boundary_refresh_probe_time", support_boundary$refresh_probe_time)
   JuliaCall::julia_assign("support_boundary_min_safe_time", support_boundary$min_safe_time)
 
-  result <- eval_pdmp_julia("r_pdmp_stan(
+  result <- .pdmpsamplers_julia_eval("r_pdmp_stan(
     _pdmp_model, x0, flow, algorithm, flow_mean, flow_cov;
     c0 = c0, grid_n = grid_n, grid_t_max = grid_t_max,
     t0 = t0, T = T, t_warmup = t_warmup,

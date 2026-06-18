@@ -15,20 +15,22 @@ jobs:
     name: ${{ matrix.config.os }} (${{ matrix.config.julia && 'with Julia' || 'no Julia' }})
 
     strategy:
-      fail-fast: false
+      fail-fast: true
       matrix:
         config:
           - {os: ubuntu-latest,  julia: true}
           - {os: ubuntu-latest,  julia: false}
           - {os: macOS-latest,   julia: true}
           - {os: windows-latest, julia: true}
+          # TODO: in the future we should additionally test with
+          # - {os: ubuntu-latest,  julia: true, r: release-1}
+          # - {os: ubuntu-latest,  julia: true, r: release-2}
+          # - {os: ubuntu-latest,  julia: true, r: release, brms: dev}
+          # - {os: ubuntu-latest,  julia: true, PDMPSamplers.jl: dev}
 
     env:
       GITHUB_PAT: ${{ secrets.GITHUB_TOKEN }}
       R_KEEP_PKG_SOURCE: yes
-      # Serialize Julia precompilation to reduce memory pressure on CI runners.
-      # The precompile workload runs real sampling code, which can OOM-kill
-      # parallel workers on resource-constrained runners.
       JULIA_NUM_PRECOMPILE_TASKS: "1"
 
     steps:
@@ -38,12 +40,19 @@ jobs:
         with:
           use-public-rspm: true
 
+      - name: Compute R cache keys
+        if: matrix.config.os == 'macOS-latest'
+        shell: Rscript {0}
+        run: |
+          cat("R_PACKAGE_LIBRARY=", normalizePath(.libPaths()[1], mustWork = FALSE), "\n",
+              sep = "", file = Sys.getenv("GITHUB_ENV"), append = TRUE)
+          cat("R_VERSION=", paste(R.version$major, R.version$minor, sep = "."), "\n",
+              sep = "", file = Sys.getenv("GITHUB_ENV"), append = TRUE)
+
       - uses: r-lib/actions/setup-r-dependencies@v2
         with:
-          # local::. is needed for quarto vignettes on Windows
-          # see https://github.com/quarto-dev/quarto-r/issues/217
-          # JuliaCall dev version needed for libunwind fix (PR #265)
-          # that prevents segfaults on Ubuntu 24.04; CRAN 0.17.6 predates this
+          # local::. is needed for quarto vignettes on Windows.
+          # JuliaCall dev version is needed for the libunwind fix on Ubuntu 24.04.
           extra-packages: any::rcmdcheck, any::BH, any::RcppEigen, github::Non-Contradiction/JuliaCall, local::.
           needs: check
 
@@ -51,12 +60,40 @@ jobs:
         if: matrix.config.julia
         uses: ./.github/actions/setup-julia-r
 
-      # Force RcppParallel to bypass TBB and use tinythread to avoid segfaults on macOS-latest.
-      # Set via GITHUB_ENV so it propagates into R CMD check sub-processes
-      # (which may ignore ~/.Renviron under --as-cran).
-      - name: Configure R environment for macOS
+      - name: Cache cmdstanr and CmdStan on macOS
         if: matrix.config.os == 'macOS-latest'
-        run: echo 'RCPP_PARALLEL_BACKEND=tinythread' >> "$GITHUB_ENV"
+        uses: actions/cache@v5
+        with:
+          path: |
+            ${{ env.R_PACKAGE_LIBRARY }}/cmdstanr
+            ~/.cmdstan
+          key: ${{ runner.os }}-cmdstanr-${{ env.R_VERSION }}-${{ hashFiles('DESCRIPTION', '.github/workflows/R-CMD-check.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-cmdstanr-${{ env.R_VERSION }}-
+            ${{ runner.os }}-cmdstanr-
+
+      - name: Set up cmdstanr backend on macOS
+        if: matrix.config.os == 'macOS-latest'
+        shell: Rscript {0}
+        run: |
+          options(repos = c(
+            stan = "https://mc-stan.org/r-packages/",
+            CRAN = "https://cloud.r-project.org"
+          ))
+
+          if (!requireNamespace("cmdstanr", quietly = TRUE)) {
+            install.packages("cmdstanr")
+          }
+
+          if (is.null(cmdstanr::cmdstan_version(error_on_NA = FALSE))) {
+            cmdstanr::install_cmdstan(cores = 2, overwrite = FALSE, quiet = TRUE)
+          }
+
+          env_file <- Sys.getenv("GITHUB_ENV")
+          cat("PDMPSAMPLERSR_BRMS_BACKEND=cmdstanr\n",
+              file = env_file, append = TRUE)
+          cat("CMDSTAN=", cmdstanr::cmdstan_path(), "\n",
+              sep = "", file = env_file, append = TRUE)
 
       - uses: r-lib/actions/check-r-package@v2
         if: matrix.config.os == 'macOS-latest'

@@ -7,20 +7,30 @@ description: >
 runs:
   using: 'composite'
   steps:
+
     - name: Install Julia
-      uses: julia-actions/setup-julia@v2
+      uses: julia-actions/setup-julia@v3
       with:
         version: '1'
-
-    - name: Cache Julia packages
-      uses: julia-actions/cache@v3
 
     - name: Compute PDMPSamplersR cache path
       shell: Rscript {0}
       run: |
-        p <- rappdirs::user_cache_dir("PDMPSamplersR")
-        cat(sprintf("PDMPSAMPLERSR_CACHE=%s\n", p),
-            file = Sys.getenv("GITHUB_ENV"), append = TRUE)
+        cache_dir <- fs::path_expand(rappdirs::user_cache_dir("PDMPSamplersR"))
+        project_dir <- fs::path(cache_dir, "_juliaProject")
+
+        env_file <- Sys.getenv("GITHUB_ENV")
+
+        cat(sprintf("PDMPSAMPLERSR_CACHE=%s\n", cache_dir),
+            file = env_file, append = TRUE)
+
+        cat(sprintf("PDMPSAMPLERSR_CONFIG_JULIA_PROJECT_DIR=%s\n", project_dir),
+            file = env_file, append = TRUE)
+
+        # Make Julia start in the PDMPSamplersR project from the beginning.
+        # Do not set JULIA_LOAD_PATH globally; it is platform-sensitive and fragile.
+        cat(sprintf("JULIA_PROJECT=%s\n", project_dir),
+            file = env_file, append = TRUE)
 
     - name: Cache PDMPSamplersR artifacts
       uses: actions/cache@v5
@@ -62,6 +72,15 @@ runs:
         writeLines(prefs, prefs_path)
         message("Wrote ", prefs_path, ":\n", prefs)
 
+        # also copy the same preferences file to the project-specific location
+        project_dir <- Sys.getenv("PDMPSAMPLERSR_CONFIG_JULIA_PROJECT_DIR", unset = "")
+        if (nzchar(project_dir)) {
+          dir.create(project_dir, recursive = TRUE, showWarnings = FALSE)
+          project_prefs_path <- file.path(project_dir, "LocalPreferences.toml")
+          file.copy(prefs_path, project_prefs_path, overwrite = TRUE)
+          message("Copied ", prefs_path, " to ", project_prefs_path)
+        }
+
     - name: Install JuliaCall dependencies
       shell: bash
       run: |
@@ -81,12 +100,13 @@ runs:
     - name: Pre-compile Julia project
       shell: bash
       run: |
-        PROJECT_DIR=$(Rscript -e 'cat(path.expand(file.path(rappdirs::user_cache_dir("PDMPSamplersR"), "_juliaProject")))')
+        PROJECT_DIR="${PDMPSAMPLERSR_CONFIG_JULIA_PROJECT_DIR}"
         echo "Julia project directory: $PROJECT_DIR"
         mkdir -p "$PROJECT_DIR"
         julia --project="$PROJECT_DIR" -e '
           import Pkg
           Pkg.add(url="https://github.com/vandenman/PDMPSamplers.jl")
+          Pkg.add("LinearAlgebra")
           Pkg.add("BridgeStan")
           Pkg.precompile()
           using PDMPSamplers, LinearAlgebra, BridgeStan

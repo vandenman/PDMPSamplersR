@@ -21,6 +21,10 @@ is_pdmp_julia_backend_available <- function() {
   }, error = function(e) FALSE))
 }
 
+# run these immediately so they are cached
+is_julia_available()
+is_pdmp_julia_backend_available()
+
 skip_if_no_julia <- function() {
   testthat::skip_if_not(is_julia_available(), "Julia is not available")
 }
@@ -33,9 +37,31 @@ skip_if_no_pdmp_julia_backend <- function() {
   )
 }
 
+brms_backend <- function() {
+  backend <- Sys.getenv("PDMPSAMPLERSR_BRMS_BACKEND", "rstan")
+  if (!backend %in% c("rstan", "cmdstanr")) {
+    stop("Unsupported PDMPSAMPLERSR_BRMS_BACKEND: ", backend, call. = FALSE)
+  }
+  backend
+}
+
+skip_if_no_brms_backend <- function() {
+  if (identical(brms_backend(), "cmdstanr")) {
+    testthat::skip_if_not_installed("cmdstanr")
+
+    cmdstan_available <- cache_get_or_set("cmdstan_available", tryCatch({
+      !is.null(cmdstanr::cmdstan_version(error_on_NA = FALSE))
+    }, error = function(e) FALSE))
+
+    testthat::skip_if_not(cmdstan_available, "CmdStan is not available")
+  } else {
+    testthat::skip_if_not_installed("rstan")
+  }
+}
+
 skip_if_no_brms_setup <- function() {
   testthat::skip_if_not_installed("brms")
-  testthat::skip_if_not_installed("rstan")
+  skip_if_no_brms_backend()
 
   bridge_available <- cache_get_or_set("brms_bridge_setup_available", tryCatch({
     PDMPSamplersR:::check_for_julia_setup()

@@ -258,9 +258,21 @@ function r_from_sparse_skeleton(
             Float64.(event_positions_list[i]),
             Float64.(event_velocities_list[i]),
         )
-        push!(traces, PDMPSamplers.FactorizedTrace(events, flow, initial_state))
+        push!(traces, _r_factorized_trace(events, flow, initial_state))
     end
     PDMPChains(traces, PDMPSamplers.StatisticCounter[])
+end
+
+function _r_factorized_trace(events, flow, initial_state)
+    bounds_cache = Dict{Int, Tuple{Float64, Float64}}()
+    if applicable(PDMPSamplers.FactorizedTrace,
+                  events, flow, initial_state, initial_state, false, bounds_cache)
+        return PDMPSamplers.FactorizedTrace(
+            events, flow, initial_state, initial_state, false, bounds_cache
+        )
+    else
+        return PDMPSamplers.FactorizedTrace(events, flow, initial_state)
+    end
 end
 
 function r_chain_times(chains::PDMPChains; chain::Int)

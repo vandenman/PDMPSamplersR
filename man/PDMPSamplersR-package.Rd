@@ -20,5 +20,10 @@ Useful links:
 \author{
 \strong{Maintainer}: Don van den Bergh \email{d.vandenbergh@uva.nl}
 
+Authors:
+\itemize{
+  \item Don van den Bergh \email{d.vandenbergh@uva.nl}
+}
+
 }
 \keyword{internal}

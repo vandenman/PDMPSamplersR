@@ -258,24 +258,6 @@ validate_support_boundary_control <- function(support_boundary) {
   do.call(support_boundary_control, utils::modifyList(defaults, support_boundary))
 }
 
-rethrow_pdmp_julia_error <- function(err) {
-  msg <- conditionMessage(err)
-  if (grepl("SupportBoundaryError:", msg, fixed = TRUE)) {
-    stop(structure(
-      list(message = msg, call = conditionCall(err), parent = err),
-      class = c("pdmp_support_boundary_error", class(err))
-    ))
-  }
-  stop(err)
-}
-
-eval_pdmp_julia <- function(code) {
-  tryCatch(
-    JuliaCall::julia_eval(code),
-    error = rethrow_pdmp_julia_error
-  )
-}
-
 #' PDMP Sampling
 #'
 #' Performs Piecewise Deterministic Markov Process (PDMP) sampling using the
@@ -417,7 +399,7 @@ pdmp_sample <- function(f, d,
   JuliaCall::julia_assign("support_boundary_refresh_probe_time", support_boundary$refresh_probe_time)
   JuliaCall::julia_assign("support_boundary_min_safe_time", support_boundary$min_safe_time)
 
-  result <- eval_pdmp_julia("r_pdmp_custom(
+  result <- .pdmpsamplers_julia_eval("r_pdmp_custom(
     grad!, d, x0, flow, algorithm, flow_mean, flow_cov;
     c0 = c0, grid_n = grid_n, grid_t_max = grid_t_max,
     t0 = t0, T = T, t_warmup = t_warmup,
@@ -545,7 +527,7 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
   JuliaCall::julia_assign("support_boundary_refresh_probe_time", support_boundary$refresh_probe_time)
   JuliaCall::julia_assign("support_boundary_min_safe_time", support_boundary$min_safe_time)
 
-  result <- eval_pdmp_julia("r_pdmp_stan(
+  result <- .pdmpsamplers_julia_eval("r_pdmp_stan(
     _pdmp_model, x0, flow, algorithm, flow_mean, flow_cov;
     c0 = c0, grid_n = grid_n, grid_t_max = grid_t_max,
     t0 = t0, T = T, t_warmup = t_warmup,

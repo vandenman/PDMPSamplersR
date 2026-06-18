@@ -4,14 +4,14 @@
 # helpers, rewrite functions, brm_stancode/standata API surface, data
 # subsetting helpers, and snapshot regression tests.
 #
-# Gated by skip_on_cran() — the tests need brms + rstan but not Julia.
+# Gated by skip_on_cran() -- the tests need brms and a Stan backend but not Julia.
 
 require(PDMPSamplersR, quietly = TRUE)
 
 skip_if_no_brms <- function() {
   testthat::skip_on_cran()
   testthat::skip_if_not_installed("brms")
-  testthat::skip_if_not_installed("rstan")
+  skip_if_no_brms_backend()
 }
 
 # -- Family helpers ------------------------------------------------------------

@@ -31,21 +31,21 @@ materialize <- function(x) {
   .check_pdmp(x)
   chains <- if (!is.null(x$chains)) x$chains else .ensure_chains(x)
   n <- x$n_chains
-  is_factorized <- JuliaCall::julia_call("r_chain_is_factorized", chains, chain = 1L)
+  is_factorized <- .pdmpsamplers_julia_call("r_chain_is_factorized", chains, chain = 1L)
   x$skeleton <- if (is_factorized) {
     lapply(seq_len(n), function(i) {
       i_int <- as.integer(i)
       list(
         sparse             = TRUE,
-        initial_time       = JuliaCall::julia_call("r_chain_sparse_initial_time",      chains, chain = i_int),
-        initial_position   = JuliaCall::julia_call("r_chain_sparse_initial_position",  chains, chain = i_int),
-        initial_velocity   = JuliaCall::julia_call("r_chain_sparse_initial_velocity",  chains, chain = i_int),
-        event_indices      = JuliaCall::julia_call("r_chain_sparse_event_indices",     chains, chain = i_int),
-        event_times        = JuliaCall::julia_call("r_chain_sparse_event_times",       chains, chain = i_int),
-        event_positions    = JuliaCall::julia_call("r_chain_sparse_event_positions",   chains, chain = i_int),
-        event_velocities   = JuliaCall::julia_call("r_chain_sparse_event_velocities",  chains, chain = i_int),
-        is_boomerang       = JuliaCall::julia_call("r_chain_is_boomerang",             chains, chain = i_int),
-        mu                 = JuliaCall::julia_call("r_chain_mu",                       chains, chain = i_int)
+        initial_time       = .pdmpsamplers_julia_call("r_chain_sparse_initial_time",      chains, chain = i_int),
+        initial_position   = .pdmpsamplers_julia_call("r_chain_sparse_initial_position",  chains, chain = i_int),
+        initial_velocity   = .pdmpsamplers_julia_call("r_chain_sparse_initial_velocity",  chains, chain = i_int),
+        event_indices      = .pdmpsamplers_julia_call("r_chain_sparse_event_indices",     chains, chain = i_int),
+        event_times        = .pdmpsamplers_julia_call("r_chain_sparse_event_times",       chains, chain = i_int),
+        event_positions    = .pdmpsamplers_julia_call("r_chain_sparse_event_positions",   chains, chain = i_int),
+        event_velocities   = .pdmpsamplers_julia_call("r_chain_sparse_event_velocities",  chains, chain = i_int),
+        is_boomerang       = .pdmpsamplers_julia_call("r_chain_is_boomerang",             chains, chain = i_int),
+        mu                 = .pdmpsamplers_julia_call("r_chain_mu",                       chains, chain = i_int)
       )
     })
   } else {
@@ -53,12 +53,12 @@ materialize <- function(x) {
       i_int <- as.integer(i)
       list(
         sparse        = FALSE,
-        times         = JuliaCall::julia_call("r_chain_times",                chains, chain = i_int),
-        positions     = JuliaCall::julia_call("r_chain_positions",            chains, chain = i_int),
-        velocities    = JuliaCall::julia_call("r_chain_velocities",           chains, chain = i_int),
-        is_boomerang  = JuliaCall::julia_call("r_chain_is_boomerang",         chains, chain = i_int),
-        is_mutable    = JuliaCall::julia_call("r_chain_is_mutable_boomerang", chains, chain = i_int),
-        mu            = JuliaCall::julia_call("r_chain_mu",                   chains, chain = i_int)
+        times         = .pdmpsamplers_julia_call("r_chain_times",                chains, chain = i_int),
+        positions     = .pdmpsamplers_julia_call("r_chain_positions",            chains, chain = i_int),
+        velocities    = .pdmpsamplers_julia_call("r_chain_velocities",           chains, chain = i_int),
+        is_boomerang  = .pdmpsamplers_julia_call("r_chain_is_boomerang",         chains, chain = i_int),
+        is_mutable    = .pdmpsamplers_julia_call("r_chain_is_mutable_boomerang", chains, chain = i_int),
+        mu            = .pdmpsamplers_julia_call("r_chain_mu",                   chains, chain = i_int)
       )
     })
   }

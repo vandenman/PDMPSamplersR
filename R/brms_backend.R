@@ -308,7 +308,7 @@ brm_pdmp <- function(
     )
 
     data_for_names <- if (subsampled) data_full_file else data_file
-    unc_names <- JuliaCall::julia_call(
+    unc_names <- .pdmpsamplers_julia_call(
       "r_get_param_unc_names",
       normalizePath(stan_file, mustWork = TRUE),
       normalizePath(data_for_names, mustWork = TRUE)
@@ -325,7 +325,7 @@ brm_pdmp <- function(
   }
 
   if (subsampled) {
-    jl_result <- JuliaCall::julia_call(
+    jl_result <- .pdmpsamplers_julia_call(
       "r_pdmp_brms_subsampled",
       normalizePath(stan_file, mustWork = TRUE),
       normalizePath(stan_file_ext, mustWork = TRUE),
@@ -362,7 +362,7 @@ brm_pdmp <- function(
       parameter_prior = sticky_args$parameter_prior
     )
   } else {
-    jl_result <- JuliaCall::julia_call(
+    jl_result <- .pdmpsamplers_julia_call(
       "r_pdmp_stan_for_brms",
       normalizePath(stan_file, mustWork = TRUE),
       normalizePath(data_file, mustWork = TRUE),

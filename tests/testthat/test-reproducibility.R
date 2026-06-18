@@ -108,3 +108,4 @@ test_that("pdmp_sample seed controls default x0 without advancing R's RNG", {
   expect_identical(seed_after, seed_before)
   expect_identical_skeleton(result_1, result_2)
 })
+

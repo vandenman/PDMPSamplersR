@@ -35,7 +35,7 @@ ensure_gradient_helper <- function() {
 eval_gradient <- function(stan_file, data_json, theta = numeric(0),
                           hpp_path = "", indices_0based = integer(0)) {
   ensure_gradient_helper()
-  JuliaCall::julia_call(
+  .pdmpsamplers_julia_call(
     "r_eval_stan_gradient",
     normalizePath(stan_file, mustWork = TRUE),
     normalizePath(data_json, mustWork = TRUE),
@@ -635,7 +635,7 @@ test_that("posterior: gaussian y ~ x (standard)", {
                        flow = "ZigZag", T = 50000, show_progress = FALSE)
   fit_stan <- brms::brm(y ~ x, data = df, family = gaussian(),
                         chains = 2, iter = 2000, warmup = 1000,
-                        silent = 2, refresh = 0)
+                        backend = brms_backend(), silent = 2, refresh = 0)
   compare_posteriors(fit_pdmp, fit_stan)
 })
 
@@ -647,7 +647,7 @@ test_that("posterior: gaussian y ~ x (subsampled)", {
                       show_progress = FALSE, subsample_size = 20L)
   fit_stan <- brms::brm(y ~ x, data = df, family = gaussian(),
                         chains = 2, iter = 2000, warmup = 1000,
-                        silent = 2, refresh = 0)
+                        backend = brms_backend(), silent = 2, refresh = 0)
   compare_posteriors(fit_sub, fit_stan, tol_est = 0.15, tol_se = 0.25,
                      tol_ci = 0.25)
 })
@@ -659,7 +659,7 @@ test_that("posterior: bernoulli y ~ x (standard)", {
                        flow = "ZigZag", T = 50000, show_progress = FALSE)
   fit_stan <- brms::brm(y ~ x, data = df, family = brms::bernoulli(),
                         chains = 2, iter = 2000, warmup = 1000,
-                        silent = 2, refresh = 0)
+                        backend = brms_backend(), silent = 2, refresh = 0)
   compare_posteriors(fit_pdmp, fit_stan)
 })
 
@@ -671,7 +671,7 @@ test_that("posterior: bernoulli y ~ x (subsampled)", {
                       show_progress = FALSE, subsample_size = 25L)
   fit_stan <- brms::brm(y ~ x, data = df, family = brms::bernoulli(),
                         chains = 2, iter = 2000, warmup = 1000,
-                        silent = 2, refresh = 0)
+                        backend = brms_backend(), silent = 2, refresh = 0)
   compare_posteriors(fit_sub, fit_stan, tol_est = 0.15, tol_se = 0.25,
                      tol_ci = 0.25)
 })
@@ -683,7 +683,7 @@ test_that("posterior: poisson y ~ x (standard)", {
                        flow = "ZigZag", T = 50000, show_progress = FALSE)
   fit_stan <- brms::brm(y ~ x, data = df, family = poisson(),
                         chains = 2, iter = 2000, warmup = 1000,
-                        silent = 2, refresh = 0)
+                        backend = brms_backend(), silent = 2, refresh = 0)
   compare_posteriors(fit_pdmp, fit_stan)
 })
 
@@ -695,7 +695,7 @@ test_that("posterior: poisson y ~ x (subsampled)", {
                       show_progress = FALSE, subsample_size = 25L)
   fit_stan <- brms::brm(y ~ x, data = df, family = poisson(),
                         chains = 2, iter = 2000, warmup = 1000,
-                        silent = 2, refresh = 0)
+                        backend = brms_backend(), silent = 2, refresh = 0)
   compare_posteriors(fit_sub, fit_stan, tol_est = 0.15, tol_se = 0.25,
                      tol_ci = 0.25)
 })
@@ -708,7 +708,7 @@ test_that("posterior: negbinomial y ~ x (standard)", {
                        show_progress = FALSE)
   fit_stan <- brms::brm(y ~ x, data = df, family = brms::negbinomial(),
                         chains = 2, iter = 2000, warmup = 1000,
-                        silent = 2, refresh = 0)
+                        backend = brms_backend(), silent = 2, refresh = 0)
   compare_posteriors(fit_pdmp, fit_stan)
 })
 
@@ -720,7 +720,7 @@ test_that("posterior: negbinomial y ~ x (subsampled)", {
                       show_progress = FALSE, subsample_size = 25L)
   fit_stan <- brms::brm(y ~ x, data = df, family = brms::negbinomial(),
                         chains = 2, iter = 2000, warmup = 1000,
-                        silent = 2, refresh = 0)
+                        backend = brms_backend(), silent = 2, refresh = 0)
   compare_posteriors(fit_sub, fit_stan, tol_est = 0.15, tol_se = 0.25,
                      tol_ci = 0.25)
 })
@@ -733,7 +733,7 @@ test_that("posterior: gaussian y ~ s(x) (standard)", {
                        show_progress = FALSE)
   fit_stan <- brms::brm(y ~ s(x, k = 5), data = df, family = gaussian(),
                         chains = 2, iter = 2000, warmup = 1000,
-                        silent = 2, refresh = 0)
+                        backend = brms_backend(), silent = 2, refresh = 0)
   compare_posteriors(fit_pdmp, fit_stan)
 })
 
@@ -745,7 +745,7 @@ test_that("posterior: gaussian y ~ s(x) (subsampled)", {
                       show_progress = FALSE, subsample_size = 25L)
   fit_stan <- brms::brm(y ~ s(x, k = 5), data = df, family = gaussian(),
                         chains = 2, iter = 2000, warmup = 1000,
-                        silent = 2, refresh = 0)
+                        backend = brms_backend(), silent = 2, refresh = 0)
   compare_posteriors(fit_sub, fit_stan, tol_est = 0.15, tol_se = 0.25,
                      tol_ci = 0.25)
 })
@@ -758,7 +758,7 @@ test_that("posterior: gaussian y ~ x + s(z) (standard)", {
                        show_progress = FALSE)
   fit_stan <- brms::brm(y ~ x + s(z, k = 5), data = df, family = gaussian(),
                         chains = 2, iter = 2000, warmup = 1000,
-                        silent = 2, refresh = 0)
+                        backend = brms_backend(), silent = 2, refresh = 0)
   compare_posteriors(fit_pdmp, fit_stan)
 })
 
@@ -770,7 +770,7 @@ test_that("posterior: gaussian y ~ x + s(z) (subsampled)", {
                       show_progress = FALSE, subsample_size = 25L)
   fit_stan <- brms::brm(y ~ x + s(z, k = 5), data = df, family = gaussian(),
                         chains = 2, iter = 2000, warmup = 1000,
-                        silent = 2, refresh = 0)
+                        backend = brms_backend(), silent = 2, refresh = 0)
   compare_posteriors(fit_sub, fit_stan, tol_est = 0.15, tol_se = 0.25,
                      tol_ci = 0.25)
 })
@@ -783,7 +783,7 @@ test_that("posterior: gaussian y ~ gp(x) (standard)", {
                        show_progress = FALSE)
   fit_stan <- brms::brm(y ~ gp(x), data = df, family = gaussian(),
                         chains = 2, iter = 2000, warmup = 1000,
-                        silent = 2, refresh = 0)
+                        backend = brms_backend(), silent = 2, refresh = 0)
   compare_posteriors(fit_pdmp, fit_stan)
 })
 
@@ -795,7 +795,7 @@ test_that("posterior: gaussian y ~ gp(x) (subsampled)", {
                       show_progress = FALSE, subsample_size = 15L)
   fit_stan <- brms::brm(y ~ gp(x), data = df, family = gaussian(),
                         chains = 2, iter = 2000, warmup = 1000,
-                        silent = 2, refresh = 0)
+                        backend = brms_backend(), silent = 2, refresh = 0)
   compare_posteriors(fit_sub, fit_stan, tol_est = 0.15, tol_se = 0.25,
                      tol_ci = 0.25)
 })
@@ -810,7 +810,7 @@ test_that("posterior: gaussian y ~ x + s(z) + gp(w) (standard)", {
   fit_stan <- brms::brm(y ~ x + s(z, k = 5) + gp(w), data = df,
                         family = gaussian(),
                         chains = 2, iter = 2000, warmup = 1000,
-                        silent = 2, refresh = 0)
+                        backend = brms_backend(), silent = 2, refresh = 0)
   compare_posteriors(fit_pdmp, fit_stan, tol_est = 0.15, tol_se = 0.25,
                      tol_ci = 0.25)
 })
@@ -825,7 +825,7 @@ test_that("posterior: gaussian y ~ x + s(z) + gp(w) (subsampled)", {
   fit_stan <- brms::brm(y ~ x + s(z, k = 5) + gp(w), data = df,
                         family = gaussian(),
                         chains = 2, iter = 2000, warmup = 1000,
-                        silent = 2, refresh = 0)
+                        backend = brms_backend(), silent = 2, refresh = 0)
   compare_posteriors(fit_sub, fit_stan, tol_est = 0.20, tol_se = 0.30,
                      tol_ci = 0.30)
 })
@@ -840,7 +840,7 @@ test_that("posterior: bernoulli y ~ s(x) (standard)", {
   fit_stan <- brms::brm(y ~ s(x, k = 5), data = df,
                         family = brms::bernoulli(),
                         chains = 2, iter = 2000, warmup = 1000,
-                        silent = 2, refresh = 0)
+                        backend = brms_backend(), silent = 2, refresh = 0)
   compare_posteriors(fit_pdmp, fit_stan)
 })
 
@@ -852,7 +852,7 @@ test_that("posterior: poisson y ~ x + s(z) (standard)", {
                        show_progress = FALSE)
   fit_stan <- brms::brm(y ~ x + s(z, k = 5), data = df, family = poisson(),
                         chains = 2, iter = 2000, warmup = 1000,
-                        silent = 2, refresh = 0)
+                        backend = brms_backend(), silent = 2, refresh = 0)
   compare_posteriors(fit_pdmp, fit_stan)
 })
 } # ---- end commented-out posterior tests ----

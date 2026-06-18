@@ -16,3 +16,7 @@ Useful links:
 ## Author
 
 **Maintainer**: Don van den Bergh <d.vandenbergh@uva.nl>
+
+Authors:
+
+- Don van den Bergh <d.vandenbergh@uva.nl>

@@ -147,8 +147,9 @@ pdmp_sample(
 
 - seed:
 
-  NULL (default) or a non-negative integer seed passed through to
-  Julia's sampler RNG.
+  NULL (default) or a non-negative integer seed. The seed controls
+  Julia's sampler RNG and any generated default initial position when
+  `x0 = NULL`.
 
 - adaptive_scheme:
 

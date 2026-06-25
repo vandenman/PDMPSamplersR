@@ -48,6 +48,19 @@ julia_project_exists <- function() {
 }
 
 ensure_julia_runtime <- function(verbose = FALSE) {
+  # Ensure Julia is started with enough threads for parallel chains.
+  # JULIA_NUM_THREADS is only read on first initialization; setting it
+  # after Julia is already running has no effect.
+  # TODO: this works in theory but causes segfaults for Stan models.
+  # that needs fixes in PDMPSamplers.jl to work.
+  # if (Sys.getenv("JULIA_NUM_THREADS") == "") {
+  #   n_threads <- as.character(
+  #     getOption("PDMPSamplersR.n_threads",
+  #               default = max(2L, parallel::detectCores(logical = FALSE)))
+  #   )
+  #   Sys.setenv("JULIA_NUM_THREADS" = n_threads)
+  # }
+
   if (verbose) {
     JuliaCall::julia_setup(verbose = TRUE)
   } else {

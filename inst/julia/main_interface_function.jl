@@ -404,6 +404,7 @@ function r_pdmp_stan(
         c0::Float64 = 1e-2,
         grid_n::Int = 30,
         grid_t_max::Float64 = 2.0,
+        post_warmup_simplify::Bool = true,
         t0::Float64 = 0.0,
         T::Float64 = 10000.0,
         t_warmup::Float64 = 0.0,
@@ -430,7 +431,7 @@ function r_pdmp_stan(
 
     prec = _to_precision(flow_cov, d)
     flow = build_flow(flow_type, prec, flow_mean; adaptive_scheme)
-    alg0 = build_algorithm(algorithm_type; c0, d, grid_n, grid_t_max)
+    alg0 = build_algorithm(algorithm_type; c0, d, grid_n, grid_t_max, post_warmup_simplify)
     alg = wrap_sticky(alg0, sticky, model_prior, parameter_prior, can_stick)
 
     sbopts = SupportBoundaryOptions(;
@@ -463,6 +464,7 @@ function r_pdmp_custom(
         c0::Float64 = 1e-2,
         grid_n::Int = 30,
         grid_t_max::Float64 = 2.0,
+        post_warmup_simplify::Bool = true,
         t0::Float64 = 0.0,
         T::Float64 = 10000.0,
         t_warmup::Float64 = 0.0,
@@ -507,7 +509,7 @@ function r_pdmp_custom(
 
     prec = _to_precision(flow_cov, d)
     flow = build_flow(flow_type, prec, flow_mean; adaptive_scheme)
-    alg0 = build_algorithm(algorithm_type; c0, d, grid_n, grid_t_max)
+    alg0 = build_algorithm(algorithm_type; c0, d, grid_n, grid_t_max, post_warmup_simplify)
     alg = wrap_sticky(alg0, sticky, model_prior, parameter_prior, can_stick)
 
     sbopts = SupportBoundaryOptions(;
@@ -549,6 +551,7 @@ function r_pdmp_custom_subsampled(
         c0::Float64 = 1e-2,
         grid_n::Int = 30,
         grid_t_max::Float64 = 2.0,
+        post_warmup_simplify::Bool = true,
         t0::Float64 = 0.0,
         T::Float64 = 10000.0,
         t_warmup::Float64 = 0.0,
@@ -604,7 +607,7 @@ function r_pdmp_custom_subsampled(
     prec = isempty(flow_cov) ? Diagonal(ones(d)) : _to_precision(flow_cov, d)
     fmean = isempty(flow_mean) ? zeros(d) : flow_mean
     flow = build_flow(flow_type, prec, fmean; adaptive_scheme)
-    alg = build_algorithm(algorithm_type; c0, d, grid_n, grid_t_max)
+    alg = build_algorithm(algorithm_type; c0, d, grid_n, grid_t_max, post_warmup_simplify)
 
     chains = pdmp_sample(x0, flow, model, alg, t0, T, t_warmup;
                          progress = show_progress, n_chains, threaded, seed)

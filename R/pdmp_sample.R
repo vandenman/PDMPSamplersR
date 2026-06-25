@@ -26,6 +26,7 @@ validate_pdmp_params <- function(d, flow, algorithm, T, t0 = 0.0, t_warmup = 0.0
                                 x0 = NULL, theta0 = NULL, show_progress = TRUE,
                                 sticky = FALSE, can_stick = NULL, model_prior = NULL, parameter_prior = NULL,
                                 grid_n = 30, grid_t_max = 2.0,
+                                post_warmup_simplify = TRUE,
                                 n_chains = 1L, threaded = FALSE, seed = NULL,
                                 adaptive_scheme = "diagonal") {
 
@@ -142,6 +143,7 @@ validate_pdmp_params <- function(d, flow, algorithm, T, t0 = 0.0, t_warmup = 0.0
   grid_n <- cast_integer(grid_n, n = 1)
   validate_type(grid_n, type = "integer", n = 1, positive = TRUE)
   validate_type(grid_t_max, type = "double", n = 1, positive = TRUE)
+  validate_type(post_warmup_simplify, type = "logical", n = 1)
 
   return(list(
     d = d, flow = flow, algorithm = algorithm, T = T, t0 = t0, t_warmup = t_warmup,
@@ -149,6 +151,7 @@ validate_pdmp_params <- function(d, flow, algorithm, T, t0 = 0.0, t_warmup = 0.0
     x0 = x0, theta0 = theta0, show_progress = show_progress,
     sticky = sticky, can_stick = can_stick, model_prior = model_prior, parameter_prior = parameter_prior,
     grid_n = grid_n, grid_t_max = grid_t_max,
+    post_warmup_simplify = post_warmup_simplify,
     n_chains = n_chains, threaded = threaded, seed = seed,
     adaptive_scheme = adaptive_scheme
   ))
@@ -293,6 +296,9 @@ validate_support_boundary_control <- function(support_boundary) {
 #' @param parameter_prior Numeric vector of length d, prior parameters for sticky sampling (default: NULL).
 #' @param grid_n Integer, number of grid points for GridThinningStrategy (default: 30).
 #' @param grid_t_max Numeric, maximum time for grid in GridThinningStrategy (default: 2.0).
+#' @param post_warmup_simplify Logical. If \code{TRUE}, the grid-thinning
+#'   strategy may switch to a constant bound after warmup, reducing
+#'   gradient calls during the main sampling phase.
 #' @param show_progress Logical, whether to show progress bar (default: TRUE).
 #' @param n_chains Integer, number of chains to run (default: 1).
 #' @param threaded Logical, whether to run chains in parallel (default: FALSE).
@@ -324,6 +330,7 @@ pdmp_sample <- function(f, d,
                         hessian = NULL,
                         sticky = FALSE, can_stick = NULL, model_prior = NULL, parameter_prior = NULL,
                         grid_n = 30, grid_t_max = 2.0,
+                        post_warmup_simplify = FALSE,
                         show_progress = TRUE,
                         n_chains = 1L, threaded = FALSE, seed = NULL,
                         adaptive_scheme = c("diagonal", "fullrank"),
@@ -342,7 +349,8 @@ pdmp_sample <- function(f, d,
   params <- validate_pdmp_params(d, flow, algorithm, T, t0, t_warmup, flow_mean, flow_cov,
                                 c0, x0, theta0, show_progress,
                                 sticky, can_stick, model_prior, parameter_prior,
-                                grid_n, grid_t_max, n_chains, threaded, seed,
+                                grid_n, grid_t_max, post_warmup_simplify,
+                                n_chains, threaded, seed,
                                 adaptive_scheme = adaptive_scheme)
 
   # Test the function with a sample input
@@ -402,6 +410,7 @@ pdmp_sample <- function(f, d,
   result <- .pdmpsamplers_julia_eval("r_pdmp_custom(
     grad!, d, x0, flow, algorithm, flow_mean, flow_cov;
     c0 = c0, grid_n = grid_n, grid_t_max = grid_t_max,
+    post_warmup_simplify = post_warmup_simplify,
     t0 = t0, T = T, t_warmup = t_warmup,
     hessian = hessian_f,
     sticky = sticky, can_stick = can_stick,
@@ -460,6 +469,7 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
                         x0 = NULL, theta0 = NULL,
                         sticky = FALSE, can_stick = NULL, model_prior = NULL, parameter_prior = NULL,
                         grid_n = 30, grid_t_max = 2.0,
+                        post_warmup_simplify = FALSE,
                         show_progress = TRUE,
                         n_chains = 1L, threaded = FALSE, seed = NULL,
                         adaptive_scheme = c("diagonal", "fullrank"),
@@ -510,7 +520,8 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
   params <- validate_pdmp_params(d, flow, algorithm, T, t0, t_warmup, flow_mean, flow_cov,
                                  c0, x0, theta0, show_progress,
                                  sticky, can_stick, model_prior, parameter_prior,
-                                 grid_n, grid_t_max, n_chains, threaded, seed,
+                                 grid_n, grid_t_max, post_warmup_simplify,
+                                 n_chains, threaded, seed,
                                  adaptive_scheme = adaptive_scheme)
 
   support_boundary <- validate_support_boundary_control(support_boundary)
@@ -530,6 +541,7 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
   result <- .pdmpsamplers_julia_eval("r_pdmp_stan(
     _pdmp_model, x0, flow, algorithm, flow_mean, flow_cov;
     c0 = c0, grid_n = grid_n, grid_t_max = grid_t_max,
+    post_warmup_simplify = post_warmup_simplify,
     t0 = t0, T = T, t_warmup = t_warmup,
     sticky = sticky, can_stick = can_stick,
     model_prior = model_prior, parameter_prior = parameter_prior,

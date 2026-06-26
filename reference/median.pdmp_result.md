@@ -6,7 +6,14 @@ Continuous-time median of PDMP trace
 
 ``` r
 # S3 method for class 'pdmp_result'
-median(x, na.rm = FALSE, transforms = NULL, chain = 1L, coordinate = -1L, ...)
+median(
+  x,
+  na.rm = FALSE,
+  transforms = NULL,
+  chain = NULL,
+  coordinate = -1L,
+  ...
+)
 ```
 
 ## Arguments
@@ -26,7 +33,8 @@ median(x, na.rm = FALSE, transforms = NULL, chain = 1L, coordinate = -1L, ...)
 
 - chain:
 
-  Integer, which chain to use (default: 1).
+  Integer, which chain to use, or `NULL` to pool across all chains
+  (default: `NULL`).
 
 - coordinate:
 

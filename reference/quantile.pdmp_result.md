@@ -1,12 +1,13 @@
 # Continuous-time quantile of PDMP trace
 
-Continuous-time quantile of PDMP trace
+When `chain = NULL`, per-chain quantiles are averaged pointwise across
+chains.
 
 ## Usage
 
 ``` r
 # S3 method for class 'pdmp_result'
-quantile(x, probs, transforms = NULL, chain = 1L, coordinate = -1L, ...)
+quantile(x, probs, transforms = NULL, chain = NULL, coordinate = -1L, ...)
 ```
 
 ## Arguments
@@ -17,7 +18,7 @@ quantile(x, probs, transforms = NULL, chain = 1L, coordinate = -1L, ...)
 
 - probs:
 
-  Numeric scalar in (0, 1).
+  Numeric vector of probabilities in (0, 1).
 
 - transforms:
 
@@ -25,7 +26,8 @@ quantile(x, probs, transforms = NULL, chain = 1L, coordinate = -1L, ...)
 
 - chain:
 
-  Integer, which chain to use (default: 1).
+  Integer, which chain to use, or `NULL` to pool across all chains
+  (default: `NULL`).
 
 - coordinate:
 
@@ -37,4 +39,5 @@ quantile(x, probs, transforms = NULL, chain = 1L, coordinate = -1L, ...)
 
 ## Value
 
-Numeric vector or scalar.
+Numeric matrix (`length(probs)` x d) when `coordinate = -1`, or a
+numeric vector of length `length(probs)` for a single coordinate.

@@ -9,7 +9,7 @@ spent away from zero.
 inclusion_probs(x, ...)
 
 # S3 method for class 'pdmp_result'
-inclusion_probs(x, chain = 1L, ...)
+inclusion_probs(x, chain = NULL, ...)
 ```
 
 ## Arguments
@@ -24,7 +24,8 @@ inclusion_probs(x, chain = 1L, ...)
 
 - chain:
 
-  Integer, which chain to use (default: 1).
+  Integer, which chain to use, or `NULL` to average across all chains
+  (default: `NULL`).
 
 ## Value
 

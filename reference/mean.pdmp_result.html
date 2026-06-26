@@ -50,7 +50,7 @@ When <code>transforms</code> is supplied, returns the mean of constrained
     <div class="section level2">
     <h2 id="ref-usage">Usage<a class="anchor" aria-label="anchor" href="#ref-usage"></a></h2>
     <div class="sourceCode"><pre class="sourceCode r"><code><span><span class="co"># S3 method for class 'pdmp_result'</span></span>
-<span><span class="fu"><a href="https://rdrr.io/r/base/mean.html" class="external-link">mean</a></span><span class="op">(</span><span class="va">x</span>, transforms <span class="op">=</span> <span class="cn">NULL</span>, chain <span class="op">=</span> <span class="fl">1L</span>, <span class="va">...</span><span class="op">)</span></span></code></pre></div>
+<span><span class="fu"><a href="https://rdrr.io/r/base/mean.html" class="external-link">mean</a></span><span class="op">(</span><span class="va">x</span>, transforms <span class="op">=</span> <span class="cn">NULL</span>, chain <span class="op">=</span> <span class="cn">NULL</span>, <span class="va">...</span><span class="op">)</span></span></code></pre></div>
     </div>
 
     <div class="section level2">
@@ -67,7 +67,8 @@ When <code>transforms</code> is supplied, returns the mean of constrained
 
 
 <dt id="arg-chain">chain<a class="anchor" aria-label="anchor" href="#arg-chain"></a></dt>
-<dd><p>Integer, which chain to use (default: 1).</p></dd>
+<dd><p>Integer, which chain to use, or <code>NULL</code> to pool across
+all chains (default: <code>NULL</code>).</p></dd>
 
 
 <dt id="arg--">...<a class="anchor" aria-label="anchor" href="#arg--"></a></dt>

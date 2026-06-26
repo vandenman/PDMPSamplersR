@@ -29,6 +29,7 @@ pdmp_sample_subsampled(
   use_full_gradient_for_reflections = FALSE,
   grid_n = 30,
   grid_t_max = 2,
+  post_warmup_simplify = FALSE,
   show_progress = TRUE,
   n_chains = 1L,
   threaded = FALSE,
@@ -130,6 +131,12 @@ pdmp_sample_subsampled(
 - grid_t_max:
 
   Numeric, maximum time for grid in GridThinningStrategy (default: 2.0).
+
+- post_warmup_simplify:
+
+  Logical. If `TRUE`, the grid-thinning strategy may switch to a
+  constant bound after warmup, reducing gradient calls during the main
+  sampling phase.
 
 - show_progress:
 

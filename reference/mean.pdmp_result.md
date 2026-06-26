@@ -8,7 +8,7 @@ When `transforms` is supplied, returns the mean of constrained
 
 ``` r
 # S3 method for class 'pdmp_result'
-mean(x, transforms = NULL, chain = 1L, ...)
+mean(x, transforms = NULL, chain = NULL, ...)
 ```
 
 ## Arguments
@@ -24,7 +24,8 @@ mean(x, transforms = NULL, chain = 1L, ...)
 
 - chain:
 
-  Integer, which chain to use (default: 1).
+  Integer, which chain to use, or `NULL` to pool across all chains
+  (default: `NULL`).
 
 - ...:
 

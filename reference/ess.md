@@ -9,7 +9,7 @@ method, without discretization.
 ess(x, ...)
 
 # S3 method for class 'pdmp_result'
-ess(x, chain = 1L, n_batches = 0L, ...)
+ess(x, chain = NULL, n_batches = 0L, ...)
 ```
 
 ## Arguments
@@ -24,7 +24,8 @@ ess(x, chain = 1L, n_batches = 0L, ...)
 
 - chain:
 
-  Integer, which chain to use (default: 1).
+  Integer, which chain to use, or `NULL` to sum across all chains
+  (default: `NULL`).
 
 - n_batches:
 

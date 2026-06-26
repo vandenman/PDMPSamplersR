@@ -49,7 +49,7 @@ method, without discretization.</p>
     <div class="sourceCode"><pre class="sourceCode r"><code><span><span class="fu">ess</span><span class="op">(</span><span class="va">x</span>, <span class="va">...</span><span class="op">)</span></span>
 <span></span>
 <span><span class="co"># S3 method for class 'pdmp_result'</span></span>
-<span><span class="fu">ess</span><span class="op">(</span><span class="va">x</span>, chain <span class="op">=</span> <span class="fl">1L</span>, n_batches <span class="op">=</span> <span class="fl">0L</span>, <span class="va">...</span><span class="op">)</span></span></code></pre></div>
+<span><span class="fu">ess</span><span class="op">(</span><span class="va">x</span>, chain <span class="op">=</span> <span class="cn">NULL</span>, n_batches <span class="op">=</span> <span class="fl">0L</span>, <span class="va">...</span><span class="op">)</span></span></code></pre></div>
     </div>
 
     <div class="section level2">
@@ -65,7 +65,8 @@ method, without discretization.</p>
 
 
 <dt id="arg-chain">chain<a class="anchor" aria-label="anchor" href="#arg-chain"></a></dt>
-<dd><p>Integer, which chain to use (default: 1).</p></dd>
+<dd><p>Integer, which chain to use, or <code>NULL</code> to sum across
+all chains (default: <code>NULL</code>).</p></dd>
 
 
 <dt id="arg-n-batches">n_batches<a class="anchor" aria-label="anchor" href="#arg-n-batches"></a></dt>

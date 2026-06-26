@@ -66,6 +66,7 @@ using the PDMPSamplers.jl Julia package with BridgeStan integration.</p>
 <span>  parameter_prior <span class="op">=</span> <span class="cn">NULL</span>,</span>
 <span>  grid_n <span class="op">=</span> <span class="fl">30</span>,</span>
 <span>  grid_t_max <span class="op">=</span> <span class="fl">2</span>,</span>
+<span>  post_warmup_simplify <span class="op">=</span> <span class="cn">FALSE</span>,</span>
 <span>  show_progress <span class="op">=</span> <span class="cn">TRUE</span>,</span>
 <span>  n_chains <span class="op">=</span> <span class="fl">1L</span>,</span>
 <span>  threaded <span class="op">=</span> <span class="cn">FALSE</span>,</span>
@@ -163,6 +164,12 @@ diagonal preconditioner during warmup and also require
 
 <dt id="arg-grid-t-max">grid_t_max<a class="anchor" aria-label="anchor" href="#arg-grid-t-max"></a></dt>
 <dd><p>Numeric, maximum time for grid in GridThinningStrategy (default: 2.0).</p></dd>
+
+
+<dt id="arg-post-warmup-simplify">post_warmup_simplify<a class="anchor" aria-label="anchor" href="#arg-post-warmup-simplify"></a></dt>
+<dd><p>Logical. If <code>TRUE</code>, the grid-thinning
+strategy may switch to a constant bound after warmup, reducing
+gradient calls during the main sampling phase.</p></dd>
 
 
 <dt id="arg-show-progress">show_progress<a class="anchor" aria-label="anchor" href="#arg-show-progress"></a></dt>

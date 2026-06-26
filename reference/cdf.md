@@ -9,7 +9,7 @@ Compute the fraction of trajectory time with the transform of coordinate
 cdf(x, ...)
 
 # S3 method for class 'pdmp_result'
-cdf(x, q, coordinate, transforms = NULL, chain = 1L, ...)
+cdf(x, q, coordinate, transforms = NULL, chain = NULL, ...)
 ```
 
 ## Arguments
@@ -36,7 +36,8 @@ cdf(x, q, coordinate, transforms = NULL, chain = 1L, ...)
 
 - chain:
 
-  Integer, which chain to use (default: 1).
+  Integer, which chain to use, or `NULL` to average across all chains
+  (default: `NULL`).
 
 ## Value
 

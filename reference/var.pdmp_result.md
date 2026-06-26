@@ -1,12 +1,14 @@
 # Continuous-time variance of PDMP trace
 
-Continuous-time variance of PDMP trace
+When `chain = NULL`, the pooled variance across chains is computed as
+the mean of within-chain variances plus the between-chain variance of
+the chain means.
 
 ## Usage
 
 ``` r
 # S3 method for class 'pdmp_result'
-var(x, transforms = NULL, chain = 1L, ...)
+var(x, transforms = NULL, chain = NULL, ...)
 ```
 
 ## Arguments
@@ -22,7 +24,8 @@ var(x, transforms = NULL, chain = 1L, ...)
 
 - chain:
 
-  Integer, which chain to use (default: 1).
+  Integer, which chain to use, or `NULL` to pool across all chains
+  (default: `NULL`).
 
 - ...:
 

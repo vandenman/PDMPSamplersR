@@ -38,6 +38,7 @@ pdmp_sample_subsampled <- function(
     grad_full = NULL,
     use_full_gradient_for_reflections = FALSE,
     grid_n = 30, grid_t_max = 2.0,
+    post_warmup_simplify = FALSE,
     show_progress = TRUE,
     n_chains = 1L, threaded = FALSE, seed = NULL,
     adaptive_scheme = c("diagonal", "fullrank"),
@@ -59,7 +60,7 @@ pdmp_sample_subsampled <- function(
     d, flow, algorithm, T, t0, t_warmup, flow_mean, flow_cov,
     c0, x0, theta0 = NULL, show_progress,
     sticky = FALSE, can_stick = NULL, model_prior = NULL, parameter_prior = NULL,
-    grid_n, grid_t_max, n_chains, threaded, seed,
+    grid_n, grid_t_max, post_warmup_simplify, n_chains, threaded, seed,
     adaptive_scheme = adaptive_scheme
   )
 

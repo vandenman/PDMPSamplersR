@@ -26,7 +26,7 @@ validate_pdmp_params <- function(d, flow, algorithm, T, t0 = 0.0, t_warmup = 0.0
                                 x0 = NULL, theta0 = NULL, show_progress = TRUE,
                                 sticky = FALSE, can_stick = NULL, model_prior = NULL, parameter_prior = NULL,
                                 grid_n = 30, grid_t_max = 2.0,
-                                post_warmup_simplify = TRUE,
+                                post_warmup_simplify = FALSE,
                                 n_chains = 1L, threaded = FALSE, seed = NULL,
                                 adaptive_scheme = "diagonal") {
 

@@ -7,14 +7,15 @@
 \usage{
 inclusion_probs(x, ...)
 
-\method{inclusion_probs}{pdmp_result}(x, chain = 1L, ...)
+\method{inclusion_probs}{pdmp_result}(x, chain = NULL, ...)
 }
 \arguments{
 \item{x}{A \code{pdmp_result} object.}
 
 \item{...}{Passed to methods.}
 
-\item{chain}{Integer, which chain to use (default: 1).}
+\item{chain}{Integer, which chain to use, or \code{NULL} to average
+across all chains (default: \code{NULL}).}
 }
 \value{
 Numeric vector of length \code{x$d}.

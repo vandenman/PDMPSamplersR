@@ -4,7 +4,7 @@
 \alias{var.pdmp_result}
 \title{Continuous-time variance of PDMP trace}
 \usage{
-\method{var}{pdmp_result}(x, transforms = NULL, chain = 1L, ...)
+\method{var}{pdmp_result}(x, transforms = NULL, chain = NULL, ...)
 }
 \arguments{
 \item{x}{A \code{pdmp_result} object.}
@@ -12,7 +12,8 @@
 \item{transforms}{Optional list of transform specifications (see
 \code{\link{identity_transform}}).}
 
-\item{chain}{Integer, which chain to use (default: 1).}
+\item{chain}{Integer, which chain to use, or \code{NULL} to pool across
+all chains (default: \code{NULL}).}
 
 \item{...}{Ignored.}
 }
@@ -20,5 +21,7 @@
 Numeric vector of length \code{x$d}.
 }
 \description{
-Continuous-time variance of PDMP trace
+When \code{chain = NULL}, the pooled variance across chains is computed
+as the mean of within-chain variances plus the between-chain variance
+of the chain means.
 }

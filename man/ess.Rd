@@ -7,14 +7,15 @@
 \usage{
 ess(x, ...)
 
-\method{ess}{pdmp_result}(x, chain = 1L, n_batches = 0L, ...)
+\method{ess}{pdmp_result}(x, chain = NULL, n_batches = 0L, ...)
 }
 \arguments{
 \item{x}{A \code{pdmp_result} object.}
 
 \item{...}{Passed to methods.}
 
-\item{chain}{Integer, which chain to use (default: 1).}
+\item{chain}{Integer, which chain to use, or \code{NULL} to sum across
+all chains (default: \code{NULL}).}
 
 \item{n_batches}{Integer, number of batches. 0 uses the default (default: 0).}
 }

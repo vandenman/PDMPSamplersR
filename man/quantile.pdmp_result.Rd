@@ -4,24 +4,27 @@
 \alias{quantile.pdmp_result}
 \title{Continuous-time quantile of PDMP trace}
 \usage{
-\method{quantile}{pdmp_result}(x, probs, transforms = NULL, chain = 1L, coordinate = -1L, ...)
+\method{quantile}{pdmp_result}(x, probs, transforms = NULL, chain = NULL, coordinate = -1L, ...)
 }
 \arguments{
 \item{x}{A \code{pdmp_result} object.}
 
-\item{probs}{Numeric scalar in (0, 1).}
+\item{probs}{Numeric vector of probabilities in (0, 1).}
 
 \item{transforms}{Optional list of transform specifications.}
 
-\item{chain}{Integer, which chain to use (default: 1).}
+\item{chain}{Integer, which chain to use, or \code{NULL} to pool across
+all chains (default: \code{NULL}).}
 
 \item{coordinate}{Integer coordinate index, or -1 for all (default: -1).}
 
 \item{...}{Ignored.}
 }
 \value{
-Numeric vector or scalar.
+Numeric matrix (\code{length(probs)} x d) when \code{coordinate = -1},
+  or a numeric vector of length \code{length(probs)} for a single coordinate.
 }
 \description{
-Continuous-time quantile of PDMP trace
+When \code{chain = NULL}, per-chain quantiles are averaged pointwise
+across chains.
 }

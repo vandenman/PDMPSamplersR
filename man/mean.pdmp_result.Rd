@@ -4,7 +4,7 @@
 \alias{mean.pdmp_result}
 \title{Continuous-time mean of PDMP trace}
 \usage{
-\method{mean}{pdmp_result}(x, transforms = NULL, chain = 1L, ...)
+\method{mean}{pdmp_result}(x, transforms = NULL, chain = NULL, ...)
 }
 \arguments{
 \item{x}{A \code{pdmp_result} object.}
@@ -12,7 +12,8 @@
 \item{transforms}{Optional list of transform specifications (see
 \code{\link{identity_transform}}).}
 
-\item{chain}{Integer, which chain to use (default: 1).}
+\item{chain}{Integer, which chain to use, or \code{NULL} to pool across
+all chains (default: \code{NULL}).}
 
 \item{...}{Ignored.}
 }

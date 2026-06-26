@@ -4,7 +4,14 @@
 \alias{median.pdmp_result}
 \title{Continuous-time median of PDMP trace}
 \usage{
-\method{median}{pdmp_result}(x, na.rm = FALSE, transforms = NULL, chain = 1L, coordinate = -1L, ...)
+\method{median}{pdmp_result}(
+  x,
+  na.rm = FALSE,
+  transforms = NULL,
+  chain = NULL,
+  coordinate = -1L,
+  ...
+)
 }
 \arguments{
 \item{x}{A \code{pdmp_result} object.}
@@ -13,7 +20,8 @@
 
 \item{transforms}{Optional list of transform specifications.}
 
-\item{chain}{Integer, which chain to use (default: 1).}
+\item{chain}{Integer, which chain to use, or \code{NULL} to pool across
+all chains (default: \code{NULL}).}
 
 \item{coordinate}{Integer coordinate index, or -1 for all (default: -1).}
 

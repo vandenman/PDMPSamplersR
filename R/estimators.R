@@ -61,15 +61,29 @@
 #' @param x A \code{pdmp_result} object.
 #' @param transforms Optional list of transform specifications (see
 #'   \code{\link{identity_transform}}).
-#' @param chain Integer, which chain to use (default: 1).
+#' @param chain Integer, which chain to use, or \code{NULL} to pool across
+#'   all chains (default: \code{NULL}).
 #' @param ... Ignored.
 #'
 #' @returns Numeric vector of length \code{x$d}.
 #' @export
-mean.pdmp_result <- function(x, transforms = NULL, chain = 1L, ...) {
+mean.pdmp_result <- function(x, transforms = NULL, chain = NULL, ...) {
   .check_pdmp(x)
   chains <- .ensure_chains(x)
   specs  <- .transform_specs(transforms)
+
+  if (is.null(chain)) {
+    n <- length(chains)
+    result <- Reduce(`+`, lapply(seq_len(n), function(ch) {
+      if (is.null(specs))
+        .pdmpsamplers_julia_call("r_mean", chains, chain = ch)
+      else
+        .pdmpsamplers_julia_call("r_mean", chains, specs, chain = ch)
+    })) / n
+    return(result)
+  }
+
+  chain <- as.integer(chain)
   if (is.null(specs))
     .pdmpsamplers_julia_call("r_mean", chains, chain = chain)
   else
@@ -96,13 +110,40 @@ var.default <- function(x, ...) stats::var(x, ...)
 
 #' Continuous-time variance of PDMP trace
 #'
+#' When \code{chain = NULL}, the pooled variance across chains is computed
+#' as the mean of within-chain variances plus the between-chain variance
+#' of the chain means.
+#'
 #' @inheritParams mean.pdmp_result
 #' @returns Numeric vector of length \code{x$d}.
 #' @export
-var.pdmp_result <- function(x, transforms = NULL, chain = 1L, ...) {
+var.pdmp_result <- function(x, transforms = NULL, chain = NULL, ...) {
   .check_pdmp(x)
   chains <- .ensure_chains(x)
   specs  <- .transform_specs(transforms)
+
+  if (is.null(chain)) {
+    n <- length(chains)
+    chain_vars <- lapply(seq_len(n), function(ch) {
+      if (is.null(specs))
+        .pdmpsamplers_julia_call("r_var", chains, chain = ch)
+      else
+        .pdmpsamplers_julia_call("r_var", chains, specs, chain = ch)
+    })
+    mean_of_vars <- Reduce(`+`, chain_vars) / n
+    if (n > 1L) {
+      chain_means <- lapply(seq_len(n), function(ch) {
+        if (is.null(specs))
+          .pdmpsamplers_julia_call("r_mean", chains, chain = ch)
+        else
+          .pdmpsamplers_julia_call("r_mean", chains, specs, chain = ch)
+      })
+      mean_of_vars <- mean_of_vars + apply(do.call(rbind, chain_means), 2L, stats::var)
+    }
+    return(mean_of_vars)
+  }
+
+  chain <- as.integer(chain)
   if (is.null(specs))
     .pdmpsamplers_julia_call("r_var", chains, chain = chain)
   else
@@ -121,14 +162,8 @@ sd.default <- function(x, ...) stats::sd(x, ...)
 #' @inheritParams mean.pdmp_result
 #' @returns Numeric vector of length \code{x$d}.
 #' @export
-sd.pdmp_result <- function(x, transforms = NULL, chain = 1L, ...) {
-  .check_pdmp(x)
-  chains <- .ensure_chains(x)
-  specs  <- .transform_specs(transforms)
-  if (is.null(specs))
-    .pdmpsamplers_julia_call("r_std", chains, chain = chain)
-  else
-    .pdmpsamplers_julia_call("r_std", chains, specs, chain = chain)
+sd.pdmp_result <- function(x, transforms = NULL, chain = NULL, ...) {
+  sqrt(var.pdmp_result(x, transforms = transforms, chain = chain, ...))
 }
 
 #' Covariance matrix
@@ -150,7 +185,7 @@ cov.default <- function(x, ...) stats::cov(x, ...)
 #' @export
 cov.pdmp_result <- function(x, chain = 1L, ...) {
   .check_pdmp(x)
-  .pdmpsamplers_julia_call("r_cov", .ensure_chains(x), chain = chain)
+  .pdmpsamplers_julia_call("r_cov", .ensure_chains(x), chain = as.integer(chain))
 }
 
 #' Correlation matrix
@@ -169,7 +204,7 @@ cor.default <- function(x, ...) stats::cor(x, ...)
 #' @export
 cor.pdmp_result <- function(x, chain = 1L, ...) {
   .check_pdmp(x)
-  .pdmpsamplers_julia_call("r_cor", .ensure_chains(x), chain = chain)
+  .pdmpsamplers_julia_call("r_cor", .ensure_chains(x), chain = as.integer(chain))
 }
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -178,20 +213,53 @@ cor.pdmp_result <- function(x, chain = 1L, ...) {
 
 #' Continuous-time quantile of PDMP trace
 #'
+#' When \code{chain = NULL}, per-chain quantiles are averaged pointwise
+#' across chains.
+#'
 #' @param x A \code{pdmp_result} object.
-#' @param probs Numeric scalar in (0, 1).
+#' @param probs Numeric vector of probabilities in (0, 1).
 #' @param transforms Optional list of transform specifications.
-#' @param chain Integer, which chain to use (default: 1).
+#' @param chain Integer, which chain to use, or \code{NULL} to pool across
+#'   all chains (default: \code{NULL}).
 #' @param coordinate Integer coordinate index, or -1 for all (default: -1).
 #' @param ... Ignored.
 #'
-#' @returns Numeric vector or scalar.
+#' @returns Numeric matrix (\code{length(probs)} x d) when \code{coordinate = -1},
+#'   or a numeric vector of length \code{length(probs)} for a single coordinate.
 #' @importFrom stats quantile
 #' @export
-quantile.pdmp_result <- function(x, probs, transforms = NULL, chain = 1L, coordinate = -1L, ...) {
+quantile.pdmp_result <- function(x, probs, transforms = NULL, chain = NULL, coordinate = -1L, ...) {
   .check_pdmp(x)
   chains <- .ensure_chains(x)
   specs  <- .transform_specs(transforms)
+  coordinate <- as.integer(coordinate)
+
+  if (is.null(chain)) {
+    n <- length(chains)
+    result_list <- lapply(seq_len(n), function(ch) {
+      quantile.pdmp_result(x, probs = probs, transforms = transforms,
+                           chain = as.integer(ch), coordinate = coordinate)
+    })
+    pooled <- Reduce(`+`, result_list) / n
+    if (is.matrix(pooled)) rownames(pooled) <- NULL
+    return(pooled)
+  }
+
+  chain <- as.integer(chain)
+
+  # Julia r_quantile only accepts scalar probs; loop for vectors
+  if (length(probs) > 1L) {
+    result_list <- lapply(probs, function(p) {
+      if (is.null(specs))
+        .pdmpsamplers_julia_call("r_quantile", chains, p, chain = chain, coordinate = coordinate)
+      else
+        .pdmpsamplers_julia_call("r_quantile", chains, p, specs, chain = chain, coordinate = coordinate)
+    })
+    result <- do.call(rbind, result_list)
+    rownames(result) <- NULL
+    return(result)
+  }
+
   if (is.null(specs))
     .pdmpsamplers_julia_call("r_quantile", chains, probs, chain = chain, coordinate = coordinate)
   else
@@ -205,10 +273,21 @@ quantile.pdmp_result <- function(x, probs, transforms = NULL, chain = 1L, coordi
 #' @returns Numeric vector or scalar.
 #' @importFrom stats median
 #' @export
-median.pdmp_result <- function(x, na.rm = FALSE, transforms = NULL, chain = 1L, coordinate = -1L, ...) {
+median.pdmp_result <- function(x, na.rm = FALSE, transforms = NULL, chain = NULL, coordinate = -1L, ...) {
   .check_pdmp(x)
   chains <- .ensure_chains(x)
   specs  <- .transform_specs(transforms)
+  coordinate <- as.integer(coordinate)
+
+  if (is.null(chain)) {
+    n <- length(chains)
+    result <- Reduce(`+`, lapply(seq_len(n), function(ch) {
+      median.pdmp_result(x, transforms = transforms, chain = as.integer(ch), coordinate = coordinate)
+    })) / n
+    return(result)
+  }
+
+  chain <- as.integer(chain)
   if (is.null(specs))
     .pdmpsamplers_julia_call("r_median", chains, chain = chain, coordinate = coordinate)
   else
@@ -232,12 +311,23 @@ median.pdmp_result <- function(x, na.rm = FALSE, transforms = NULL, chain = 1L, 
 ess <- function(x, ...) UseMethod("ess")
 
 #' @rdname ess
-#' @param chain Integer, which chain to use (default: 1).
+#' @param chain Integer, which chain to use, or \code{NULL} to sum across
+#'   all chains (default: \code{NULL}).
 #' @param n_batches Integer, number of batches. 0 uses the default (default: 0).
 #' @export
-ess.pdmp_result <- function(x, chain = 1L, n_batches = 0L, ...) {
+ess.pdmp_result <- function(x, chain = NULL, n_batches = 0L, ...) {
   .check_pdmp(x)
-  .pdmpsamplers_julia_call("r_ess", .ensure_chains(x), chain = chain, n_batches = as.integer(n_batches))
+  chains <- .ensure_chains(x)
+
+  if (is.null(chain)) {
+    n <- length(chains)
+    result <- Reduce(`+`, lapply(seq_len(n), function(ch) {
+      .pdmpsamplers_julia_call("r_ess", chains, chain = ch, n_batches = as.integer(n_batches))
+    }))
+    return(result)
+  }
+
+  .pdmpsamplers_julia_call("r_ess", chains, chain = as.integer(chain), n_batches = as.integer(n_batches))
 }
 
 #' Empirical CDF
@@ -256,12 +346,25 @@ cdf <- function(x, ...) UseMethod("cdf")
 #' @param q Numeric threshold.
 #' @param coordinate Integer coordinate index.
 #' @param transforms Optional list of transform specifications.
-#' @param chain Integer, which chain to use (default: 1).
+#' @param chain Integer, which chain to use, or \code{NULL} to average
+#'   across all chains (default: \code{NULL}).
 #' @export
-cdf.pdmp_result <- function(x, q, coordinate, transforms = NULL, chain = 1L, ...) {
+cdf.pdmp_result <- function(x, q, coordinate, transforms = NULL, chain = NULL, ...) {
   .check_pdmp(x)
   chains <- .ensure_chains(x)
   specs  <- .transform_specs(transforms)
+  coordinate <- as.integer(coordinate)
+
+  if (is.null(chain)) {
+    n <- length(chains)
+    result <- Reduce(`+`, lapply(seq_len(n), function(ch) {
+      cdf.pdmp_result(x, q = q, coordinate = coordinate, transforms = transforms,
+                      chain = as.integer(ch))
+    })) / n
+    return(result)
+  }
+
+  chain <- as.integer(chain)
   if (is.null(specs))
     .pdmpsamplers_julia_call("r_cdf", chains, q, chain = chain, coordinate = coordinate)
   else
@@ -281,11 +384,22 @@ cdf.pdmp_result <- function(x, q, coordinate, transforms = NULL, chain = 1L, ...
 inclusion_probs <- function(x, ...) UseMethod("inclusion_probs")
 
 #' @rdname inclusion_probs
-#' @param chain Integer, which chain to use (default: 1).
+#' @param chain Integer, which chain to use, or \code{NULL} to average
+#'   across all chains (default: \code{NULL}).
 #' @export
-inclusion_probs.pdmp_result <- function(x, chain = 1L, ...) {
+inclusion_probs.pdmp_result <- function(x, chain = NULL, ...) {
   .check_pdmp(x)
-  .pdmpsamplers_julia_call("r_inclusion_probs", .ensure_chains(x), chain = chain)
+  chains <- .ensure_chains(x)
+
+  if (is.null(chain)) {
+    n <- length(chains)
+    result <- Reduce(`+`, lapply(seq_len(n), function(ch) {
+      .pdmpsamplers_julia_call("r_inclusion_probs", chains, chain = ch)
+    })) / n
+    return(result)
+  }
+
+  .pdmpsamplers_julia_call("r_inclusion_probs", chains, chain = as.integer(chain))
 }
 
 #' Discretize a PDMP trace
@@ -310,6 +424,7 @@ discretize <- function(x, ...) UseMethod("discretize")
 discretize.pdmp_result <- function(x, dt = NULL, chain = 1L, ...) {
   .check_pdmp(x)
   chains <- .ensure_chains(x)
+  chain <- as.integer(chain)
   if (is.null(dt))
     .pdmpsamplers_julia_call("r_discretize", chains, chain = chain)
   else

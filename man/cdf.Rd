@@ -7,7 +7,7 @@
 \usage{
 cdf(x, ...)
 
-\method{cdf}{pdmp_result}(x, q, coordinate, transforms = NULL, chain = 1L, ...)
+\method{cdf}{pdmp_result}(x, q, coordinate, transforms = NULL, chain = NULL, ...)
 }
 \arguments{
 \item{x}{A \code{pdmp_result} object.}
@@ -20,7 +20,8 @@ cdf(x, ...)
 
 \item{transforms}{Optional list of transform specifications.}
 
-\item{chain}{Integer, which chain to use (default: 1).}
+\item{chain}{Integer, which chain to use, or \code{NULL} to average
+across all chains (default: \code{NULL}).}
 }
 \value{
 Numeric scalar in [0, 1].

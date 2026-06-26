@@ -24,6 +24,7 @@ pdmp_sample_subsampled(
   use_full_gradient_for_reflections = FALSE,
   grid_n = 30,
   grid_t_max = 2,
+  post_warmup_simplify = FALSE,
   show_progress = TRUE,
   n_chains = 1L,
   threaded = FALSE,
@@ -84,6 +85,10 @@ for reflection events (default: `FALSE`).}
 \item{grid_n}{Integer, number of grid points for GridThinningStrategy (default: 30).}
 
 \item{grid_t_max}{Numeric, maximum time for grid in GridThinningStrategy (default: 2.0).}
+
+\item{post_warmup_simplify}{Logical. If \code{TRUE}, the grid-thinning
+strategy may switch to a constant bound after warmup, reducing
+gradient calls during the main sampling phase.}
 
 \item{show_progress}{Logical, whether to show progress bar (default: TRUE).}
 

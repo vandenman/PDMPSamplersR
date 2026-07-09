@@ -37,6 +37,17 @@ hpp_path <- function() {
   system.file("stan", "pdmp_subsample.hpp", package = "PDMPSamplersR")
 }
 
+#' Path to the bundled Stan subsampling header
+#'
+#' Returns the C++ header used when compiling Stan models with the
+#' external-index subsampling bridge.
+#'
+#' @return Character scalar path to `pdmp_subsample.hpp`.
+#' @export
+pdmp_subsample_hpp_path <- function() {
+  hpp_path()
+}
+
 replace_prior_block <- function(ext_code, standard_code) {
   std_tp <- extract_named_block(standard_code, "transformed parameters")
   ext_tp <- extract_named_block(ext_code, "transformed parameters")

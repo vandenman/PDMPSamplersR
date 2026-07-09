@@ -14,7 +14,8 @@ export r_from_sparse_skeleton
 export r_pdmp_stan, r_pdmp_custom, r_pdmp_custom_subsampled
 export write_cmdstan_csv, r_constrain_and_write_csv
 export r_pdmp_brms_subsampled, r_pdmp_stan_for_brms
-export r_get_param_unc_names
+export r_get_param_unc_names, r_stan_param_unc_num_with_header
+export r_threading_available
 
 function build_flow(flow_type::String, prec::AbstractMatrix{Float64}, flow_mean::AbstractVector{Float64};
                     adaptive_scheme::String="diagonal")
@@ -70,6 +71,38 @@ function _to_precision(flow_cov::AbstractMatrix{Float64}, d::Int)
         return Diagonal(ones(d))
     end
     return inv(Symmetric(flow_cov))
+end
+
+function _as_flow_mean(flow_mean, d::Int)
+    if flow_mean isa Number
+        return [Float64(flow_mean)]
+    end
+    isempty(flow_mean) && return zeros(d)
+    return Vector{Float64}(flow_mean)
+end
+
+function _as_flow_cov(flow_cov, d::Int)
+    if flow_cov isa Number
+        return reshape([Float64(flow_cov)], 1, 1)
+    end
+    isempty(flow_cov) && return Matrix{Float64}(I, d, d)
+    return Matrix{Float64}(flow_cov)
+end
+
+function _compile_model_with_header(path_to_stan_model::String, hpp_path::String)
+    !endswith(path_to_stan_model, ".stan") && return path_to_stan_model
+    hpp_path_for_make = replace(normpath(hpp_path), "\\" => "/")
+    BridgeStan.compile_model(path_to_stan_model;
+        stanc_args=["--allow-undefined"],
+        make_args=["USER_HEADER=$(hpp_path_for_make)"])
+end
+
+function r_stan_param_unc_num_with_header(path_to_stan_model::String,
+                                          path_to_stan_data::String,
+                                          hpp_path::String)
+    lib_path = _compile_model_with_header(path_to_stan_model, hpp_path)
+    sm = BridgeStan.StanModel(lib_path, path_to_stan_data; warn=false)
+    return Int(BridgeStan.param_unc_num(sm))
 end
 
 function _pack_result(chains::PDMPChains)
@@ -345,6 +378,14 @@ function _ct_ess_matrix(chains::PDMPChains)
     return ct_ess
 end
 
+function _counter_float(counter, name::Symbol)
+    try
+        return Float64(getproperty(counter, name))
+    catch
+        return 0.0
+    end
+end
+
 function extract_stats(chains::PDMPChains)
     all = chains.stats
     ct_ess = try
@@ -352,29 +393,53 @@ function extract_stats(chains::PDMPChains)
     catch
         zeros(0, 0)
     end
+    vals(name::Symbol) = Float64[_counter_float(s, name) for s in all]
     return Dict{String, StatsValue}(
-        "reflections_events"    => Float64[s.reflections_events for s in all],
-        "reflections_accepted"  => Float64[s.reflections_accepted for s in all],
-        "refreshment_events"    => Float64[s.refreshment_events for s in all],
-        "sticky_events"         => Float64[s.sticky_events for s in all],
-        "support_boundary_events" => Float64[s.support_boundary_events for s in all],
-        "support_boundary_refresh_attempts" => Float64[s.support_boundary_refresh_attempts for s in all],
-        "support_boundary_refresh_failures" => Float64[s.support_boundary_refresh_failures for s in all],
-        "gradient_calls"        => Float64[s.∇f_calls for s in all],
-        "hessian_calls"         => Float64[s.∇²f_calls for s in all],
-        "elapsed_time"          => [s.elapsed_time for s in all],
-        "grid_builds"           => Float64[s.grid_builds for s in all],
-        "grid_shrinks"          => Float64[s.grid_shrinks for s in all],
-        "grid_grows"            => Float64[s.grid_grows for s in all],
-        "grid_early_stops"      => Float64[s.grid_early_stops for s in all],
-        "grid_points_evaluated" => Float64[s.grid_points_evaluated for s in all],
-        "grid_points_skipped"   => Float64[s.grid_points_skipped for s in all],
-        "grid_N_current"        => Float64[s.grid_N_current for s in all],
-        "lazy_fallback_low_tightness" => Float64[s.lazy_fallback_low_tightness for s in all],
-        "lazy_fallback_bound_violation" => Float64[s.lazy_fallback_bound_violation for s in all],
-        "lazy_proposal_attempts" => Float64[s.lazy_proposal_attempts for s in all],
-        "lazy_proposal_rejections" => Float64[s.lazy_proposal_rejections for s in all],
-        "grid_resets_from_dynamics_adaptation" => Float64[s.grid_resets_from_dynamics_adaptation for s in all],
+        "reflections_events"    => vals(:reflections_events),
+        "reflections_accepted"  => vals(:reflections_accepted),
+        "refreshment_events"    => vals(:refreshment_events),
+        "sticky_events"         => vals(:sticky_events),
+        "support_boundary_events" => vals(:support_boundary_events),
+        "support_boundary_refresh_attempts" => vals(:support_boundary_refresh_attempts),
+        "support_boundary_refresh_failures" => vals(:support_boundary_refresh_failures),
+        "gradient_calls"        => vals(:∇f_calls),
+        "hessian_calls"         => vals(:∇²f_calls),
+        "elapsed_time"          => vals(:elapsed_time),
+        "grid_builds"           => vals(:grid_builds),
+        "grid_shrinks"          => vals(:grid_shrinks),
+        "grid_grows"            => vals(:grid_grows),
+        "grid_early_stops"      => vals(:grid_early_stops),
+        "grid_points_evaluated" => vals(:grid_points_evaluated),
+        "grid_points_skipped"   => vals(:grid_points_skipped),
+        "grid_N_current"        => vals(:grid_N_current),
+        "lazy_fallback_low_tightness" => vals(:lazy_fallback_low_tightness),
+        "lazy_fallback_bound_violation" => vals(:lazy_fallback_bound_violation),
+        "lazy_proposal_attempts" => vals(:lazy_proposal_attempts),
+        "lazy_proposal_rejections" => vals(:lazy_proposal_rejections),
+        "grid_resets_from_dynamics_adaptation" => vals(:grid_resets_from_dynamics_adaptation),
+        "grid_endpoint_evaluations" => vals(:grid_endpoint_evaluations),
+        "grid_cached_endpoint_reuses" => vals(:grid_cached_endpoint_reuses),
+        "grid_acceptance_tests" => vals(:grid_acceptance_tests),
+        "grid_acceptance_gradient_calls" => vals(:grid_acceptance_gradient_calls),
+        "grid_horizon_hits" => vals(:grid_horizon_hits),
+        "constant_bound_attempts" => vals(:constant_bound_attempts),
+        "constant_bound_accepts" => vals(:constant_bound_accepts),
+        "constant_bound_rejections" => vals(:constant_bound_rejections),
+        "constant_bound_violations" => vals(:constant_bound_violations),
+        "constant_bound_safety_fallbacks" => vals(:constant_bound_safety_fallbacks),
+        "sticky_inner_searches" => vals(:sticky_inner_searches),
+        "sticky_inner_wins" => vals(:sticky_inner_wins),
+        "sticky_inner_wasted_by_sticky" => vals(:sticky_inner_wasted_by_sticky),
+        "sticky_inner_wasted_by_refresh" => vals(:sticky_inner_wasted_by_refresh),
+        "sticky_all_frozen_events" => vals(:sticky_all_frozen_events),
+        "warmup_events" => vals(:warmup_events),
+        "main_events" => vals(:main_events),
+        "warmup_gradient_calls" => vals(:warmup_gradient_calls),
+        "main_gradient_calls" => vals(:main_gradient_calls),
+        "warmup_hessian_calls" => vals(:warmup_hessian_calls),
+        "main_hessian_calls" => vals(:main_hessian_calls),
+        "warmup_elapsed_time" => vals(:warmup_elapsed_time),
+        "main_elapsed_time" => vals(:main_elapsed_time),
         "ct_ess"                => ct_ess,
     )
 end
@@ -662,6 +727,19 @@ function _write_cmdstan_header(io::IO, n_samples::Int, chain_id::Int, param_name
         write(io, name)
     end
     write(io, UInt8('\n'))
+end
+
+function _draws_for_csv(chains::PDMPChains, chain_idx::Int, discretize_dt::Float64)
+    trace = chains.traces[chain_idx]
+    try
+        if discretize_dt > 0
+            return Matrix(PDMPDiscretize(trace, discretize_dt))
+        else
+            return adaptive_discretize(chains; chain=chain_idx)[1]
+        end
+    catch
+        return reshape(Vector{Float64}(first(trace).position), 1, :)
+    end
 end
 
 function r_constrain_and_write_csv(sm::BridgeStan.StanModel, draws_unc::Matrix{Float64},
@@ -1142,8 +1220,8 @@ function r_pdmp_brms_subsampled(
         subsample_size::Integer,
         flow_type::String,
         algorithm_type::String,
-        flow_mean::AbstractVector,
-        flow_cov::AbstractMatrix,
+        flow_mean,
+        flow_cov,
         output_csv::String;
         c0::Float64 = 1e-2,
         grid_n::Int = 30,
@@ -1172,20 +1250,8 @@ function r_pdmp_brms_subsampled(
         model_prior = nothing,
         parameter_prior::Union{AbstractVector{Float64}, Nothing} = nothing
     )
-    lib_path_std = if endswith(stan_file, ".stan")
-        BridgeStan.compile_model(stan_file)
-    else
-        stan_file
-    end
-
-    lib_path_ext = if endswith(stan_file_ext, ".stan")
-        hpp_path_for_make = replace(normpath(hpp_path), "\\" => "/")
-        BridgeStan.compile_model(stan_file_ext;
-            stanc_args=["--allow-undefined"],
-            make_args=["USER_HEADER=$(hpp_path_for_make)"])
-    else
-        stan_file_ext
-    end
+    lib_path_std = _compile_model_with_header(stan_file, hpp_path)
+    lib_path_ext = _compile_model_with_header(stan_file_ext, hpp_path)
 
     N_int = Int(N)
     m = Int(subsample_size)
@@ -1222,8 +1288,8 @@ function r_pdmp_brms_subsampled(
         model, _ = _build_bss_model(ctx, n_anchor_updates; resample_dt, hvp_mode)
     end
 
-    fmean = isempty(flow_mean) ? zeros(d) : Vector{Float64}(flow_mean)
-    prec = isempty(flow_cov) ? Matrix{Float64}(I, d, d) : inv(Symmetric(Matrix{Float64}(flow_cov)))
+    fmean = _as_flow_mean(flow_mean, d)
+    prec = inv(Symmetric(_as_flow_cov(flow_cov, d)))
     flow = build_flow(flow_type, prec, fmean; adaptive_scheme)
     alg0 = build_algorithm(algorithm_type; c0, d, grid_n, grid_t_max, use_fd_hvp, post_warmup_simplify)
     alg = wrap_sticky(alg0, sticky, model_prior, parameter_prior, can_stick)
@@ -1289,11 +1355,7 @@ function r_pdmp_brms_subsampled(
     sm_constrain = sm_full
     n_ch = length(chains.traces)
     csv_paths = String[]
-    all_draws = if discretize_dt > 0
-        [Matrix(PDMPDiscretize(chains.traces[i], discretize_dt)) for i in 1:n_ch]
-    else
-        [adaptive_discretize(chains; chain=i)[1] for i in 1:n_ch]
-    end
+    all_draws = [_draws_for_csv(chains, i, discretize_dt) for i in 1:n_ch]
     min_rows = minimum(size(m, 1) for m in all_draws)
     for chain_idx in 1:n_ch
         draws_unc = all_draws[chain_idx][1:min_rows, :]
@@ -1302,7 +1364,8 @@ function r_pdmp_brms_subsampled(
         push!(csv_paths, csv_path)
     end
 
-    result = Dict{String, Any}("csv_paths" => csv_paths, "stats" => stats)
+    result = _pack_result(chains)
+    result["csv_paths"] = csv_paths
     if sticky
         incl = Dict{Int,Vector{Float64}}()
         for i in 1:n_ch
@@ -1358,11 +1421,7 @@ function r_pdmp_stan_for_brms(
     stats = extract_stats(chains)
     n_ch = length(chains.traces)
     csv_paths = String[]
-    all_draws = if discretize_dt > 0
-        [Matrix(PDMPDiscretize(chains.traces[i], discretize_dt)) for i in 1:n_ch]
-    else
-        [adaptive_discretize(chains; chain=i)[1] for i in 1:n_ch]
-    end
+    all_draws = [_draws_for_csv(chains, i, discretize_dt) for i in 1:n_ch]
     min_rows = minimum(size(m, 1) for m in all_draws)
     for chain_idx in 1:n_ch
         draws_unc = all_draws[chain_idx][1:min_rows, :]
@@ -1371,7 +1430,8 @@ function r_pdmp_stan_for_brms(
         push!(csv_paths, csv_path)
     end
 
-    result = Dict{String, Any}("csv_paths" => csv_paths, "stats" => stats)
+    result = _pack_result(chains)
+    result["csv_paths"] = csv_paths
     if sticky
         incl = Dict{Int,Vector{Float64}}()
         for i in 1:n_ch
@@ -1386,6 +1446,8 @@ function r_get_param_unc_names(path_to_stan_model::String, path_to_stan_data::St
     sm = BridgeStan.StanModel(path_to_stan_model, path_to_stan_data; warn=false)
     return BridgeStan.param_unc_names(sm)
 end
+
+r_threading_available() = Base.Threads.nthreads() > 1
 
 end # module PDMPSamplersRBridge
 

@@ -31,6 +31,7 @@ reference:
       - pdmp_sample_from_stanmodel
       - support_boundary_control
       - write_stan_json
+      - pdmp_subsample_hpp_path
   - title: Results
     contents:
       - materialize

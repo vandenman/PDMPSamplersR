@@ -41,6 +41,7 @@ brm_pdmp(
   can_stick = NULL,
   model_prior = NULL,
   kappa = NULL,
+  slab_prior = NULL,
   stanvars = NULL,
   sample_prior = "no",
   save_model = NULL,
@@ -151,14 +152,23 @@ population-level coefficients are candidates for selection. Length
 must match the number of supported coefficients. If omitted, all
 non-intercept population-level coefficients are candidates.}
 
-\item{model_prior}{A [bernoulli()] or [betabernoulli()] object
-specifying the prior on model space. Required when `sticky = TRUE`.}
+\item{model_prior}{A [bernoulli()] or [betabernoulli()] object specifying
+the prior on model space for the currently supported legacy sticky path.
+[exchangeable_model_size_prior()] is reserved for the pending dependent
+slab path.}
 
 \item{kappa}{Optional numeric vector of slab densities at zero for each
 stickable coordinate (κ in the sticky PDMP literature). If omitted,
 derived automatically from the brms prior specification (only
 `normal(0, s)` and `student_t(df, 0, s)` are supported for automatic
 derivation).}
+
+\item{slab_prior}{Optional dependent slab prior created by
+[dense_gaussian_slab()], [exchangeable_gaussian_slab()],
+[independent_slab_density()], [gaussian_scale_mixture_slab()], or
+[arbitrary_slab_boundary()]. Mutually exclusive with `kappa`. This argument
+currently errors for `brm_pdmp()` until the two-model dependent-slab target
+bridge is implemented.}
 
 \item{stanvars}{Optional `stanvar` object for custom Stan code.}
 

@@ -25,6 +25,7 @@ validate_pdmp_params <- function(d, flow, algorithm, T, t0 = 0.0, t_warmup = 0.0
                                 flow_mean = NULL, flow_cov = NULL, c0 = 1e-2,
                                 x0 = NULL, theta0 = NULL, show_progress = TRUE,
                                 sticky = FALSE, can_stick = NULL, model_prior = NULL, parameter_prior = NULL,
+                                slab_prior = NULL,
                                 grid_n = 30, grid_t_max = 2.0,
                                 post_warmup_simplify = FALSE,
                                 n_chains = 1L, threaded = FALSE, seed = NULL,
@@ -122,26 +123,64 @@ validate_pdmp_params <- function(d, flow, algorithm, T, t0 = 0.0, t_warmup = 0.0
 
   # Validate sticky parameters
   validate_type(sticky, type = "logical", n = 1)
+  if (!sticky && !is.null(slab_prior)) {
+    cli::cli_abort("Argument {.arg slab_prior} requires {.arg sticky} to be {.code TRUE}.")
+  }
   if (sticky) {
+    if (!is.null(parameter_prior) && !is.null(slab_prior)) {
+      cli::cli_abort("Use either legacy {.arg parameter_prior} or dependent {.arg slab_prior}, not both.")
+    }
+    if (!is.null(slab_prior) && !is.slab_prior(slab_prior)) {
+      cli::cli_abort("Argument {.arg slab_prior} must be created by a dependent slab constructor.")
+    }
+
     if (is.null(can_stick)) {
-      can_stick <- rep(FALSE, d)
+      if (!is.null(slab_prior)) {
+        coef_idx <- .slab_coef_indices(slab_prior, d)
+        if (is.null(coef_idx)) {
+          cli::cli_abort("Dependent {.arg slab_prior} requires {.arg can_stick} unless {.arg coef} is supplied as integer parameter indices.")
+        }
+        can_stick <- rep(FALSE, d)
+        can_stick[coef_idx] <- TRUE
+      } else {
+        can_stick <- rep(FALSE, d)
+      }
     } else {
       validate_type(can_stick, type = "logical", n = d)
     }
-    if (is.null(model_prior) || !(is.bernoulli(model_prior) || is.betabernoulli(model_prior))) {
-      cli::cli_abort("Argument {.arg model_prior} must be provided when {.arg sticky} is {.code TRUE}. It should be an object of class {.cls bernoulli} or {.cls beta-bernoulli}.")
+
+    if (is.null(model_prior) || !is.model_prior(model_prior)) {
+      cli::cli_abort("Argument {.arg model_prior} must be provided when {.arg sticky} is {.code TRUE}.")
     } else if (is.bernoulli(model_prior)) {
-      if (length(model_prior$prob) == 1) {
+      if (is.null(slab_prior) && length(model_prior$prob) == 1) {
         model_prior <- bernoulli(prob = rep(model_prior$prob, d))
-      } else if (length(model_prior$prob) != d) {
-        cli::cli_abort("For {.arg model_prior} of class {.cls bernoulli}, {.arg prob} must be a single value or a vector of length {.arg d}.")
+      } else if (is.null(slab_prior) && length(model_prior$prob) != d) {
+        cli::cli_abort("For legacy sticky sampling, {.arg model_prior} of class {.cls bernoulli} must have a single probability or a vector of length {.arg d}.")
+      } else if (!is.null(slab_prior)) {
+        p <- .slab_beta_dimension(slab_prior, d, can_stick)
+        if (!length(model_prior$prob) %in% c(1L, p, d)) {
+          cli::cli_abort("For dependent {.arg slab_prior}, Bernoulli {.arg prob} must have length 1, the slab beta dimension ({p}), or {.arg d} ({d}).")
+        }
       }
     }
 
-    if (is.null(parameter_prior))
-      cli::cli_abort("Argument {.arg parameter_prior} must be provided when {.arg sticky} is {.code TRUE}. It must be a single value or a vector of length {.arg d}.")
+    if (is.null(slab_prior)) {
+      if (is.exchangeable_model_size_prior(model_prior)) {
+        cli::cli_abort("{.fn exchangeable_model_size_prior} requires dependent {.arg slab_prior}; it is not supported by legacy sticky sampling.")
+      }
+      if (is.null(parameter_prior))
+        cli::cli_abort("Argument {.arg parameter_prior} must be provided for legacy sticky sampling. Use {.arg slab_prior} for the dependent aggregate sticky path.")
 
-    validate_type(parameter_prior, type = "double", n = d, positive = TRUE)
+      validate_type(parameter_prior, type = "double", n = d, positive = TRUE)
+    } else {
+      if (!flow %in% c("ZigZag", "BouncyParticle")) {
+        cli::cli_abort("Dependent {.arg slab_prior} sticky sampling currently supports only ZigZag and BouncyParticle flows.")
+      }
+      if (algorithm != "GridThinningStrategy") {
+        cli::cli_abort("Dependent {.arg slab_prior} sticky sampling currently requires {.val GridThinningStrategy}.")
+      }
+      .validate_slab_prior_dimensions(slab_prior, d, can_stick, model_prior = model_prior)
+    }
 
   }
 
@@ -155,11 +194,73 @@ validate_pdmp_params <- function(d, flow, algorithm, T, t0 = 0.0, t_warmup = 0.0
     flow_mean = flow_mean, flow_cov = flow_cov, c0 = c0,
     x0 = x0, theta0 = theta0, show_progress = show_progress,
     sticky = sticky, can_stick = can_stick, model_prior = model_prior, parameter_prior = parameter_prior,
+    slab_prior = slab_prior,
     grid_n = grid_n, grid_t_max = grid_t_max,
     post_warmup_simplify = post_warmup_simplify,
     n_chains = n_chains, threaded = threaded, seed = seed,
     adaptive_scheme = adaptive_scheme
   ))
+}
+
+.slab_coef_indices <- function(slab_prior, d, unc_names = NULL) {
+  coef <- slab_prior$coef
+  if (is.null(coef)) return(NULL)
+  if (is.character(coef)) {
+    if (is.null(unc_names)) {
+      cli::cli_abort("Character slab {.arg coef} requires unconstrained parameter names; use integer indices for custom-gradient {.fn pdmp_sample}.")
+    }
+    idx <- match(coef, unc_names)
+    if (anyNA(idx)) {
+      missing <- coef[is.na(idx)]
+      cli::cli_abort(c(
+        "{.arg coef} contains names not found among unconstrained parameter names.",
+        "x" = "Unknown names: {.val {missing}}."
+      ))
+    }
+    return(idx)
+  }
+  idx <- as.integer(coef)
+  if (any(idx < 1L) || any(idx > d)) {
+    cli::cli_abort("Integer {.arg coef} values must be 1-based indices in 1:d.")
+  }
+  idx
+}
+
+.slab_beta_dimension <- function(slab_prior, d, can_stick, unc_names = NULL) {
+  coef_idx <- .slab_coef_indices(slab_prior, d, unc_names = unc_names)
+  if (is.null(coef_idx)) sum(can_stick) else length(coef_idx)
+}
+
+.validate_slab_prior_dimensions <- function(slab_prior, d, can_stick, unc_names = NULL, model_prior = NULL) {
+  if (is.null(slab_prior)) return(invisible(TRUE))
+  coef_idx <- .slab_coef_indices(slab_prior, d, unc_names = unc_names)
+  p <- if (is.null(coef_idx)) sum(can_stick) else length(coef_idx)
+  if (p == 0L) {
+    cli::cli_abort("Dependent {.arg slab_prior} requires at least one stickable coefficient.")
+  }
+  if (!is.null(coef_idx) && !all(can_stick[coef_idx])) {
+    cli::cli_abort("Explicit slab {.arg coef} must be a subset of coordinates enabled by {.arg can_stick}.")
+  }
+  if (!is.null(model_prior) && is.exchangeable_model_size_prior(model_prior) && length(model_prior$omega) != p + 1L) {
+    cli::cli_abort("For {.fn exchangeable_model_size_prior}, {.arg omega} must have length slab beta dimension + 1 ({p + 1L}).")
+  }
+  if (slab_prior$type == "dense_gaussian") {
+    if (length(slab_prior$mean) != p) {
+      cli::cli_abort("Length of {.arg mean} must match the number of slab coefficients.")
+    }
+    if (!all(dim(slab_prior$cov) == c(p, p))) {
+      cli::cli_abort("Dimensions of {.arg cov} must match the number of slab coefficients.")
+    }
+  } else if (slab_prior$type == "independent_slab_density") {
+    if (!(length(slab_prior$kappa) %in% c(1L, p))) {
+      cli::cli_abort("Argument {.arg kappa} must be length 1 or match the number of slab coefficients.")
+    }
+  } else if (slab_prior$type == "exchangeable_gaussian") {
+    if (slab_prior$u + p * slab_prior$v <= 0) {
+      cli::cli_abort("Exchangeable slab covariance requires {.code u + p * v > 0}.")
+    }
+  }
+  invisible(TRUE)
 }
 
 #' Support Boundary Control
@@ -437,9 +538,17 @@ validate_stan_subsample <- function(subsample, standata, standata_path, path_to_
 #'   Only used with GridThinningStrategy to compute the Hessian-vector product.
 #' @param sticky Logical, whether to use sticky sampling (default: FALSE).
 #' @param can_stick Logical vector of length d, which coordinates can stick (default: all FALSE).
-#' @param model_prior Prior distribution object for model selection. Should be of class
-#'   'bernoulli' or 'beta-bernoulli' (default: NULL).
+#' @param model_prior Prior distribution object for model selection. Legacy
+#'   sticky sampling accepts \code{bernoulli()} or \code{betabernoulli()}.
+#'   \code{exchangeable_model_size_prior()} is reserved for the pending
+#'   dependent-slab path and currently requires gated \code{slab_prior} support.
 #' @param parameter_prior Numeric vector of length d, prior parameters for sticky sampling (default: NULL).
+#' @param slab_prior Optional dependent slab prior created by
+#'   \code{dense_gaussian_slab()}, \code{exchangeable_gaussian_slab()},
+#'   \code{independent_slab_density()}, \code{gaussian_scale_mixture_slab()},
+#'   or \code{arbitrary_slab_boundary()}. Mutually exclusive with
+#'   \code{parameter_prior}. This argument currently errors until the
+#'   active-set target correction bridge is implemented.
 #' @param grid_n Integer, number of grid points for GridThinningStrategy (default: 30).
 #' @param grid_t_max Numeric, maximum time for grid in GridThinningStrategy (default: 2.0).
 #' @param post_warmup_simplify Logical. If \code{TRUE}, the grid-thinning
@@ -475,6 +584,7 @@ pdmp_sample <- function(f, d,
                         x0 = NULL, theta0 = NULL,
                         hessian = NULL,
                         sticky = FALSE, can_stick = NULL, model_prior = NULL, parameter_prior = NULL,
+                        slab_prior = NULL,
                         grid_n = 30, grid_t_max = 2.0,
                         post_warmup_simplify = FALSE,
                         show_progress = TRUE,
@@ -482,6 +592,13 @@ pdmp_sample <- function(f, d,
                         adaptive_scheme = c("diagonal", "fullrank"),
                         materialize = TRUE,
                         support_boundary = support_boundary_control()) {
+
+  if (!is.null(slab_prior)) {
+    cli::cli_abort(c(
+      "Dependent {.arg slab_prior} is not yet supported for {.fn pdmp_sample}.",
+      "i" = "The active-set-aware custom target bridge is still pending; use legacy {.arg parameter_prior} for now."
+    ))
+  }
 
   # Validate function argument (fail fast before Julia setup)
   if (!rlang::is_function(f)) {
@@ -494,7 +611,7 @@ pdmp_sample <- function(f, d,
   # Use common validation function
   params <- validate_pdmp_params(d, flow, algorithm, T, t0, t_warmup, flow_mean, flow_cov,
                                 c0, x0, theta0, show_progress,
-                                sticky, can_stick, model_prior, parameter_prior,
+                                sticky, can_stick, model_prior, parameter_prior, slab_prior,
                                 grid_n, grid_t_max, post_warmup_simplify,
                                 n_chains, threaded, seed,
                                 adaptive_scheme = adaptive_scheme)
@@ -561,6 +678,7 @@ pdmp_sample <- function(f, d,
     hessian = hessian_f,
     sticky = sticky, can_stick = can_stick,
     model_prior = model_prior, parameter_prior = parameter_prior,
+    slab_prior = slab_prior,
     show_progress = show_progress, n_chains = n_chains, threaded = threaded,
     seed = seed,
     adaptive_scheme = adaptive_scheme,
@@ -620,6 +738,7 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
                         flow_mean = NULL, flow_cov = NULL, c0 = 1e-2,
                         x0 = NULL, theta0 = NULL,
                         sticky = FALSE, can_stick = NULL, model_prior = NULL, parameter_prior = NULL,
+                        slab_prior = NULL,
                         grid_n = 30, grid_t_max = 2.0,
                         post_warmup_simplify = FALSE,
                         show_progress = TRUE,
@@ -628,6 +747,13 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
                         materialize = TRUE,
                         support_boundary = support_boundary_control(),
                         subsample = NULL) {
+
+  if (!is.null(slab_prior)) {
+    cli::cli_abort(c(
+      "Dependent {.arg slab_prior} is not yet supported for Stan-backed sampling.",
+      "i" = "The two-model {.fn DependentSlabTarget} bridge is still pending; use legacy {.arg parameter_prior} for now."
+    ))
+  }
 
   # Validate file paths on R side before setting up Julia
   validate_type(path_to_stanmodel, type = "character", n = 1)
@@ -687,11 +813,19 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
       subsample$hpp_path
     )
   }
+  unc_names <- character(0)
+  if (!is.null(slab_prior)) {
+    unc_names <- .pdmpsamplers_julia_call(
+      "r_get_param_unc_names",
+      path_to_stanmodel,
+      standata_path
+    )
+  }
 
   # Use common validation function
   params <- validate_pdmp_params(d, flow, algorithm, T, t0, t_warmup, flow_mean, flow_cov,
                                  c0, x0, theta0, show_progress,
-                                 sticky, can_stick, model_prior, parameter_prior,
+                                 sticky, can_stick, model_prior, parameter_prior, slab_prior,
                                  grid_n, grid_t_max, post_warmup_simplify,
                                  n_chains, threaded, seed,
                                  adaptive_scheme = adaptive_scheme)
@@ -707,6 +841,7 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
   # Pass arguments to Julia
   for (nm in names(params))
     JuliaCall::julia_assign(nm, params[[nm]])
+  JuliaCall::julia_assign("_unc_names", unc_names)
   JuliaCall::julia_assign("support_boundary_mode", support_boundary$mode)
   JuliaCall::julia_assign("support_boundary_max_bisection_steps", support_boundary$max_bisection_steps)
   JuliaCall::julia_assign("support_boundary_time_rtol", support_boundary$time_rtol)
@@ -724,6 +859,8 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
       t0 = t0, T = T, t_warmup = t_warmup,
       sticky = sticky, can_stick = can_stick,
       model_prior = model_prior, parameter_prior = parameter_prior,
+      slab_prior = slab_prior,
+      unc_names = _unc_names,
       show_progress = show_progress, n_chains = n_chains, threaded = threaded,
       seed = seed,
       adaptive_scheme = adaptive_scheme,
@@ -776,7 +913,9 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
       post_warmup_simplify = post_warmup_simplify,
       use_fd_hcv = _subsample_use_fd_hcv,
       sticky = sticky, can_stick = can_stick,
-      model_prior = model_prior, parameter_prior = parameter_prior
+      model_prior = model_prior, parameter_prior = parameter_prior,
+      slab_prior = slab_prior,
+      unc_names = _unc_names
     );")
   }
   if (is.environment(result)) result <- as.list(result)

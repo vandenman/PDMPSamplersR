@@ -60,7 +60,10 @@ pdmp_sample_subsampled <- function(
     d, flow, algorithm, T, t0, t_warmup, flow_mean, flow_cov,
     c0, x0, theta0 = NULL, show_progress,
     sticky = FALSE, can_stick = NULL, model_prior = NULL, parameter_prior = NULL,
-    grid_n, grid_t_max, post_warmup_simplify, n_chains, threaded, seed,
+    slab_prior = NULL,
+    grid_n = grid_n, grid_t_max = grid_t_max,
+    post_warmup_simplify = post_warmup_simplify,
+    n_chains = n_chains, threaded = threaded, seed = seed,
     adaptive_scheme = adaptive_scheme
   )
 

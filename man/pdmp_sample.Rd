@@ -23,6 +23,7 @@ pdmp_sample(
   can_stick = NULL,
   model_prior = NULL,
   parameter_prior = NULL,
+  slab_prior = NULL,
   grid_n = 30,
   grid_t_max = 2,
   post_warmup_simplify = FALSE,
@@ -76,10 +77,19 @@ Only used with GridThinningStrategy to compute the Hessian-vector product.}
 
 \item{can_stick}{Logical vector of length d, which coordinates can stick (default: all FALSE).}
 
-\item{model_prior}{Prior distribution object for model selection. Should be of class
-'bernoulli' or 'beta-bernoulli' (default: NULL).}
+\item{model_prior}{Prior distribution object for model selection. Legacy
+sticky sampling accepts \code{bernoulli()} or \code{betabernoulli()}.
+\code{exchangeable_model_size_prior()} is reserved for the pending
+dependent-slab path and currently requires gated \code{slab_prior} support.}
 
 \item{parameter_prior}{Numeric vector of length d, prior parameters for sticky sampling (default: NULL).}
+
+\item{slab_prior}{Optional dependent slab prior created by
+\code{dense_gaussian_slab()}, \code{exchangeable_gaussian_slab()},
+\code{independent_slab_density()}, \code{gaussian_scale_mixture_slab()},
+or \code{arbitrary_slab_boundary()}. Mutually exclusive with
+\code{parameter_prior}. This argument currently errors until the active-set
+target correction bridge is implemented.}
 
 \item{grid_n}{Integer, number of grid points for GridThinningStrategy (default: 30).}
 

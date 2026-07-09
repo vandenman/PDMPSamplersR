@@ -128,13 +128,21 @@ warn_if_low_random_effect_subsampling_support <- function(sdata, subsample_size)
 #'   population-level coefficients are candidates for selection. Length
 #'   must match the number of supported coefficients. If omitted, all
 #'   non-intercept population-level coefficients are candidates.
-#' @param model_prior A [bernoulli()] or [betabernoulli()] object
-#'   specifying the prior on model space. Required when `sticky = TRUE`.
+#' @param model_prior A [bernoulli()] or [betabernoulli()] object specifying
+#'   the prior on model space for the currently supported legacy sticky path.
+#'   [exchangeable_model_size_prior()] is reserved for the pending dependent
+#'   slab path.
 #' @param kappa Optional numeric vector of slab densities at zero for each
 #'   stickable coordinate (κ in the sticky PDMP literature). If omitted,
 #'   derived automatically from the brms prior specification (only
 #'   `normal(0, s)` and `student_t(df, 0, s)` are supported for automatic
 #'   derivation).
+#' @param slab_prior Optional dependent slab prior created by
+#'   [dense_gaussian_slab()], [exchangeable_gaussian_slab()],
+#'   [independent_slab_density()], [gaussian_scale_mixture_slab()], or
+#'   [arbitrary_slab_boundary()]. Mutually exclusive with `kappa`. This argument
+#'   currently errors for `brm_pdmp()` until the two-model dependent-slab target
+#'   bridge is implemented.
 #' @param stanvars Optional `stanvar` object for custom Stan code.
 #' @param sample_prior Currently only `"no"` is supported.
 #' @param save_model Optional file path to save the generated Stan code.
@@ -188,7 +196,7 @@ brm_pdmp <- function(
     post_warmup_simplify = FALSE,
     use_fd_hcv = FALSE,
     sticky = FALSE, can_stick = NULL, model_prior = NULL,
-    kappa = NULL,
+    kappa = NULL, slab_prior = NULL,
     stanvars = NULL, sample_prior = "no",
     save_model = NULL,
     ...
@@ -205,6 +213,19 @@ brm_pdmp <- function(
   algorithm <- match.arg(algorithm)
   adaptive_scheme <- match.arg(adaptive_scheme)
   hvp_mode <- match.arg(hvp_mode)
+
+  if (!is.null(slab_prior)) {
+    if (!isTRUE(sticky)) {
+      cli::cli_abort("Argument {.arg slab_prior} requires {.arg sticky} to be {.code TRUE}.")
+    }
+    if (!flow %in% c("ZigZag", "BouncyParticle") || algorithm != "GridThinningStrategy") {
+      cli::cli_abort("Dependent {.arg slab_prior} sticky sampling currently requires ZigZag or BouncyParticle with {.val GridThinningStrategy}.")
+    }
+    cli::cli_abort(c(
+      "Dependent {.arg slab_prior} is not yet supported for {.fn brm_pdmp}.",
+      "i" = "The two-model {.fn DependentSlabTarget} bridge is still pending; use legacy {.arg kappa} for brms sticky sampling for now."
+    ))
+  }
   if (!is.null(seed)) {
     if (!rlang::is_integerish(seed, n = 1)) {
       cli::cli_abort("Argument {.arg seed} must be NULL or an integerish scalar.")
@@ -313,15 +334,46 @@ brm_pdmp <- function(
       normalizePath(stan_file, mustWork = TRUE),
       normalizePath(data_for_names, mustWork = TRUE)
     )
-    sticky_args <- validate_brms_sticky(
-      sticky, can_stick, model_prior, kappa,
-      d = length(unc_names), unc_names = unc_names,
-      supported_coef_names = supported_coef_names,
-      prior = brms_prior, subsampled = subsampled
-    )
+    if (!is.null(slab_prior)) {
+      if (!is.null(kappa)) {
+        cli::cli_abort("Use either legacy {.arg kappa} or dependent {.arg slab_prior}, not both.")
+      }
+      if (!is.slab_prior(slab_prior)) {
+        cli::cli_abort("Argument {.arg slab_prior} must be created by a dependent slab constructor.")
+      }
+      if (is.null(model_prior) || !is.model_prior(model_prior)) {
+        cli::cli_abort("Argument {.arg model_prior} must be provided when {.arg sticky} is {.code TRUE}.")
+      }
+      can_stick_full <- map_can_stick(
+        unc_names,
+        supported_coef_names = supported_coef_names,
+        user_can_stick = can_stick
+      )
+      .validate_slab_prior_dimensions(slab_prior, length(unc_names), can_stick_full,
+                                      unc_names = unc_names, model_prior = model_prior)
+      sticky_args <- list(
+        sticky = TRUE,
+        can_stick = can_stick_full,
+        model_prior = model_prior,
+        parameter_prior = NULL,
+        slab_prior = slab_prior,
+        unc_names = unc_names,
+        supported_coef_names = supported_coef_names
+      )
+    } else {
+      sticky_args <- validate_brms_sticky(
+        sticky, can_stick, model_prior, kappa,
+        d = length(unc_names), unc_names = unc_names,
+        supported_coef_names = supported_coef_names,
+        prior = brms_prior, subsampled = subsampled
+      )
+      sticky_args$slab_prior <- NULL
+      sticky_args$unc_names <- unc_names
+    }
   } else {
     sticky_args <- list(sticky = FALSE, can_stick = NULL,
-                        model_prior = NULL, parameter_prior = NULL)
+                        model_prior = NULL, parameter_prior = NULL,
+                        slab_prior = NULL, unc_names = character(0))
   }
 
   if (subsampled) {
@@ -359,7 +411,9 @@ brm_pdmp <- function(
       sticky = sticky_args$sticky,
       can_stick = sticky_args$can_stick,
       model_prior = sticky_args$model_prior,
-      parameter_prior = sticky_args$parameter_prior
+      parameter_prior = sticky_args$parameter_prior,
+      slab_prior = sticky_args$slab_prior,
+      unc_names = sticky_args$unc_names
     )
   } else {
     jl_result <- .pdmpsamplers_julia_call(
@@ -385,7 +439,9 @@ brm_pdmp <- function(
       sticky = sticky_args$sticky,
       can_stick = sticky_args$can_stick,
       model_prior = sticky_args$model_prior,
-      parameter_prior = sticky_args$parameter_prior
+      parameter_prior = sticky_args$parameter_prior,
+      slab_prior = sticky_args$slab_prior,
+      unc_names = sticky_args$unc_names
     )
   }
 

@@ -15,6 +15,7 @@ export r_pdmp_stan, r_pdmp_custom, r_pdmp_custom_subsampled
 export write_cmdstan_csv, r_constrain_and_write_csv
 export r_pdmp_brms_subsampled, r_pdmp_stan_for_brms
 export r_get_param_unc_names
+export r_threading_available
 
 function build_flow(flow_type::String, prec::AbstractMatrix{Float64}, flow_mean::AbstractVector{Float64};
                     adaptive_scheme::String="diagonal")
@@ -375,6 +376,29 @@ function extract_stats(chains::PDMPChains)
         "lazy_proposal_attempts" => Float64[s.lazy_proposal_attempts for s in all],
         "lazy_proposal_rejections" => Float64[s.lazy_proposal_rejections for s in all],
         "grid_resets_from_dynamics_adaptation" => Float64[s.grid_resets_from_dynamics_adaptation for s in all],
+        "grid_endpoint_evaluations" => Float64[s.grid_endpoint_evaluations for s in all],
+        "grid_cached_endpoint_reuses" => Float64[s.grid_cached_endpoint_reuses for s in all],
+        "grid_acceptance_tests" => Float64[s.grid_acceptance_tests for s in all],
+        "grid_acceptance_gradient_calls" => Float64[s.grid_acceptance_gradient_calls for s in all],
+        "grid_horizon_hits" => Float64[s.grid_horizon_hits for s in all],
+        "constant_bound_attempts" => Float64[s.constant_bound_attempts for s in all],
+        "constant_bound_accepts" => Float64[s.constant_bound_accepts for s in all],
+        "constant_bound_rejections" => Float64[s.constant_bound_rejections for s in all],
+        "constant_bound_violations" => Float64[s.constant_bound_violations for s in all],
+        "constant_bound_safety_fallbacks" => Float64[s.constant_bound_safety_fallbacks for s in all],
+        "sticky_inner_searches" => Float64[s.sticky_inner_searches for s in all],
+        "sticky_inner_wins" => Float64[s.sticky_inner_wins for s in all],
+        "sticky_inner_wasted_by_sticky" => Float64[s.sticky_inner_wasted_by_sticky for s in all],
+        "sticky_inner_wasted_by_refresh" => Float64[s.sticky_inner_wasted_by_refresh for s in all],
+        "sticky_all_frozen_events" => Float64[s.sticky_all_frozen_events for s in all],
+        "warmup_events" => Float64[s.warmup_events for s in all],
+        "main_events" => Float64[s.main_events for s in all],
+        "warmup_gradient_calls" => Float64[s.warmup_gradient_calls for s in all],
+        "main_gradient_calls" => Float64[s.main_gradient_calls for s in all],
+        "warmup_hessian_calls" => Float64[s.warmup_hessian_calls for s in all],
+        "main_hessian_calls" => Float64[s.main_hessian_calls for s in all],
+        "warmup_elapsed_time" => Float64[s.warmup_elapsed_time for s in all],
+        "main_elapsed_time" => Float64[s.main_elapsed_time for s in all],
         "ct_ess"                => ct_ess,
     )
 end
@@ -1386,6 +1410,8 @@ function r_get_param_unc_names(path_to_stan_model::String, path_to_stan_data::St
     sm = BridgeStan.StanModel(path_to_stan_model, path_to_stan_data; warn=false)
     return BridgeStan.param_unc_names(sm)
 end
+
+r_threading_available() = Base.Threads.nthreads() > 1
 
 end # module PDMPSamplersRBridge
 

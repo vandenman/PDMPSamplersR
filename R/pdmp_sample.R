@@ -72,6 +72,11 @@ validate_pdmp_params <- function(d, flow, algorithm, T, t0 = 0.0, t_warmup = 0.0
   n_chains <- cast_integer(n_chains, n = 1)
   validate_type(n_chains, type = "integer", n = 1, positive = TRUE)
   validate_type(threaded, type = "logical", n = 1)
+
+  if (threaded && rlang::is_false(.pdmpsamplers_julia_eval("r_threading_available()"))) {
+    cli::cli_warn("Argument {.arg threaded} is set to TRUE but Julia was started with only one thread so this has no effect. Call Sys.setenv(\"JULIA_NUM_THREADS\"=<number>) to set the desired number of threads at the start of an analysis.")
+  }
+
   if (!is.null(seed)) {
     if (!rlang::is_integerish(seed, n = 1)) {
       cli::cli_abort("Argument {.arg seed} must be NULL or an integerish scalar.")
@@ -523,6 +528,14 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
                                  grid_n, grid_t_max, post_warmup_simplify,
                                  n_chains, threaded, seed,
                                  adaptive_scheme = adaptive_scheme)
+
+  if (isTRUE(params$threaded) && params$n_chains > 1L) {
+    cli::cli_warn(c(
+      "Stan-backed PDMP sampling uses BridgeStan gradients, which are serialized across Julia threads to avoid Stan Math autodiff memory corruption.",
+      "i" = "This prevents segmentation faults but may limit parallel-chain speedups.",
+      "i" = "For true parallel speedups with Stan-backed models, use separate R/Julia processes or a Julia-native thread-safe gradient implementation."
+    ))
+  }
 
   support_boundary <- validate_support_boundary_control(support_boundary)
 

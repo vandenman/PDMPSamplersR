@@ -12,6 +12,8 @@
   : Support Boundary Control
 - [`write_stan_json()`](https://vandenman.github.io/PDMPSamplersR/reference/write_stan_json.md)
   : Write data to a JSON file readable by Stan
+- [`pdmp_subsample_hpp_path()`](https://vandenman.github.io/PDMPSamplersR/reference/pdmp_subsample_hpp_path.md)
+  : Path to the bundled Stan subsampling header
 
 ## Results
 

@@ -34,7 +34,8 @@ pdmp_sample_from_stanmodel(
   seed = NULL,
   adaptive_scheme = c("diagonal", "fullrank"),
   materialize = TRUE,
-  support_boundary = support_boundary_control()
+  support_boundary = support_boundary_control(),
+  subsample = NULL
 )
 ```
 
@@ -179,6 +180,15 @@ pdmp_sample_from_stanmodel(
   [`support_boundary_control()`](https://vandenman.github.io/PDMPSamplersR/reference/support_boundary_control.md)
   that controls support-boundary diagnostics and heuristic event/refresh
   recovery.
+
+- subsample:
+
+  NULL (default) for full-data sampling, or a named list with at least
+  \`size\` and \`prior_standata\`. Optional entries include
+  \`path_to_stanmodel\` (the external-C++ subsampled Stan model;
+  defaults to \`path_to_stanmodel\`), \`hpp_path\`,
+  \`n_anchor_updates\`, \`hvp_mode\`, \`use_hcv\`, \`use_anchor_bank\`,
+  \`use_fd_hvp\`, \`compute_lp\`, and \`resample_dt\`.
 
 ## Value
 

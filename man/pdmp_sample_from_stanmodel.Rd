@@ -31,7 +31,8 @@ pdmp_sample_from_stanmodel(
   seed = NULL,
   adaptive_scheme = c("diagonal", "fullrank"),
   materialize = TRUE,
-  support_boundary = support_boundary_control()
+  support_boundary = support_boundary_control(),
+  subsample = NULL
 )
 }
 \arguments{
@@ -110,6 +111,13 @@ This can save time and memory if you don't need to save the result or if you pla
 
 \item{support_boundary}{A list created by \code{support_boundary_control()} that
 controls support-boundary diagnostics and heuristic event/refresh recovery.}
+
+\item{subsample}{NULL (default) for full-data sampling, or a named list with
+at least `size` and `prior_standata`. Optional entries include
+`path_to_stanmodel` (the external-C++ subsampled Stan model; defaults to
+`path_to_stanmodel`), `hpp_path`, `n_anchor_updates`, `hvp_mode`,
+`use_hcv`, `use_anchor_bank`, `use_fd_hvp`, `compute_lp`, and
+`resample_dt`.}
 }
 \value{
 A \code{pdmp_result} object. Use \code{mean}, \code{var},

@@ -66,6 +66,159 @@ test_that("pdmp_sample_from_stanmodel rejects wrong data extension", {
   expect_error(pdmp_sample_from_stanmodel(model_file, wrong_data), "JSON")
 })
 
+test_that("pdmp_sample_from_stanmodel validates subsample controls before Julia setup", {
+  model_file <- tempfile(fileext = ".stan")
+  hpp_file <- tempfile(fileext = ".hpp")
+  file.create(model_file)
+  file.create(hpp_file)
+  on.exit({unlink(model_file); unlink(hpp_file)}, add = TRUE)
+
+  expect_error(
+    pdmp_sample_from_stanmodel(
+      model_file, list(N = 5L),
+      subsample = list(size = 5L, prior_standata = list(N = 1L), hpp_path = hpp_file)
+    ),
+    "subsample\\$size"
+  )
+
+  expect_error(
+    pdmp_sample_from_stanmodel(
+      model_file, list(N = 5L),
+      subsample = list(size = 2L, hpp_path = hpp_file)
+    ),
+    "prior_standata"
+  )
+
+  expect_error(
+    pdmp_sample_from_stanmodel(
+      model_file, list(N = 5L),
+      subsample = list(size = 2L, prior_standata = list(N = 1L), hpp_path = hpp_file, hvp_mode = "bad")
+    ),
+    "hvp_mode|arg should be"
+  )
+})
+
+test_that("pdmp_sample_from_stanmodel accepts subsample prior data as list", {
+  model_file <- tempfile(fileext = ".stan")
+  hpp_file <- tempfile(fileext = ".hpp")
+  file.create(model_file)
+  file.create(hpp_file)
+  on.exit({unlink(model_file); unlink(hpp_file)}, add = TRUE)
+
+  captured <- new.env(parent = emptyenv())
+  captured$data <- list()
+  captured$file <- character()
+
+  testthat::local_mocked_bindings(
+    write_stan_json = function(data, file, always_decimal = FALSE) {
+      captured$data[[length(captured$data) + 1L]] <- data
+      captured$file <- c(captured$file, file)
+      jsonlite::write_json(list(N = 1), path = file, auto_unbox = TRUE)
+    },
+    check_for_julia_setup = function() {
+      stop("SENTINEL_CHECK_SETUP", call. = FALSE)
+    },
+    .package = "PDMPSamplersR"
+  )
+
+  expect_error(
+    pdmp_sample_from_stanmodel(
+      model_file, list(N = 5L),
+      subsample = list(
+        size = 2L,
+        prior_standata = list(N = 1L, prior_only = 1L),
+        hpp_path = hpp_file
+      )
+    ),
+    "SENTINEL_CHECK_SETUP"
+  )
+
+  expect_equal(captured$data[[1L]], list(N = 5L))
+  expect_equal(captured$data[[2L]], list(N = 1L, prior_only = 1L))
+  expect_length(captured$file, 2L)
+  expect_false(any(file.exists(captured$file)))
+})
+
+test_that("pdmp_sample_from_stanmodel subsample path compiles full model with external header", {
+  skip_on_cran()
+  skip_if_no_pdmp_julia_backend()
+
+  full_model <- tempfile(fileext = ".stan")
+  sub_model <- tempfile(fileext = ".stan")
+  on.exit(unlink(c(full_model, sub_model)), add = TRUE)
+
+  writeLines(c(
+    "functions {",
+    "  int pdmp_get_subsample_size();",
+    "  int pdmp_get_subsample_index(int n);",
+    "}",
+    "data {",
+    "  int<lower=1> N;",
+    "  int<lower=0,upper=1> prior_only;",
+    "}",
+    "parameters {",
+    "  real theta;",
+    "}",
+    "model {",
+    "  theta ~ normal(0, 1);",
+    "  if (!prior_only) {",
+    "    for (n in 1:N) target += normal_lpdf(theta | 0, 1);",
+    "  }",
+    "}"
+  ), full_model)
+
+  writeLines(c(
+    "functions {",
+    "  int pdmp_get_subsample_size();",
+    "  int pdmp_get_subsample_index(int n);",
+    "}",
+    "data {",
+    "  int<lower=1> N;",
+    "  int<lower=0,upper=1> prior_only;",
+    "}",
+    "parameters {",
+    "  real theta;",
+    "}",
+    "model {",
+    "  theta ~ normal(0, 1);",
+    "  if (!prior_only) {",
+    "    for (n in 1:pdmp_get_subsample_size()) {",
+    "      int idx = pdmp_get_subsample_index(n);",
+    "      target += normal_lpdf(theta | idx - idx, 1);",
+    "    }",
+    "  }",
+    "}"
+  ), sub_model)
+
+  fit <- pdmp_sample_from_stanmodel(
+    full_model,
+    list(N = 3L, prior_only = 0L),
+    flow = "ZigZag",
+    algorithm = "GridThinningStrategy",
+    T = 1.0,
+    x0 = 10,
+    theta0 = 1,
+    grid_n = 3L,
+    grid_t_max = 0.1,
+    show_progress = FALSE,
+    materialize = FALSE,
+    subsample = list(
+      size = 1L,
+      prior_standata = list(N = 1L, prior_only = 1L),
+      path_to_stanmodel = sub_model,
+      hpp_path = pdmp_subsample_hpp_path(),
+      hvp_mode = "none",
+      use_fd_hvp = TRUE,
+      n_anchor_updates = 0L,
+      discretize_dt = 0.05
+    )
+  )
+
+  expect_s3_class(fit, "pdmp_result")
+  expect_named(fit, c("chains", "stats", "d", "n_chains", "skeleton"))
+  expect_equal(fit$d, 1L)
+})
+
 test_that("pdmp_sample_from_stanmodel runs with mvnormal Stan model", {
   skip_on_cran()
   skip_if_no_pdmp_julia_backend()

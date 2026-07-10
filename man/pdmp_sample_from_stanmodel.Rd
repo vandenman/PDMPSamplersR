@@ -7,6 +7,8 @@
 pdmp_sample_from_stanmodel(
   path_to_stanmodel,
   standata,
+  prior_stanmodel = NULL,
+  prior_standata = NULL,
   flow = c("ZigZag", "BouncyParticle", "Boomerang", "AdaptiveBoomerang",
     "PreconditionedZigZag", "PreconditionedBPS"),
   algorithm = c("ThinningStrategy", "GridThinningStrategy", "RootsPoissonStrategy"),
@@ -45,6 +47,13 @@ BridgeStan will compile it automatically.}
 or a named list that will be written to a temporary JSON file via
 [write_stan_json()].}
 
+\item{prior_stanmodel}{Optional Stan model path for the base prior target
+used by dependent slabs. Defaults to \code{path_to_stanmodel} when
+\code{prior_standata} is supplied.}
+
+\item{prior_standata}{Optional prior-only Stan data path or named list for
+the base prior target. Required when \code{slab_prior} is supplied.}
+
 \item{flow}{Character string specifying the flow type. One of "ZigZag",
 "BouncyParticle", "Boomerang", "AdaptiveBoomerang", "PreconditionedZigZag",
 or "PreconditionedBPS".
@@ -79,8 +88,7 @@ diagonal preconditioner during warmup and also require
 
 \item{model_prior}{Prior distribution object for model selection. Legacy
 sticky sampling accepts \code{bernoulli()} or \code{betabernoulli()}.
-\code{exchangeable_model_size_prior()} is reserved for the pending
-dependent-slab path and currently requires gated \code{slab_prior} support.}
+Dependent-slab sampling also accepts \code{exchangeable_model_size_prior()}.}
 
 \item{parameter_prior}{Numeric vector of length d, prior parameters for sticky sampling (default: NULL).}
 
@@ -88,8 +96,9 @@ dependent-slab path and currently requires gated \code{slab_prior} support.}
 \code{dense_gaussian_slab()}, \code{exchangeable_gaussian_slab()},
 \code{independent_slab_density()}, \code{gaussian_scale_mixture_slab()},
 or \code{arbitrary_slab_boundary()}. Mutually exclusive with
-\code{parameter_prior}. This argument is currently gated for Stan-backed
-sampling until the two-model dependent-slab target bridge is implemented.}
+\code{parameter_prior}. Stan-backed dependent slabs require
+\code{prior_standata} and optionally \code{prior_stanmodel} for the
+base-prior target.}
 
 \item{grid_n}{Integer, number of grid points for GridThinningStrategy (default: 30).}
 

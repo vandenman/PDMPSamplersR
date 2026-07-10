@@ -116,28 +116,83 @@ test_that("slab_prior requires sticky and reconciles coef with can_stick", {
   )
 })
 
-test_that("public custom-gradient sampling gates slab_prior until target correction exists", {
+test_that("callback Gaussian slabs require active negative gradient for sampling", {
+  callback_slab <- gaussian_scale_mixture_slab(function(x) {
+    list(mean = rep(0, 2), cov = diag(2))
+  })
+
+  expect_error(
+    PDMPSamplersR:::validate_pdmp_params(
+      2, "ZigZag", "GridThinningStrategy", 10,
+      sticky = TRUE,
+      can_stick = c(TRUE, TRUE),
+      model_prior = bernoulli(0.5),
+      slab_prior = callback_slab
+    ),
+    "active_prior_neggrad"
+  )
+
   expect_error(
     pdmp_sample(
       function(x) x,
       d = 2,
+      prior_grad = function(x) x,
+      flow = "ZigZag",
+      algorithm = "GridThinningStrategy",
+      sticky = TRUE,
+      can_stick = c(TRUE, TRUE),
+      model_prior = bernoulli(0.5),
+      slab_prior = callback_slab
+    ),
+    "active_prior_neggrad"
+  )
+})
+
+test_that("public custom-gradient sampling requires prior_grad for slab_prior", {
+  expect_error(
+    pdmp_sample(
+      function(x) x,
+      d = 2,
+      algorithm = "GridThinningStrategy",
       sticky = TRUE,
       model_prior = bernoulli(0.5),
       slab_prior = dense_gaussian_slab(c(0, 0), diag(2), coef = 1:2)
     ),
-    "not yet supported"
+    "prior_grad"
   )
 })
 
-test_that("Stan-backed dependent slabs are gated until target correction exists", {
+test_that("public custom-gradient dependent slab path can run a tiny chain", {
+  skip_on_cran()
+  skip_if_no_pdmp_julia_backend()
+
+  result <- pdmp_sample(
+    function(x) x,
+    d = 2,
+    prior_grad = function(x) x,
+    flow = "ZigZag",
+    algorithm = "GridThinningStrategy",
+    T = 1,
+    sticky = TRUE,
+    can_stick = c(TRUE, TRUE),
+    model_prior = bernoulli(0.5),
+    slab_prior = dense_gaussian_slab(c(0, 0), diag(2)),
+    show_progress = FALSE,
+    materialize = FALSE
+  )
+  expect_s3_class(result, "pdmp_result")
+})
+
+test_that("Stan-backed dependent slabs require a prior-only target", {
   expect_error(
     pdmp_sample_from_stanmodel(
       "missing.stan", "missing.json",
       sticky = TRUE,
+      algorithm = "GridThinningStrategy",
       model_prior = bernoulli(0.5),
       slab_prior = dense_gaussian_slab(0, matrix(1, 1, 1), coef = 1)
     ),
-    "not yet supported"
+    "prior_standata"
   )
 })
 
@@ -164,4 +219,81 @@ test_that("Julia bridge builds dependent slab concrete types", {
     )))
   ")
   expect_match(alg_type, "AggregateSticky")
+})
+
+test_that("Julia bridge executes R callback slab provider contracts", {
+  skip_on_cran()
+  skip_if_no_pdmp_julia_backend()
+
+  callback_slab <- gaussian_scale_mixture_slab(
+    mean_cov = function(x) {
+      list(
+        mean = c(0.25 + x[[2]], -0.5),
+        cov = matrix(c(2.0, 0.3, 0.3, 1.5), 2, 2)
+      )
+    },
+    active_prior_neggrad = function(x, active) {
+      out <- numeric(length(x))
+      if (active[[1]]) out[[1]] <- x[[1]] - 0.25
+      if (active[[2]]) out[[3]] <- 2 * x[[3]]
+      out
+    },
+    coef = c("b.one", "b.three")
+  )
+  arbitrary_slab <- arbitrary_slab_boundary(
+    log_q_zero = function(x, active, j) {
+      -0.5 * j + sum(active) + x[[2]]
+    },
+    active_prior_neggrad = function(x, active) {
+      out <- numeric(length(x))
+      if (active[[1]]) out[[1]] <- 3 * x[[1]]
+      if (active[[2]]) out[[3]] <- 4 * x[[3]]
+      out
+    },
+    coef = c("b.one", "b.three")
+  )
+
+  JuliaCall::julia_assign("r_callback_slab", callback_slab)
+  JuliaCall::julia_assign("r_arbitrary_slab", arbitrary_slab)
+  JuliaCall::julia_assign("r_callback_can_stick", c(TRUE, FALSE, TRUE))
+  JuliaCall::julia_assign("r_callback_names", c("b.one", "b.two", "b.three"))
+  JuliaCall::julia_assign("r_callback_missing_grad", gaussian_scale_mixture_slab(
+    mean_cov = function(x) list(mean = c(0, 0), cov = diag(2)),
+    coef = c("b.one", "b.three")
+  ))
+
+  expect_true(JuliaCall::julia_eval("
+    begin
+      provider = build_slab_provider(r_callback_slab, r_callback_names, r_callback_can_stick, 3)
+      mean, cov = gaussian_slab(provider, [1.0, 2.0, -1.0])
+      mean ≈ [2.25, -0.5] && cov ≈ [2.0 0.3; 0.3 1.5]
+    end
+  "))
+  expect_true(JuliaCall::julia_eval("
+    begin
+      provider = build_slab_provider(r_callback_slab, r_callback_names, r_callback_can_stick, 3)
+      out = fill(NaN, 3)
+      active_prior_neggrad!(provider, out, [1.0, 2.0, -1.0], BitVector([true, true]))
+      out ≈ [0.75, 0.0, -2.0]
+    end
+  "))
+  expect_true(JuliaCall::julia_eval("
+    begin
+      provider = build_slab_provider(r_arbitrary_slab, r_callback_names, r_callback_can_stick, 3)
+      active = BitVector([true, false])
+      log_boundary_density_zero(provider, [1.0, 2.0, -1.0], active, 2) ≈ 2.0
+    end
+  "))
+  expect_true(JuliaCall::julia_eval("
+    begin
+      provider = build_slab_provider(r_arbitrary_slab, r_callback_names, r_callback_can_stick, 3)
+      out = fill(NaN, 3)
+      active_prior_neggrad!(provider, out, [1.0, 2.0, -1.0], BitVector([true, true]))
+      out ≈ [3.0, 0.0, -4.0]
+    end
+  "))
+  expect_error(
+    JuliaCall::julia_eval("PDMPSamplersRBridge._validate_sampling_slab_prior(r_callback_missing_grad)"),
+    "active_prior_neggrad"
+  )
 })

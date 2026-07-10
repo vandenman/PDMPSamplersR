@@ -38,17 +38,23 @@ an exchangeable Gaussian slab.}
 \item{zero_mean}{Logical. If \code{TRUE}, use the optimized zero-mean
 exchangeable Julia provider.}
 
-\item{mean_cov}{R function for state-dependent Gaussian slab callbacks.}
+\item{mean_cov}{R function for state-dependent Gaussian slab callbacks.
+It is called as \code{mean_cov(x)} and should return a list with numeric
+fields \code{mean} and \code{cov}.}
 
-\item{active_prior_neggrad}{Optional R function for the active slab
-negative-gradient contribution, or required function for arbitrary slabs.}
+\item{active_prior_neggrad}{R function for the active slab
+negative-gradient contribution. It is called as
+\code{active_prior_neggrad(x, active)}, where \code{active} is a logical
+vector over the slab coefficients, and should return a full unconstrained
+negative-gradient vector. This callback is required when a callback Gaussian
+slab is used for dependent-slab sampling.}
 
-\item{log_q_zero}{R function returning a boundary log-density at zero.}
+\item{log_q_zero}{R function returning a boundary log-density at zero. It is
+called as \code{log_q_zero(x, active, j)}, where \code{j} is a 1-based slab
+coefficient index.}
 }
 \value{
-A slab prior specification for the dependent aggregate sticky bridge. Public
-sampling functions currently gate this argument until the active-set target
-correction bridge is implemented.
+A slab prior specification for the dependent aggregate sticky bridge.
 }
 \description{
 These constructors describe slab priors for the dependent aggregate sticky

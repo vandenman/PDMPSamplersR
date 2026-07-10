@@ -69,6 +69,16 @@ end
 
 _haskey(x, key::Symbol) = haskey(x, key) || haskey(x, String(key))
 _rget(x, key::Symbol) = haskey(x, key) ? x[key] : x[String(key)]
+_as_float_vector(x::Number) = [Float64(x)]
+_as_float_vector(x) = Vector{Float64}(x)
+_as_bool_vector(x::Bool) = Bool[x]
+_as_bool_vector(x::Nothing) = nothing
+_as_bool_vector(x) = Bool.(x)
+_as_string_vector(x::AbstractString) = String[String(x)]
+_as_string_vector(x::Nothing) = String[]
+_as_string_vector(x) = String.(x)
+_as_float_matrix(x::Number) = reshape([Float64(x)], 1, 1)
+_as_float_matrix(x) = Matrix{Float64}(x)
 
 function _slab_type(slab_prior)
     t = _rget(slab_prior, :type)
@@ -83,6 +93,13 @@ function _coef_indices(slab_prior, unc_names::AbstractVector{<:AbstractString},
         isempty(idx) && throw(ArgumentError("slab_prior requires at least one stickable coefficient"))
         return Int.(idx)
     end
+    if coef isa AbstractString
+        isempty(unc_names) && throw(ArgumentError("character slab coef requires unconstrained parameter names"))
+        pos = findfirst(==(String(coef)), String.(unc_names))
+        isnothing(pos) && throw(ArgumentError("slab coef name $(coef) was not found among unconstrained parameter names"))
+        !can_stick[pos] && throw(ArgumentError("explicit slab coef must be a subset of can_stick coordinates"))
+        return [Int(pos)]
+    end
     if coef isa AbstractVector{<:AbstractString}
         isempty(unc_names) && throw(ArgumentError("character slab coef requires unconstrained parameter names"))
         idx = Int[]
@@ -95,7 +112,7 @@ function _coef_indices(slab_prior, unc_names::AbstractVector{<:AbstractString},
             throw(ArgumentError("explicit slab coef must be a subset of can_stick coordinates"))
         return idx
     end
-    idx = Int.(coef)
+    idx = coef isa Integer ? [Int(coef)] : Int.(coef)
     any(i -> i < 1 || i > d, idx) && throw(ArgumentError("integer slab coef indices must lie in 1:d"))
     any(i -> !can_stick[i], idx) &&
         throw(ArgumentError("explicit slab coef must be a subset of can_stick coordinates"))
@@ -105,7 +122,7 @@ end
 function build_model_prior_odds(model_prior, beta_indices::AbstractVector{Int}, d::Integer)
     m = length(beta_indices)
     if _haskey(model_prior, :prob)
-        prob = Vector{Float64}(_rget(model_prior, :prob))
+        prob = _as_float_vector(_rget(model_prior, :prob))
         if length(prob) == 1
             return BernoulliModelPriorOdds(fill(prob[1], m))
         elseif length(prob) == m
@@ -116,7 +133,7 @@ function build_model_prior_odds(model_prior, beta_indices::AbstractVector{Int}, 
             throw(DimensionMismatch("Bernoulli model prior length must be 1, beta dimension, or full dimension"))
         end
     elseif _haskey(model_prior, :omega)
-        omega = Vector{Float64}(_rget(model_prior, :omega))
+        omega = _as_float_vector(_rget(model_prior, :omega))
         length(omega) == m + 1 ||
             throw(DimensionMismatch("exchangeable model-size prior must have length beta dimension + 1"))
         return ExchangeableModelSizePrior(log.(omega); normalize=true)
@@ -132,8 +149,8 @@ function build_slab_provider(slab_prior, unc_names::AbstractVector{<:AbstractStr
     beta_idx = _coef_indices(slab_prior, unc_names, can_stick, d)
     t = _slab_type(slab_prior)
     if t == "dense_gaussian"
-        return DenseGaussianSlab(Vector{Float64}(_rget(slab_prior, :mean)),
-            Matrix{Float64}(_rget(slab_prior, :cov)), beta_idx)
+        return DenseGaussianSlab(_as_float_vector(_rget(slab_prior, :mean)),
+            _as_float_matrix(_rget(slab_prior, :cov)), beta_idx)
     elseif t == "exchangeable_gaussian"
         if Bool(_rget(slab_prior, :zero_mean))
             return ZeroMeanExchangeableGaussianSlab(beta_idx,
@@ -143,16 +160,38 @@ function build_slab_provider(slab_prior, unc_names::AbstractVector{<:AbstractStr
                 Float64(_rget(slab_prior, :u)), Float64(_rget(slab_prior, :v)))
         end
     elseif t == "independent_slab_density"
-        κ = Vector{Float64}(_rget(slab_prior, :kappa))
+        κ = _as_float_vector(_rget(slab_prior, :kappa))
         length(κ) == 1 && (κ = fill(κ[1], length(beta_idx)))
         length(κ) == length(beta_idx) ||
             throw(DimensionMismatch("independent_slab_density kappa length must be 1 or beta dimension"))
         vars = @. inv(2π * κ^2)
         return DenseGaussianSlab(zeros(length(beta_idx)), Diagonal(vars), beta_idx)
     elseif t == "callback_gaussian"
-        throw(ArgumentError("R callback Gaussian slab providers are not yet supported by the JuliaCall bridge; a no-allocation callback contract is still pending"))
+        mean_cov_r = _rget(slab_prior, :mean_cov)
+        active_prior_neggrad_r = _rget(slab_prior, :active_prior_neggrad)
+        mean_cov! = (mean_out, cov_out, x) -> begin
+            spec = mean_cov_r(Vector{Float64}(x))
+            copyto!(mean_out, _as_float_vector(_rget(spec, :mean)))
+            copyto!(cov_out, _as_float_matrix(_rget(spec, :cov)))
+            return nothing
+        end
+        active_prior_grad! = isnothing(active_prior_neggrad_r) ? nothing :
+            (out, x, active) -> begin
+                values = _as_float_vector(active_prior_neggrad_r(Vector{Float64}(x), Vector{Bool}(active)))
+                copyto!(out, values)
+                return out
+            end
+        return CallbackGaussianSlab(beta_idx; mean_cov!, active_prior_grad!)
     elseif t == "arbitrary_boundary"
-        throw(ArgumentError("R arbitrary slab boundary providers are not yet supported by the JuliaCall bridge; a no-allocation callback contract is still pending"))
+        log_q_zero_r = _rget(slab_prior, :log_q_zero)
+        active_prior_neggrad_r = _rget(slab_prior, :active_prior_neggrad)
+        active_prior_neggrad! = (out, x, active) -> begin
+            values = _as_float_vector(active_prior_neggrad_r(Vector{Float64}(x), Vector{Bool}(active)))
+            copyto!(out, values)
+            return out
+        end
+        log_q_zero! = (x, active, j) -> Float64(log_q_zero_r(Vector{Float64}(x), Vector{Bool}(active), Int(j)))
+        return ArbitrarySlabBoundary(beta_idx; active_prior_neggrad!, log_q_zero!)
     else
         throw(ArgumentError("unknown slab_prior type: $t"))
     end
@@ -177,6 +216,31 @@ end
 function _reject_ungated_slab_prior(slab_prior, caller::AbstractString)
     isnothing(slab_prior) && return nothing
     throw(ArgumentError("Dependent slab_prior is not yet supported for $(caller); the active-set target correction bridge is still pending"))
+end
+
+function _validate_sampling_slab_prior(slab_prior)
+    isnothing(slab_prior) && return nothing
+    if _slab_type(slab_prior) == "callback_gaussian" && isnothing(_rget(slab_prior, :active_prior_neggrad))
+        throw(ArgumentError("gaussian_scale_mixture_slab requires active_prior_neggrad when used for dependent-slab sampling"))
+    end
+    return nothing
+end
+
+function _build_dependent_slab_model(
+        posterior_model::PDMPModel,
+        prior_model::PDMPModel,
+        model_prior,
+        slab_prior,
+        can_stick,
+        unc_names::AbstractVector{<:AbstractString}=String[])
+    posterior_model.d == prior_model.d ||
+        throw(DimensionMismatch("posterior and prior models must have the same unconstrained dimension"))
+    _validate_sampling_slab_prior(slab_prior)
+    d = posterior_model.d
+    provider = build_slab_provider(slab_prior, unc_names, can_stick, d)
+    odds = build_model_prior_odds(model_prior, beta_indices(provider), d)
+    target = DependentSlabTarget(d, posterior_model.grad, prior_model.grad, provider, odds)
+    return PDMPModel(target)
 end
 
 function _to_precision(flow_cov::AbstractMatrix{Float64}, d::Int)
@@ -560,28 +624,25 @@ end
 function r_pdmp_stan(
         path_to_stan_model::String,
         path_to_stan_data::String,
-        x0::AbstractVector{Float64},
+        x0,
         flow_type::String,
         algorithm_type::String,
-        flow_mean::AbstractVector{Float64},
-        flow_cov::AbstractMatrix{Float64};
+        flow_mean,
+        flow_cov;
         kwargs...
     )
 
-    if haskey(kwargs, :slab_prior) && !isnothing(kwargs[:slab_prior])
-        _reject_ungated_slab_prior(kwargs[:slab_prior], "r_pdmp_stan")
-    end
     model = PDMPModel(path_to_stan_model, path_to_stan_data)
     return r_pdmp_stan(model, x0, flow_type, algorithm_type, flow_mean, flow_cov; kwargs...)
 end
 
 function r_pdmp_stan(
         model::PDMPModel,
-        x0::AbstractVector{Float64},
+        x0,
         flow_type::String,
         algorithm_type::String,
-        flow_mean::AbstractVector{Float64},
-        flow_cov::AbstractMatrix{Float64};
+        flow_mean,
+        flow_cov;
         c0::Float64 = 1e-2,
         grid_n::Int = 30,
         grid_t_max::Float64 = 2.0,
@@ -590,11 +651,12 @@ function r_pdmp_stan(
         T::Float64 = 10000.0,
         t_warmup::Float64 = 0.0,
         sticky::Bool = false,
-        can_stick::Union{AbstractVector{Bool}, Nothing} = nothing,
+        can_stick = nothing,
         model_prior = nothing,
-        parameter_prior::Union{AbstractVector{Float64}, Nothing} = nothing,
+        parameter_prior = nothing,
         slab_prior = nothing,
-        unc_names::AbstractVector{<:AbstractString} = String[],
+        prior_model::Union{PDMPModel, Nothing} = nothing,
+        unc_names = String[],
         show_progress::Bool = true,
         n_chains::Int = 1,
         threaded::Bool = false,
@@ -610,15 +672,27 @@ function r_pdmp_stan(
         support_boundary_min_safe_time::Float64 = 1e-12
     )
 
-    _reject_ungated_slab_prior(slab_prior, "r_pdmp_stan")
     d = model.d
+    x0_vec = _as_float_vector(x0)
+    flow_mean_vec = _as_flow_mean(flow_mean, d)
+    flow_cov_mat = _as_flow_cov(flow_cov, d)
+    can_stick_vec = _as_bool_vector(can_stick)
+    parameter_prior_vec = isnothing(parameter_prior) ? nothing : _as_float_vector(parameter_prior)
+    unc_names_vec = _as_string_vector(unc_names)
 
-    prec = _to_precision(flow_cov, d)
-    flow = build_flow(flow_type, prec, flow_mean; adaptive_scheme)
+    sampling_model = if isnothing(slab_prior)
+        model
+    else
+        isnothing(prior_model) && throw(ArgumentError("r_pdmp_stan requires prior_model when slab_prior is supplied"))
+        _build_dependent_slab_model(model, prior_model, model_prior, slab_prior, can_stick_vec, unc_names_vec)
+    end
+
+    prec = _to_precision(flow_cov_mat, d)
+    flow = build_flow(flow_type, prec, flow_mean_vec; adaptive_scheme)
     alg0 = build_algorithm(algorithm_type; c0, d, grid_n, grid_t_max, post_warmup_simplify)
     alg = isnothing(slab_prior) ?
-        wrap_sticky(alg0, sticky, model_prior, parameter_prior, can_stick) :
-        wrap_dependent_sticky(alg0, sticky, model_prior, slab_prior, can_stick, flow_type, unc_names)
+        wrap_sticky(alg0, sticky, model_prior, parameter_prior_vec, can_stick_vec) :
+        wrap_dependent_sticky(alg0, sticky, model_prior, slab_prior, can_stick_vec, flow_type, unc_names_vec)
 
     sbopts = SupportBoundaryOptions(;
         detect_boundaries = support_boundary_mode != "error",
@@ -632,7 +706,7 @@ function r_pdmp_stan(
         min_safe_time = support_boundary_min_safe_time,
     )
 
-    chains = pdmp_sample(x0, flow, model, alg, t0, T, t_warmup;
+    chains = pdmp_sample(x0_vec, flow, sampling_model, alg, t0, T, t_warmup;
                          progress = show_progress, n_chains = n_chains, threaded = threaded,
                          seed = seed,
                          support_boundary_options = sbopts)
@@ -642,11 +716,11 @@ end
 function r_pdmp_custom(
         grad!,
         d::Integer,
-        x0::AbstractVector{Float64},
+        x0,
         flow_type::String,
         algorithm_type::String,
-        flow_mean::AbstractVector{Float64},
-        flow_cov::AbstractMatrix{Float64};
+        flow_mean,
+        flow_cov;
         c0::Float64 = 1e-2,
         grid_n::Int = 30,
         grid_t_max::Float64 = 2.0,
@@ -656,10 +730,11 @@ function r_pdmp_custom(
         t_warmup::Float64 = 0.0,
         hessian = nothing,
         sticky::Bool = false,
-        can_stick::Union{AbstractVector{Bool}, Nothing} = nothing,
+        can_stick = nothing,
         model_prior = nothing,
-        parameter_prior::Union{AbstractVector{Float64}, Nothing} = nothing,
+        parameter_prior = nothing,
         slab_prior = nothing,
+        prior_grad! = nothing,
         show_progress::Bool = true,
         n_chains::Int = 1,
         threaded::Bool = false,
@@ -675,7 +750,12 @@ function r_pdmp_custom(
         support_boundary_min_safe_time::Float64 = 1e-12
     )
 
-    _reject_ungated_slab_prior(slab_prior, "r_pdmp_custom")
+    x0_vec = _as_float_vector(x0)
+    flow_mean_vec = _as_flow_mean(flow_mean, d)
+    flow_cov_mat = _as_flow_cov(flow_cov, d)
+    can_stick_vec = _as_bool_vector(can_stick)
+    parameter_prior_vec = isnothing(parameter_prior) ? nothing : _as_float_vector(parameter_prior)
+
     hvp = if !isnothing(hessian)
         (out, x, v) -> begin
             hess = hessian(x)
@@ -693,14 +773,23 @@ function r_pdmp_custom(
             end
         end
     end
-    model = PDMPModel(d, FullGradient(grad!), hvp)
+    model = if isnothing(slab_prior)
+        PDMPModel(d, FullGradient(grad!), hvp)
+    else
+        isnothing(prior_grad!) && throw(ArgumentError("r_pdmp_custom requires prior_grad! when slab_prior is supplied"))
+        _validate_sampling_slab_prior(slab_prior)
+        provider = build_slab_provider(slab_prior, String[], can_stick_vec, d)
+        odds = build_model_prior_odds(model_prior, beta_indices(provider), d)
+        target = DependentSlabTarget(d, grad!, prior_grad!, provider, odds)
+        PDMPModel(target)
+    end
 
-    prec = _to_precision(flow_cov, d)
-    flow = build_flow(flow_type, prec, flow_mean; adaptive_scheme)
+    prec = _to_precision(flow_cov_mat, d)
+    flow = build_flow(flow_type, prec, flow_mean_vec; adaptive_scheme)
     alg0 = build_algorithm(algorithm_type; c0, d, grid_n, grid_t_max, post_warmup_simplify)
     alg = isnothing(slab_prior) ?
-        wrap_sticky(alg0, sticky, model_prior, parameter_prior, can_stick) :
-        wrap_dependent_sticky(alg0, sticky, model_prior, slab_prior, can_stick, flow_type)
+        wrap_sticky(alg0, sticky, model_prior, parameter_prior_vec, can_stick_vec) :
+        wrap_dependent_sticky(alg0, sticky, model_prior, slab_prior, can_stick_vec, flow_type)
 
     sbopts = SupportBoundaryOptions(;
         detect_boundaries = support_boundary_mode != "error",
@@ -714,7 +803,7 @@ function r_pdmp_custom(
         min_safe_time = support_boundary_min_safe_time,
     )
 
-    chains = pdmp_sample(x0, flow, model, alg, t0, T, t_warmup;
+    chains = pdmp_sample(x0_vec, flow, model, alg, t0, T, t_warmup;
                          progress = show_progress, n_chains = n_chains, threaded = threaded,
                          seed = seed,
                          support_boundary_options = sbopts)
@@ -1511,8 +1600,8 @@ function r_pdmp_stan_for_brms(
         path_to_stan_data::String,
         flow_type::String,
         algorithm_type::String,
-        flow_mean::AbstractVector{Float64},
-        flow_cov::AbstractMatrix{Float64},
+        flow_mean,
+        flow_cov,
         output_csv::String;
         c0::Float64 = 1e-2,
         grid_n::Int = 30,
@@ -1530,25 +1619,42 @@ function r_pdmp_stan_for_brms(
         use_fd_hvp::Bool = false,
         post_warmup_simplify::Bool = false,
         sticky::Bool = false,
-        can_stick::Union{AbstractVector{Bool}, Nothing} = nothing,
+        can_stick = nothing,
         model_prior = nothing,
-        parameter_prior::Union{AbstractVector{Float64}, Nothing} = nothing,
+        parameter_prior = nothing,
         slab_prior = nothing,
-        unc_names::AbstractVector{<:AbstractString} = String[]
+        prior_model::Union{PDMPModel, Nothing} = nothing,
+        prior_data_file::Union{String, Nothing} = nothing,
+        unc_names = String[]
     )
-    _reject_ungated_slab_prior(slab_prior, "r_pdmp_stan_for_brms")
     sm = BridgeStan.StanModel(path_to_stan_model, path_to_stan_data; warn=false)
-    model = PDMPModel(sm; hvp = !use_fd_hvp)
+    posterior_model = PDMPModel(sm; hvp = isnothing(slab_prior) && !use_fd_hvp)
+    can_stick_vec = _as_bool_vector(can_stick)
+    parameter_prior_vec = isnothing(parameter_prior) ? nothing : _as_float_vector(parameter_prior)
+    unc_names_vec = _as_string_vector(unc_names)
+    model = if isnothing(slab_prior)
+        posterior_model
+    else
+        base_prior_model = if isnothing(prior_model)
+            isnothing(prior_data_file) &&
+                throw(ArgumentError("r_pdmp_stan_for_brms requires prior_model or prior_data_file when slab_prior is supplied"))
+            PDMPModel(BridgeStan.StanModel(path_to_stan_model, prior_data_file; warn=false); hvp=false)
+        else
+            prior_model
+        end
+        _build_dependent_slab_model(posterior_model, base_prior_model, model_prior, slab_prior, can_stick_vec, unc_names_vec)
+    end
     d = model.d
 
-    fmean = isempty(flow_mean) ? zeros(d) : flow_mean
-    prec = isempty(flow_cov) ? Diagonal(ones(d)) : _to_precision(flow_cov, d)
+    fmean = _as_flow_mean(flow_mean, d)
+    flow_cov_mat = _as_flow_cov(flow_cov, d)
+    prec = _to_precision(flow_cov_mat, d)
 
     flow = build_flow(flow_type, prec, fmean; adaptive_scheme)
     alg0 = build_algorithm(algorithm_type; c0, d, grid_n, grid_t_max, use_fd_hvp, post_warmup_simplify)
     alg = isnothing(slab_prior) ?
-        wrap_sticky(alg0, sticky, model_prior, parameter_prior, can_stick) :
-        wrap_dependent_sticky(alg0, sticky, model_prior, slab_prior, can_stick, flow_type, unc_names)
+        wrap_sticky(alg0, sticky, model_prior, parameter_prior_vec, can_stick_vec) :
+        wrap_dependent_sticky(alg0, sticky, model_prior, slab_prior, can_stick_vec, flow_type, unc_names_vec)
 
     chains = pdmp_sample(d, flow, model, alg, t0, T, t_warmup;
                          progress = show_progress, n_chains, threaded, seed)

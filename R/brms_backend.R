@@ -140,9 +140,9 @@ warn_if_low_random_effect_subsampling_support <- function(sdata, subsample_size)
 #' @param slab_prior Optional dependent slab prior created by
 #'   [dense_gaussian_slab()], [exchangeable_gaussian_slab()],
 #'   [independent_slab_density()], [gaussian_scale_mixture_slab()], or
-#'   [arbitrary_slab_boundary()]. Mutually exclusive with `kappa`. This argument
-#'   currently errors for `brm_pdmp()` until the two-model dependent-slab target
-#'   bridge is implemented.
+#'   [arbitrary_slab_boundary()]. Mutually exclusive with `kappa`. Full-data
+#'   dependent slabs use the brms prior-only data as the base prior target;
+#'   subsampled brms dependent slabs are not yet supported.
 #' @param stanvars Optional `stanvar` object for custom Stan code.
 #' @param sample_prior Currently only `"no"` is supported.
 #' @param save_model Optional file path to save the generated Stan code.
@@ -221,10 +221,6 @@ brm_pdmp <- function(
     if (!flow %in% c("ZigZag", "BouncyParticle") || algorithm != "GridThinningStrategy") {
       cli::cli_abort("Dependent {.arg slab_prior} sticky sampling currently requires ZigZag or BouncyParticle with {.val GridThinningStrategy}.")
     }
-    cli::cli_abort(c(
-      "Dependent {.arg slab_prior} is not yet supported for {.fn brm_pdmp}.",
-      "i" = "The two-model {.fn DependentSlabTarget} bridge is still pending; use legacy {.arg kappa} for brms sticky sampling for now."
-    ))
   }
   if (!is.null(seed)) {
     if (!rlang::is_integerish(seed, n = 1)) {
@@ -236,6 +232,9 @@ brm_pdmp <- function(
     }
   }
   subsampled <- !is.null(subsample_size)
+  if (subsampled && !is.null(slab_prior)) {
+    cli::cli_abort("Dependent {.arg slab_prior} is not yet supported together with {.arg subsample_size}.")
+  }
   N <- nrow(data)
 
   if (!subsampled && (use_hcv || use_anchor_bank))
@@ -288,6 +287,8 @@ brm_pdmp <- function(
                                        prior, stanvars, sample_prior, ...)
     Y_full <- as.numeric(sdata$Y)
     X_full <- sdata$X
+  }
+  if (subsampled || !is.null(slab_prior)) {
     sdata_prior <- make_prior_standata(sdata)
   }
 
@@ -307,6 +308,10 @@ brm_pdmp <- function(
   } else {
     data_file <- tempfile(fileext = ".json")
     write_stan_json(sdata, data_file)
+    if (!is.null(slab_prior)) {
+      data_prior_file <- tempfile(fileext = ".json")
+      write_stan_json(sdata_prior, data_prior_file)
+    }
   }
 
   if (!is.null(save_model))
@@ -441,6 +446,7 @@ brm_pdmp <- function(
       model_prior = sticky_args$model_prior,
       parameter_prior = sticky_args$parameter_prior,
       slab_prior = sticky_args$slab_prior,
+      prior_data_file = if (!is.null(sticky_args$slab_prior)) normalizePath(data_prior_file, mustWork = TRUE) else NULL,
       unc_names = sticky_args$unc_names
     )
   }

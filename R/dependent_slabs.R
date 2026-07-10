@@ -13,8 +13,7 @@
 #'   this slab. If omitted, the bridge uses \code{can_stick}.
 #'
 #' @returns A slab prior specification for the dependent aggregate sticky
-#'   bridge. Public sampling functions currently gate this argument until the
-#'   active-set target correction bridge is implemented.
+#'   bridge.
 #'
 #' @export
 independent_slab_density <- function(kappa, coef = NULL) {
@@ -62,8 +61,14 @@ exchangeable_gaussian_slab <- function(mean = 0, u, v, zero_mean = TRUE, coef = 
 
 #' @rdname independent_slab_density
 #' @param mean_cov R function for state-dependent Gaussian slab callbacks.
-#' @param active_prior_neggrad Optional R function for the active slab
-#'   negative-gradient contribution.
+#'   It is called as \code{mean_cov(x)} and should return a list with numeric
+#'   fields \code{mean} and \code{cov}.
+#' @param active_prior_neggrad R function for the active slab
+#'   negative-gradient contribution. It is called as
+#'   \code{active_prior_neggrad(x, active)}, where \code{active} is a logical
+#'   vector over the slab coefficients, and should return a full unconstrained
+#'   negative-gradient vector. This callback is required when a callback
+#'   Gaussian slab is used for dependent-slab sampling.
 #' @export
 gaussian_scale_mixture_slab <- function(mean_cov, active_prior_neggrad = NULL, coef = NULL) {
   if (!rlang::is_function(mean_cov)) {
@@ -80,7 +85,9 @@ gaussian_scale_mixture_slab <- function(mean_cov, active_prior_neggrad = NULL, c
 }
 
 #' @rdname independent_slab_density
-#' @param log_q_zero R function returning a boundary log-density at zero.
+#' @param log_q_zero R function returning a boundary log-density at zero. It is
+#'   called as \code{log_q_zero(x, active, j)}, where \code{j} is a 1-based slab
+#'   coefficient index.
 #' @export
 arbitrary_slab_boundary <- function(log_q_zero, active_prior_neggrad, coef = NULL) {
   if (!rlang::is_function(log_q_zero)) {

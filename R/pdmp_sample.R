@@ -29,7 +29,8 @@ validate_pdmp_params <- function(d, flow, algorithm, T, t0 = 0.0, t_warmup = 0.0
                                 grid_n = 30, grid_t_max = 2.0,
                                 post_warmup_simplify = FALSE,
                                 n_chains = 1L, threaded = FALSE, seed = NULL,
-                                adaptive_scheme = "diagonal") {
+                                adaptive_scheme = "diagonal",
+                                unc_names = NULL) {
 
   # Validate basic parameters
   d <- cast_integer(d, n = 1)
@@ -136,7 +137,7 @@ validate_pdmp_params <- function(d, flow, algorithm, T, t0 = 0.0, t_warmup = 0.0
 
     if (is.null(can_stick)) {
       if (!is.null(slab_prior)) {
-        coef_idx <- .slab_coef_indices(slab_prior, d)
+        coef_idx <- .slab_coef_indices(slab_prior, d, unc_names = unc_names)
         if (is.null(coef_idx)) {
           cli::cli_abort("Dependent {.arg slab_prior} requires {.arg can_stick} unless {.arg coef} is supplied as integer parameter indices.")
         }
@@ -157,7 +158,7 @@ validate_pdmp_params <- function(d, flow, algorithm, T, t0 = 0.0, t_warmup = 0.0
       } else if (is.null(slab_prior) && length(model_prior$prob) != d) {
         cli::cli_abort("For legacy sticky sampling, {.arg model_prior} of class {.cls bernoulli} must have a single probability or a vector of length {.arg d}.")
       } else if (!is.null(slab_prior)) {
-        p <- .slab_beta_dimension(slab_prior, d, can_stick)
+        p <- .slab_beta_dimension(slab_prior, d, can_stick, unc_names = unc_names)
         if (!length(model_prior$prob) %in% c(1L, p, d)) {
           cli::cli_abort("For dependent {.arg slab_prior}, Bernoulli {.arg prob} must have length 1, the slab beta dimension ({p}), or {.arg d} ({d}).")
         }
@@ -179,7 +180,7 @@ validate_pdmp_params <- function(d, flow, algorithm, T, t0 = 0.0, t_warmup = 0.0
       if (algorithm != "GridThinningStrategy") {
         cli::cli_abort("Dependent {.arg slab_prior} sticky sampling currently requires {.val GridThinningStrategy}.")
       }
-      .validate_slab_prior_dimensions(slab_prior, d, can_stick, model_prior = model_prior)
+      .validate_slab_prior_dimensions(slab_prior, d, can_stick, unc_names = unc_names, model_prior = model_prior)
     }
 
   }
@@ -233,6 +234,7 @@ validate_pdmp_params <- function(d, flow, algorithm, T, t0 = 0.0, t_warmup = 0.0
 
 .validate_slab_prior_dimensions <- function(slab_prior, d, can_stick, unc_names = NULL, model_prior = NULL) {
   if (is.null(slab_prior)) return(invisible(TRUE))
+  .validate_slab_prior_sampling_contract(slab_prior)
   coef_idx <- .slab_coef_indices(slab_prior, d, unc_names = unc_names)
   p <- if (is.null(coef_idx)) sum(can_stick) else length(coef_idx)
   if (p == 0L) {
@@ -259,6 +261,46 @@ validate_pdmp_params <- function(d, flow, algorithm, T, t0 = 0.0, t_warmup = 0.0
     if (slab_prior$u + p * slab_prior$v <= 0) {
       cli::cli_abort("Exchangeable slab covariance requires {.code u + p * v > 0}.")
     }
+  }
+  invisible(TRUE)
+}
+
+.validate_slab_prior_sampling_contract <- function(slab_prior) {
+  if (is.null(slab_prior)) return(invisible(TRUE))
+  if (identical(slab_prior$type, "callback_gaussian") &&
+      !rlang::is_function(slab_prior$active_prior_neggrad)) {
+    cli::cli_abort(
+      "{.fn gaussian_scale_mixture_slab} requires {.arg active_prior_neggrad} when used for dependent-slab sampling."
+    )
+  }
+  invisible(TRUE)
+}
+
+.validate_dependent_slab_early <- function(slab_prior, sticky, flow, algorithm,
+                                           model_prior, parameter_prior,
+                                           subsample = NULL) {
+  if (is.null(slab_prior)) return(invisible(TRUE))
+  .validate_slab_prior_sampling_contract(slab_prior)
+  if (!isTRUE(sticky)) {
+    cli::cli_abort("Argument {.arg slab_prior} requires {.arg sticky} to be {.code TRUE}.")
+  }
+  if (!is.slab_prior(slab_prior)) {
+    cli::cli_abort("Argument {.arg slab_prior} must be created by a dependent slab constructor.")
+  }
+  if (!is.null(parameter_prior)) {
+    cli::cli_abort("Use either legacy {.arg parameter_prior} or dependent {.arg slab_prior}, not both.")
+  }
+  if (is.null(model_prior) || !is.model_prior(model_prior)) {
+    cli::cli_abort("Argument {.arg model_prior} must be provided when {.arg sticky} is {.code TRUE}.")
+  }
+  if (!flow %in% c("ZigZag", "BouncyParticle")) {
+    cli::cli_abort("Dependent {.arg slab_prior} sticky sampling currently supports only ZigZag and BouncyParticle flows.")
+  }
+  if (algorithm != "GridThinningStrategy") {
+    cli::cli_abort("Dependent {.arg slab_prior} sticky sampling currently requires {.val GridThinningStrategy}.")
+  }
+  if (!is.null(subsample)) {
+    cli::cli_abort("Dependent {.arg slab_prior} is not yet supported together with {.arg subsample}.")
   }
   invisible(TRUE)
 }
@@ -540,15 +582,18 @@ validate_stan_subsample <- function(subsample, standata, standata_path, path_to_
 #' @param can_stick Logical vector of length d, which coordinates can stick (default: all FALSE).
 #' @param model_prior Prior distribution object for model selection. Legacy
 #'   sticky sampling accepts \code{bernoulli()} or \code{betabernoulli()}.
-#'   \code{exchangeable_model_size_prior()} is reserved for the pending
-#'   dependent-slab path and currently requires gated \code{slab_prior} support.
+#'   Dependent-slab sampling also accepts \code{exchangeable_model_size_prior()}.
 #' @param parameter_prior Numeric vector of length d, prior parameters for sticky sampling (default: NULL).
 #' @param slab_prior Optional dependent slab prior created by
 #'   \code{dense_gaussian_slab()}, \code{exchangeable_gaussian_slab()},
 #'   \code{independent_slab_density()}, \code{gaussian_scale_mixture_slab()},
 #'   or \code{arbitrary_slab_boundary()}. Mutually exclusive with
-#'   \code{parameter_prior}. This argument currently errors until the
-#'   active-set target correction bridge is implemented.
+#'   \code{parameter_prior}. The custom-gradient path requires
+#'   \code{prior_grad} so the dependent target can subtract the base prior
+#'   gradient before adding the active slab gradient.
+#' @param prior_grad Optional function computing the NEGATIVE gradient of the
+#'   base prior to subtract in the dependent-slab target. Required when
+#'   \code{slab_prior} is supplied to \code{pdmp_sample()}.
 #' @param grid_n Integer, number of grid points for GridThinningStrategy (default: 30).
 #' @param grid_t_max Numeric, maximum time for grid in GridThinningStrategy (default: 2.0).
 #' @param post_warmup_simplify Logical. If \code{TRUE}, the grid-thinning
@@ -582,7 +627,7 @@ pdmp_sample <- function(f, d,
                         T = 50000, t0 = 0.0, t_warmup = 0.0,
                         flow_mean = NULL, flow_cov = NULL, c0 = 1e-2,
                         x0 = NULL, theta0 = NULL,
-                        hessian = NULL,
+                        hessian = NULL, prior_grad = NULL,
                         sticky = FALSE, can_stick = NULL, model_prior = NULL, parameter_prior = NULL,
                         slab_prior = NULL,
                         grid_n = 30, grid_t_max = 2.0,
@@ -592,13 +637,6 @@ pdmp_sample <- function(f, d,
                         adaptive_scheme = c("diagonal", "fullrank"),
                         materialize = TRUE,
                         support_boundary = support_boundary_control()) {
-
-  if (!is.null(slab_prior)) {
-    cli::cli_abort(c(
-      "Dependent {.arg slab_prior} is not yet supported for {.fn pdmp_sample}.",
-      "i" = "The active-set-aware custom target bridge is still pending; use legacy {.arg parameter_prior} for now."
-    ))
-  }
 
   # Validate function argument (fail fast before Julia setup)
   if (!rlang::is_function(f)) {
@@ -628,6 +666,24 @@ pdmp_sample <- function(f, d,
       "x" = conditionMessage(e)
     ))
   })
+
+  # Test the hessian with a sample input
+  if (!is.null(slab_prior)) {
+    if (!rlang::is_function(prior_grad)) {
+      cli::cli_abort("Argument {.arg prior_grad} must be provided as a function when {.arg slab_prior} is supplied.")
+    }
+    tryCatch({
+      test_output <- prior_grad(params$x0)
+      if (!is.numeric(test_output) || length(test_output) != params$d) {
+        cli::cli_abort("{.arg prior_grad} must return a numeric vector of length {params$d}, but returned length {length(test_output)}.")
+      }
+    }, error = function(e) {
+      cli::cli_abort(c(
+        "{.arg prior_grad} failed on test input.",
+        "x" = conditionMessage(e)
+      ))
+    })
+  }
 
   # Test the hessian with a sample input
   if (!is.null(hessian)) {
@@ -660,6 +716,8 @@ pdmp_sample <- function(f, d,
 
   JuliaCall::julia_assign("f", f)
   JuliaCall::julia_command("grad!(out, x) = out .= f(x);")
+  JuliaCall::julia_assign("prior_grad_r", prior_grad)
+  JuliaCall::julia_command("prior_grad!(out, x) = out .= prior_grad_r(x);")
   JuliaCall::julia_assign("hessian_f", hessian)
   JuliaCall::julia_assign("support_boundary_mode", support_boundary$mode)
   JuliaCall::julia_assign("support_boundary_max_bisection_steps", support_boundary$max_bisection_steps)
@@ -679,6 +737,7 @@ pdmp_sample <- function(f, d,
     sticky = sticky, can_stick = can_stick,
     model_prior = model_prior, parameter_prior = parameter_prior,
     slab_prior = slab_prior,
+    prior_grad! = prior_grad!,
     show_progress = show_progress, n_chains = n_chains, threaded = threaded,
     seed = seed,
     adaptive_scheme = adaptive_scheme,
@@ -718,6 +777,11 @@ pdmp_sample <- function(f, d,
 #' @param standata Either a character path to the Stan data file (JSON format),
 #'   or a named list that will be written to a temporary JSON file via
 #'   [write_stan_json()].
+#' @param prior_stanmodel Optional Stan model path for the base prior target
+#'   used by dependent slabs. Defaults to \code{path_to_stanmodel} when
+#'   \code{prior_standata} is supplied.
+#' @param prior_standata Optional prior-only Stan data path or named list for
+#'   the base prior target. Required when \code{slab_prior} is supplied.
 #' @param subsample NULL (default) for full-data sampling, or a named list with
 #'   at least `size` and `prior_standata`. Optional entries include
 #'   `path_to_stanmodel` (the external-C++ subsampled Stan model; defaults to
@@ -732,6 +796,7 @@ pdmp_sample <- function(f, d,
 #'
 #' @export
 pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
+                        prior_stanmodel = NULL, prior_standata = NULL,
                         flow = c("ZigZag", "BouncyParticle", "Boomerang", "AdaptiveBoomerang", "PreconditionedZigZag", "PreconditionedBPS"),
                         algorithm = c("ThinningStrategy", "GridThinningStrategy", "RootsPoissonStrategy"),
                         T = 50000, t0 = 0.0, t_warmup = 0.0,
@@ -748,15 +813,11 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
                         support_boundary = support_boundary_control(),
                         subsample = NULL) {
 
-  if (!is.null(slab_prior)) {
-    cli::cli_abort(c(
-      "Dependent {.arg slab_prior} is not yet supported for Stan-backed sampling.",
-      "i" = "The two-model {.fn DependentSlabTarget} bridge is still pending; use legacy {.arg parameter_prior} for now."
-    ))
-  }
-
   # Validate file paths on R side before setting up Julia
   validate_type(path_to_stanmodel, type = "character", n = 1)
+  flow <- match.arg(flow)
+  algorithm <- match.arg(algorithm)
+  adaptive_scheme <- match.arg(adaptive_scheme)
 
   if (is.list(standata)) {
     standata_path <- tempfile(fileext = ".json")
@@ -767,10 +828,40 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
     standata_path <- standata
   }
 
+  prior_standata_path <- NULL
+  if (!is.null(prior_standata)) {
+    if (is.list(prior_standata)) {
+      prior_standata_path <- tempfile(fileext = ".json")
+      write_stan_json(prior_standata, prior_standata_path)
+      on.exit(unlink(prior_standata_path), add = TRUE)
+    } else {
+      validate_type(prior_standata, type = "character", n = 1)
+      prior_standata_path <- prior_standata
+    }
+  }
+  .validate_dependent_slab_early(
+    slab_prior, sticky, flow, algorithm, model_prior, parameter_prior,
+    subsample = subsample
+  )
+  if (!is.null(slab_prior) && is.null(prior_standata_path)) {
+    cli::cli_abort("Argument {.arg prior_standata} is required when {.arg slab_prior} is supplied.")
+  }
+  if (is.null(prior_stanmodel)) {
+    prior_stanmodel <- path_to_stanmodel
+  } else {
+    validate_type(prior_stanmodel, type = "character", n = 1)
+  }
+
   if (!file.exists(path_to_stanmodel))
     cli::cli_abort("Stan model file not found: {.path {path_to_stanmodel}}")
   if (!file.exists(standata_path))
     cli::cli_abort("Stan data file not found: {.path {standata_path}}")
+  if (!is.null(slab_prior)) {
+    if (!file.exists(prior_stanmodel))
+      cli::cli_abort("Prior Stan model file not found: {.path {prior_stanmodel}}")
+    if (!file.exists(prior_standata_path))
+      cli::cli_abort("Prior Stan data file not found: {.path {prior_standata_path}}")
+  }
   if (!grepl("\\.(so|dll|dylib|stan)$", path_to_stanmodel))
     cli::cli_abort(c(
       "{.arg path_to_stanmodel} should point to a Stan model ({.file .stan}) or a compiled Stan model ({.file .so}, {.file .dll}, or {.file .dylib}).",
@@ -782,6 +873,14 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
       "i" = "Got: {.path {standata_path}}",
       "i" = "Use {.fn write_stan_json} to create a data file or pass a list directly."
     ))
+  if (!is.null(slab_prior)) {
+    if (!grepl("\\.(so|dll|dylib|stan)$", prior_stanmodel)) {
+      cli::cli_abort("{.arg prior_stanmodel} should point to a Stan model or compiled Stan library.")
+    }
+    if (!grepl("\\.json$", prior_standata_path)) {
+      cli::cli_abort("{.arg prior_standata} should be a JSON file path or a list that can be written to JSON.")
+    }
+  }
 
   subsample <- validate_stan_subsample(subsample, standata, standata_path, path_to_stanmodel)
   if (!is.null(subsample) && isTRUE(subsample$prior_temporary))
@@ -792,16 +891,37 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
   # Normalize paths to absolute
   path_to_stanmodel <- normalizePath(path_to_stanmodel, mustWork = TRUE)
   standata_path     <- normalizePath(standata_path,     mustWork = TRUE)
+  if (!is.null(slab_prior)) {
+    prior_stanmodel <- normalizePath(prior_stanmodel, mustWork = TRUE)
+    prior_standata_path <- normalizePath(prior_standata_path, mustWork = TRUE)
+  }
 
   support_boundary <- validate_support_boundary_control(support_boundary)
 
   JuliaCall::julia_assign("_path_to_stan_model", path_to_stanmodel)
   JuliaCall::julia_assign("_path_to_stan_data",  standata_path)
+  JuliaCall::julia_assign("_path_to_prior_stan_model", prior_stanmodel)
+  JuliaCall::julia_assign("_path_to_prior_stan_data_full", prior_standata_path)
 
   if (is.null(subsample)) {
     # Create PDMPModel in Julia and get dimension for the ordinary full-data path.
-    JuliaCall::julia_command("_pdmp_model = PDMPModel(_path_to_stan_model, _path_to_stan_data);")
+    JuliaCall::julia_command("_stan_model = BridgeStan.StanModel(_path_to_stan_model, _path_to_stan_data; warn=false); _pdmp_model = PDMPModel(_stan_model);")
     d <- JuliaCall::julia_eval("_pdmp_model.d")
+    unc_names <- character(0)
+    if (!is.null(slab_prior)) {
+      JuliaCall::julia_command("_prior_stan_model = BridgeStan.StanModel(_path_to_prior_stan_model, _path_to_prior_stan_data_full; warn=false); _prior_pdmp_model = PDMPModel(_prior_stan_model);")
+      d_prior <- JuliaCall::julia_eval("_prior_pdmp_model.d")
+      if (!identical(as.integer(d), as.integer(d_prior))) {
+        cli::cli_abort("Posterior and prior Stan models must have the same unconstrained dimension.")
+      }
+      unc_names <- JuliaCall::julia_eval("BridgeStan.param_unc_names(_stan_model)")
+      prior_unc_names <- JuliaCall::julia_eval("BridgeStan.param_unc_names(_prior_stan_model)")
+      if (!identical(unc_names, prior_unc_names)) {
+        cli::cli_abort("Posterior and prior Stan models must have identical unconstrained parameter names.")
+      }
+    } else {
+      JuliaCall::julia_command("_prior_pdmp_model = nothing;")
+    }
   } else {
     subsample$path_to_stanmodel <- normalizePath(subsample$path_to_stanmodel, mustWork = TRUE)
     subsample$prior_path <- normalizePath(subsample$prior_path, mustWork = TRUE)
@@ -812,14 +932,7 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
       standata_path,
       subsample$hpp_path
     )
-  }
-  unc_names <- character(0)
-  if (!is.null(slab_prior)) {
-    unc_names <- .pdmpsamplers_julia_call(
-      "r_get_param_unc_names",
-      path_to_stanmodel,
-      standata_path
-    )
+    unc_names <- character(0)
   }
 
   # Use common validation function
@@ -828,7 +941,8 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
                                  sticky, can_stick, model_prior, parameter_prior, slab_prior,
                                  grid_n, grid_t_max, post_warmup_simplify,
                                  n_chains, threaded, seed,
-                                 adaptive_scheme = adaptive_scheme)
+                                 adaptive_scheme = adaptive_scheme,
+                                 unc_names = unc_names)
 
   if (isTRUE(params$threaded) && params$n_chains > 1L) {
     cli::cli_warn(c(
@@ -860,6 +974,7 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
       sticky = sticky, can_stick = can_stick,
       model_prior = model_prior, parameter_prior = parameter_prior,
       slab_prior = slab_prior,
+      prior_model = _prior_pdmp_model,
       unc_names = _unc_names,
       show_progress = show_progress, n_chains = n_chains, threaded = threaded,
       seed = seed,

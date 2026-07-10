@@ -166,9 +166,9 @@ derivation).}
 \item{slab_prior}{Optional dependent slab prior created by
 [dense_gaussian_slab()], [exchangeable_gaussian_slab()],
 [independent_slab_density()], [gaussian_scale_mixture_slab()], or
-[arbitrary_slab_boundary()]. Mutually exclusive with `kappa`. This argument
-currently errors for `brm_pdmp()` until the two-model dependent-slab target
-bridge is implemented.}
+[arbitrary_slab_boundary()]. Mutually exclusive with `kappa`. Full-data
+dependent slabs use the brms prior-only data as the base prior target;
+subsampled brms dependent slabs are not yet supported.}
 
 \item{stanvars}{Optional `stanvar` object for custom Stan code.}
 

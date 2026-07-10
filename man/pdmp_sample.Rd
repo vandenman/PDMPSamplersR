@@ -19,6 +19,7 @@ pdmp_sample(
   x0 = NULL,
   theta0 = NULL,
   hessian = NULL,
+  prior_grad = NULL,
   sticky = FALSE,
   can_stick = NULL,
   model_prior = NULL,
@@ -73,14 +74,17 @@ diagonal preconditioner during warmup and also require
 \item{hessian}{Function that returns the negative Hessian matrix of size d x d (default: NULL).
 Only used with GridThinningStrategy to compute the Hessian-vector product.}
 
+\item{prior_grad}{Optional function computing the NEGATIVE gradient of the
+base prior to subtract in the dependent-slab target. Required when
+\code{slab_prior} is supplied to \code{pdmp_sample()}.}
+
 \item{sticky}{Logical, whether to use sticky sampling (default: FALSE).}
 
 \item{can_stick}{Logical vector of length d, which coordinates can stick (default: all FALSE).}
 
 \item{model_prior}{Prior distribution object for model selection. Legacy
 sticky sampling accepts \code{bernoulli()} or \code{betabernoulli()}.
-\code{exchangeable_model_size_prior()} is reserved for the pending
-dependent-slab path and currently requires gated \code{slab_prior} support.}
+Dependent-slab sampling also accepts \code{exchangeable_model_size_prior()}.}
 
 \item{parameter_prior}{Numeric vector of length d, prior parameters for sticky sampling (default: NULL).}
 
@@ -88,8 +92,9 @@ dependent-slab path and currently requires gated \code{slab_prior} support.}
 \code{dense_gaussian_slab()}, \code{exchangeable_gaussian_slab()},
 \code{independent_slab_density()}, \code{gaussian_scale_mixture_slab()},
 or \code{arbitrary_slab_boundary()}. Mutually exclusive with
-\code{parameter_prior}. This argument currently errors until the active-set
-target correction bridge is implemented.}
+\code{parameter_prior}. The custom-gradient path requires \code{prior_grad}
+so the dependent target can subtract the base prior gradient before adding the
+active slab gradient.}
 
 \item{grid_n}{Integer, number of grid points for GridThinningStrategy (default: 30).}
 

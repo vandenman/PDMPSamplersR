@@ -45,6 +45,68 @@ test_that("pdmp_sample_from_stanmodel validates file existence", {
   expect_error(pdmp_sample_from_stanmodel("nonexistent.so",   "data.json"), "not found")
 })
 
+test_that("pdmp_sample_from_stanmodel requires prior data for dependent slabs", {
+  model_file <- tempfile(fileext = ".stan")
+  data_file <- tempfile(fileext = ".json")
+  file.create(model_file)
+  jsonlite::write_json(list(N = 1), data_file, auto_unbox = TRUE)
+  on.exit({unlink(model_file); unlink(data_file)}, add = TRUE)
+
+  expect_error(
+    pdmp_sample_from_stanmodel(
+      model_file,
+      data_file,
+      sticky = TRUE,
+      algorithm = "GridThinningStrategy",
+      can_stick = TRUE,
+      model_prior = bernoulli(0.5),
+      slab_prior = dense_gaussian_slab(0, matrix(1, 1, 1), coef = 1)
+    ),
+    "prior_standata"
+  )
+})
+
+test_that("dependent slab Stan validation happens before Julia setup", {
+  model_file <- tempfile(fileext = ".stan")
+  data_file <- tempfile(fileext = ".json")
+  prior_data_file <- tempfile(fileext = ".json")
+  file.create(model_file)
+  jsonlite::write_json(list(N = 1), data_file, auto_unbox = TRUE)
+  jsonlite::write_json(list(N = 1), prior_data_file, auto_unbox = TRUE)
+  on.exit(unlink(c(model_file, data_file, prior_data_file)), add = TRUE)
+
+  testthat::local_mocked_bindings(
+    check_for_julia_setup = function() {
+      stop("SENTINEL_CHECK_SETUP", call. = FALSE)
+    },
+    .package = "PDMPSamplersR"
+  )
+
+  expect_error(
+    pdmp_sample_from_stanmodel(
+      model_file,
+      data_file,
+      prior_standata = prior_data_file,
+      sticky = FALSE,
+      model_prior = bernoulli(0.5),
+      slab_prior = dense_gaussian_slab(0, matrix(1, 1, 1), coef = 1)
+    ),
+    "sticky"
+  )
+
+  expect_error(
+    pdmp_sample_from_stanmodel(
+      model_file,
+      data_file,
+      prior_standata = prior_data_file,
+      sticky = TRUE,
+      model_prior = bernoulli(0.5),
+      slab_prior = dense_gaussian_slab(0, matrix(1, 1, 1), coef = 1)
+    ),
+    "GridThinningStrategy"
+  )
+})
+
 test_that("pdmp_sample_from_stanmodel rejects wrong file extensions", {
   # Create temp files with wrong extensions to test extension check
   wrong_ext <- tempfile(fileext = ".txt")
@@ -98,6 +160,31 @@ test_that("pdmp_sample_from_stanmodel validates subsample controls before Julia 
   )
 })
 
+test_that("dependent slab Stan subsampling is rejected before prior_standata", {
+  model_file <- tempfile(fileext = ".stan")
+  hpp_file <- tempfile(fileext = ".hpp")
+  file.create(model_file)
+  file.create(hpp_file)
+  on.exit(unlink(c(model_file, hpp_file)), add = TRUE)
+
+  expect_error(
+    pdmp_sample_from_stanmodel(
+      model_file,
+      list(N = 5L),
+      sticky = TRUE,
+      algorithm = "GridThinningStrategy",
+      model_prior = bernoulli(0.5),
+      slab_prior = independent_slab_density(1, coef = 1),
+      subsample = list(
+        size = 2L,
+        prior_standata = list(N = 1L, prior_only = 1L),
+        hpp_path = hpp_file
+      )
+    ),
+    "subsample"
+  )
+})
+
 test_that("pdmp_sample_from_stanmodel accepts subsample prior data as list", {
   model_file <- tempfile(fileext = ".stan")
   hpp_file <- tempfile(fileext = ".hpp")
@@ -137,6 +224,54 @@ test_that("pdmp_sample_from_stanmodel accepts subsample prior data as list", {
   expect_equal(captured$data[[2L]], list(N = 1L, prior_only = 1L))
   expect_length(captured$file, 2L)
   expect_false(any(file.exists(captured$file)))
+})
+
+test_that("pdmp_sample_from_stanmodel runs one-dimensional named independent slab target", {
+  skip_on_cran()
+  skip_if_no_pdmp_julia_backend()
+
+  stan_file <- tempfile(fileext = ".stan")
+  data_file <- tempfile(fileext = ".json")
+  prior_data_file <- tempfile(fileext = ".json")
+  on.exit(unlink(c(stan_file, data_file, prior_data_file)), add = TRUE)
+
+  writeLines(c(
+    "data {",
+    "  int<lower=0,upper=1> prior_only;",
+    "}",
+    "parameters {",
+    "  real beta;",
+    "}",
+    "model {",
+    "  beta ~ normal(0, 1);",
+    "  if (!prior_only) beta ~ normal(0.25, 1);",
+    "}"
+  ), stan_file)
+  write_stan_json(list(prior_only = 0L), data_file)
+  write_stan_json(list(prior_only = 1L), prior_data_file)
+
+  fit <- pdmp_sample_from_stanmodel(
+    stan_file,
+    data_file,
+    prior_standata = prior_data_file,
+    flow = "ZigZag",
+    algorithm = "GridThinningStrategy",
+    T = 1.0,
+    x0 = 0.2,
+    theta0 = 1,
+    grid_n = 3L,
+    grid_t_max = 0.1,
+    sticky = TRUE,
+    can_stick = TRUE,
+    model_prior = bernoulli(0.5),
+    slab_prior = independent_slab_density(1, coef = "beta"),
+    show_progress = FALSE,
+    materialize = FALSE
+  )
+
+  expect_s3_class(fit, "pdmp_result")
+  expect_equal(fit$d, 1L)
+  expect_equal(fit$n_chains, 1L)
 })
 
 test_that("pdmp_sample_from_stanmodel subsample path compiles full model with external header", {

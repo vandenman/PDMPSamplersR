@@ -119,6 +119,27 @@ function _coef_indices(slab_prior, unc_names::AbstractVector{<:AbstractString},
     return idx
 end
 
+function _state_indices(value, unc_names::AbstractVector{<:AbstractString}, d::Integer, label::AbstractString)
+    if value isa AbstractString
+        isempty(unc_names) && throw(ArgumentError("character $label requires unconstrained parameter names"))
+        pos = findfirst(==(String(value)), String.(unc_names))
+        isnothing(pos) && throw(ArgumentError("$label name $(value) was not found among unconstrained parameter names"))
+        return [Int(pos)]
+    elseif value isa AbstractVector{<:AbstractString}
+        isempty(unc_names) && throw(ArgumentError("character $label requires unconstrained parameter names"))
+        idx = Int[]
+        for name in value
+            pos = findfirst(==(String(name)), String.(unc_names))
+            isnothing(pos) && throw(ArgumentError("$label name $(name) was not found among unconstrained parameter names"))
+            push!(idx, pos)
+        end
+        return idx
+    end
+    idx = value isa Integer ? [Int(value)] : Int.(value)
+    any(i -> i < 1 || i > d, idx) && throw(ArgumentError("$label indices must lie in 1:d"))
+    return idx
+end
+
 function build_model_prior_odds(model_prior, beta_indices::AbstractVector{Int}, d::Integer)
     m = length(beta_indices)
     if _haskey(model_prior, :prob)
@@ -164,8 +185,25 @@ function build_slab_provider(slab_prior, unc_names::AbstractVector{<:AbstractStr
         length(κ) == 1 && (κ = fill(κ[1], length(beta_idx)))
         length(κ) == length(beta_idx) ||
             throw(DimensionMismatch("independent_slab_density kappa length must be 1 or beta dimension"))
-        vars = @. inv(2π * κ^2)
-        return DenseGaussianSlab(zeros(length(beta_idx)), Diagonal(vars), beta_idx)
+        return IndependentZeroMeanGaussianSlab(κ, beta_idx)
+    elseif t == "independent_logscale_gaussian"
+        log_base_scales = _as_float_vector(_rget(slab_prior, :log_base_scales))
+        length(log_base_scales) == 1 && (log_base_scales = fill(log_base_scales[1], length(beta_idx)))
+        length(log_base_scales) == length(beta_idx) ||
+            throw(DimensionMismatch("independent_logscale_gaussian_slab log_base_scales length must be 1 or beta dimension"))
+        logscale_idx = _state_indices(_rget(slab_prior, :logscale), unc_names, d, "logscale")
+        length(logscale_idx) == 1 && (logscale_idx = fill(logscale_idx[1], length(beta_idx)))
+        length(logscale_idx) == length(beta_idx) ||
+            throw(DimensionMismatch("independent_logscale_gaussian_slab logscale length must be 1 or beta dimension"))
+        return IndependentZeroMeanLogscaleGaussianSlab(beta_idx, logscale_idx, log_base_scales)
+    elseif t == "global_logscale_exchangeable_gaussian"
+        logscale_idx = _state_indices(_rget(slab_prior, :logscale), unc_names, d, "logscale")
+        length(logscale_idx) == 1 ||
+            throw(DimensionMismatch("global_logscale_exchangeable_gaussian_slab logscale length must be 1"))
+        return GlobalLogscaleExchangeableGaussianSlab(beta_idx, logscale_idx[1],
+            Float64(_rget(slab_prior, :u)), Float64(_rget(slab_prior, :v));
+            mean=Float64(_rget(slab_prior, :mean)),
+            logscale_offset=Float64(_rget(slab_prior, :logscale_offset)))
     elseif t == "callback_gaussian"
         mean_cov_r = _rget(slab_prior, :mean_cov)
         active_prior_neggrad_r = _rget(slab_prior, :active_prior_neggrad)
@@ -205,11 +243,7 @@ function wrap_dependent_sticky(alg::PDMPSamplers.PoissonTimeStrategy, sticky::Bo
     d = length(can_stick)
     provider = build_slab_provider(slab_prior, unc_names, can_stick, d)
     odds = build_model_prior_odds(model_prior, beta_indices(provider), d)
-    clock = if slab_cache_style(provider) isa FixedCovarianceCache
-        LinearGaussianAggregateClock(provider, odds)
-    else
-        SummedRateClock(provider, odds)
-    end
+    clock = default_aggregate_unstick_clock(provider, odds)
     return AggregateSticky(alg, clock, BitVector(can_stick))
 end
 

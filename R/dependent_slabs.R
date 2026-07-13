@@ -85,6 +85,51 @@ gaussian_scale_mixture_slab <- function(mean_cov, active_prior_neggrad = NULL, c
 }
 
 #' @rdname independent_slab_density
+#' @param log_base_scales Numeric log base standard deviations for structured
+#'   independent log-scale Gaussian slabs.
+#' @param logscale Integer or character vector of unconstrained log-scale
+#'   coordinate indices/names. A scalar is recycled over selected coefficients.
+#' @export
+independent_logscale_gaussian_slab <- function(log_base_scales, logscale, coef = NULL) {
+  validate_type(log_base_scales, type = "double")
+  if (!(is.character(logscale) || rlang::is_integerish(logscale))) {
+    cli::cli_abort("Argument {.arg logscale} must be a character or integer vector.")
+  }
+  if (!is.character(logscale)) {
+    logscale <- as.integer(logscale)
+  }
+  .new_slab_prior(
+    "independent_logscale_gaussian",
+    list(log_base_scales = log_base_scales, logscale = logscale),
+    coef = coef
+  )
+}
+
+#' @rdname independent_slab_density
+#' @param logscale_offset Fixed additive offset for a global log-scale.
+#' @export
+global_logscale_exchangeable_gaussian_slab <- function(logscale, u, v, mean = 0, logscale_offset = 0, coef = NULL) {
+  validate_type(u, type = "double", n = 1, positive = TRUE)
+  validate_type(v, type = "double", n = 1)
+  validate_type(mean, type = "double", n = 1)
+  validate_type(logscale_offset, type = "double", n = 1)
+  if (!(is.character(logscale) || rlang::is_integerish(logscale))) {
+    cli::cli_abort("Argument {.arg logscale} must be a character or integer scalar.")
+  }
+  if (length(logscale) != 1) {
+    cli::cli_abort("Argument {.arg logscale} must have length 1.")
+  }
+  if (!is.character(logscale)) {
+    logscale <- as.integer(logscale)
+  }
+  .new_slab_prior(
+    "global_logscale_exchangeable_gaussian",
+    list(logscale = logscale, u = u, v = v, mean = mean, logscale_offset = logscale_offset),
+    coef = coef
+  )
+}
+
+#' @rdname independent_slab_density
 #' @param log_q_zero R function returning a boundary log-density at zero. It is
 #'   called as \code{log_q_zero(x, active, j)}, where \code{j} is a 1-based slab
 #'   coefficient index.

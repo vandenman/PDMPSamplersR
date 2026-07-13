@@ -11,6 +11,12 @@ test_that("dependent slab constructors create validated specs", {
   exch <- exchangeable_gaussian_slab(u = 2, v = 0.1)
   expect_equal(exch$type, "exchangeable_gaussian")
   expect_true(exch$zero_mean)
+
+  logscale <- independent_logscale_gaussian_slab(log_base_scales = c(0, 1), logscale = "log_tau", coef = c("b.x1", "b.x2"))
+  expect_equal(logscale$type, "independent_logscale_gaussian")
+
+  global_exch <- global_logscale_exchangeable_gaussian_slab(logscale = "log_tau", u = 1, v = 0.2)
+  expect_equal(global_exch$type, "global_logscale_exchangeable_gaussian")
 })
 
 test_that("dependent slab constructors reject invalid inputs", {
@@ -19,6 +25,8 @@ test_that("dependent slab constructors reject invalid inputs", {
   expect_error(dense_gaussian_slab(c(0, 0), matrix(c(1, 2, 0, 1), 2)), "symmetric")
   expect_error(exchangeable_gaussian_slab(mean = 1, u = 1, v = 0), "mean")
   expect_error(exchangeable_gaussian_slab(u = 1, v = 0, coef = list(a = 1)), "coef")
+  expect_error(independent_logscale_gaussian_slab(0, list(a = 1)), "logscale")
+  expect_error(global_logscale_exchangeable_gaussian_slab(1:2, u = 1, v = 0), "length 1")
 })
 
 test_that("validate_pdmp_params separates legacy and dependent sticky modes", {
@@ -211,6 +219,28 @@ test_that("Julia bridge builds dependent slab concrete types", {
   JuliaCall::julia_assign("r_unc_names", unc_names)
   provider_type <- JuliaCall::julia_eval("string(typeof(build_slab_provider(r_dense_slab, r_unc_names, r_can_stick, 3)))")
   expect_match(provider_type, "DenseGaussianSlab")
+
+  indep <- independent_slab_density(1, coef = c("b.x1", "b.x2"))
+  JuliaCall::julia_assign("r_indep_slab", indep)
+  indep_provider_type <- JuliaCall::julia_eval("string(typeof(build_slab_provider(r_indep_slab, r_unc_names, r_can_stick, 3)))")
+  expect_match(indep_provider_type, "IndependentZeroMeanGaussianSlab")
+
+  logscale <- independent_logscale_gaussian_slab(0, logscale = "b.Intercept", coef = c("b.x1", "b.x2"))
+  JuliaCall::julia_assign("r_logscale_slab", logscale)
+  logscale_provider_type <- JuliaCall::julia_eval("string(typeof(build_slab_provider(r_logscale_slab, r_unc_names, r_can_stick, 3)))")
+  expect_match(logscale_provider_type, "IndependentZeroMeanLogscaleGaussianSlab")
+  logscale_clock_type <- JuliaCall::julia_eval("
+    string(typeof(default_aggregate_unstick_clock(
+      build_slab_provider(r_logscale_slab, r_unc_names, r_can_stick, 3),
+      build_model_prior_odds(r_model_prior, [2, 3], 3)
+    )))
+  ")
+  expect_match(logscale_clock_type, "ExponentialSumAggregateClock")
+
+  global_exch <- global_logscale_exchangeable_gaussian_slab(logscale = "b.Intercept", u = 1, v = 0.1, coef = c("b.x1", "b.x2"))
+  JuliaCall::julia_assign("r_global_exch_slab", global_exch)
+  global_provider_type <- JuliaCall::julia_eval("string(typeof(build_slab_provider(r_global_exch_slab, r_unc_names, r_can_stick, 3)))")
+  expect_match(global_provider_type, "GlobalLogscaleExchangeableGaussianSlab")
 
   alg_type <- JuliaCall::julia_eval("
     string(typeof(wrap_dependent_sticky(

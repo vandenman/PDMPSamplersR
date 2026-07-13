@@ -221,6 +221,7 @@ brm_pdmp <- function(
     if (!flow %in% c("ZigZag", "BouncyParticle") || algorithm != "GridThinningStrategy") {
       cli::cli_abort("Dependent {.arg slab_prior} sticky sampling currently requires ZigZag or BouncyParticle with {.val GridThinningStrategy}.")
     }
+    cli::cli_abort("Dependent {.arg slab_prior} is temporarily gated for {.fn brm_pdmp} until target composition subtracts only the slab component or adds back nuisance priors.")
   }
   if (!is.null(seed)) {
     if (!rlang::is_integerish(seed, n = 1)) {

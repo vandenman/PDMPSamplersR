@@ -45,7 +45,7 @@ test_that("pdmp_sample_from_stanmodel validates file existence", {
   expect_error(pdmp_sample_from_stanmodel("nonexistent.so",   "data.json"), "not found")
 })
 
-test_that("pdmp_sample_from_stanmodel requires prior data for dependent slabs", {
+test_that("pdmp_sample_from_stanmodel gates dependent slabs pending target composition", {
   model_file <- tempfile(fileext = ".stan")
   data_file <- tempfile(fileext = ".json")
   file.create(model_file)
@@ -62,7 +62,7 @@ test_that("pdmp_sample_from_stanmodel requires prior data for dependent slabs", 
       model_prior = bernoulli(0.5),
       slab_prior = dense_gaussian_slab(0, matrix(1, 1, 1), coef = 1)
     ),
-    "prior_standata"
+    "target composition|temporarily gated"
   )
 })
 
@@ -226,9 +226,8 @@ test_that("pdmp_sample_from_stanmodel accepts subsample prior data as list", {
   expect_false(any(file.exists(captured$file)))
 })
 
-test_that("pdmp_sample_from_stanmodel runs one-dimensional named independent slab target", {
+test_that("pdmp_sample_from_stanmodel gates one-dimensional named independent slab target", {
   skip_on_cran()
-  skip_if_no_pdmp_julia_backend()
 
   stan_file <- tempfile(fileext = ".stan")
   data_file <- tempfile(fileext = ".json")
@@ -250,28 +249,27 @@ test_that("pdmp_sample_from_stanmodel runs one-dimensional named independent sla
   write_stan_json(list(prior_only = 0L), data_file)
   write_stan_json(list(prior_only = 1L), prior_data_file)
 
-  fit <- pdmp_sample_from_stanmodel(
-    stan_file,
-    data_file,
-    prior_standata = prior_data_file,
-    flow = "ZigZag",
-    algorithm = "GridThinningStrategy",
-    T = 1.0,
-    x0 = 0.2,
-    theta0 = 1,
-    grid_n = 3L,
-    grid_t_max = 0.1,
-    sticky = TRUE,
-    can_stick = TRUE,
-    model_prior = bernoulli(0.5),
-    slab_prior = independent_slab_density(1, coef = "beta"),
-    show_progress = FALSE,
-    materialize = FALSE
+  expect_error(
+    pdmp_sample_from_stanmodel(
+      stan_file,
+      data_file,
+      prior_standata = prior_data_file,
+      flow = "ZigZag",
+      algorithm = "GridThinningStrategy",
+      T = 1.0,
+      x0 = 0.2,
+      theta0 = 1,
+      grid_n = 3L,
+      grid_t_max = 0.1,
+      sticky = TRUE,
+      can_stick = TRUE,
+      model_prior = bernoulli(0.5),
+      slab_prior = independent_slab_density(1, coef = "beta"),
+      show_progress = FALSE,
+      materialize = FALSE
+    ),
+    "target composition|temporarily gated"
   )
-
-  expect_s3_class(fit, "pdmp_result")
-  expect_equal(fit$d, 1L)
-  expect_equal(fit$n_chains, 1L)
 })
 
 test_that("pdmp_sample_from_stanmodel subsample path compiles full model with external header", {

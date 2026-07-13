@@ -195,11 +195,19 @@ function build_slab_provider(slab_prior, unc_names::AbstractVector{<:AbstractStr
         length(logscale_idx) == 1 && (logscale_idx = fill(logscale_idx[1], length(beta_idx)))
         length(logscale_idx) == length(beta_idx) ||
             throw(DimensionMismatch("independent_logscale_gaussian_slab logscale length must be 1 or beta dimension"))
+        isempty(intersect(beta_idx, logscale_idx)) ||
+            throw(ArgumentError("independent_logscale_gaussian_slab logscale coordinates must be disjoint from slab coef coordinates"))
+        any(i -> can_stick[i], unique(logscale_idx)) &&
+            throw(ArgumentError("independent_logscale_gaussian_slab logscale coordinates must be non-stickable"))
         return IndependentZeroMeanLogscaleGaussianSlab(beta_idx, logscale_idx, log_base_scales)
     elseif t == "global_logscale_exchangeable_gaussian"
         logscale_idx = _state_indices(_rget(slab_prior, :logscale), unc_names, d, "logscale")
         length(logscale_idx) == 1 ||
             throw(DimensionMismatch("global_logscale_exchangeable_gaussian_slab logscale length must be 1"))
+        logscale_idx[1] in beta_idx &&
+            throw(ArgumentError("global_logscale_exchangeable_gaussian_slab logscale coordinate must be disjoint from slab coef coordinates"))
+        can_stick[logscale_idx[1]] &&
+            throw(ArgumentError("global_logscale_exchangeable_gaussian_slab logscale coordinate must be non-stickable"))
         return GlobalLogscaleExchangeableGaussianSlab(beta_idx, logscale_idx[1],
             Float64(_rget(slab_prior, :u)), Float64(_rget(slab_prior, :v));
             mean=Float64(_rget(slab_prior, :mean)),
@@ -249,7 +257,7 @@ end
 
 function _reject_ungated_slab_prior(slab_prior, caller::AbstractString)
     isnothing(slab_prior) && return nothing
-    throw(ArgumentError("Dependent slab_prior is not yet supported for $(caller); the active-set target correction bridge is still pending"))
+    throw(ArgumentError("Dependent slab_prior is not yet supported for $(caller); target composition must subtract only the slab component or add back nuisance priors"))
 end
 
 function _validate_sampling_slab_prior(slab_prior)
@@ -666,6 +674,9 @@ function r_pdmp_stan(
         kwargs...
     )
 
+    if haskey(kwargs, :slab_prior) && !isnothing(kwargs[:slab_prior])
+        _reject_ungated_slab_prior(kwargs[:slab_prior], "r_pdmp_stan")
+    end
     model = PDMPModel(path_to_stan_model, path_to_stan_data)
     return r_pdmp_stan(model, x0, flow_type, algorithm_type, flow_mean, flow_cov; kwargs...)
 end
@@ -713,6 +724,7 @@ function r_pdmp_stan(
     can_stick_vec = _as_bool_vector(can_stick)
     parameter_prior_vec = isnothing(parameter_prior) ? nothing : _as_float_vector(parameter_prior)
     unc_names_vec = _as_string_vector(unc_names)
+    _reject_ungated_slab_prior(slab_prior, "r_pdmp_stan")
 
     sampling_model = if isnothing(slab_prior)
         model
@@ -810,7 +822,7 @@ function r_pdmp_custom(
     model = if isnothing(slab_prior)
         PDMPModel(d, FullGradient(grad!), hvp)
     else
-        isnothing(prior_grad!) && throw(ArgumentError("r_pdmp_custom requires prior_grad! when slab_prior is supplied"))
+        isnothing(prior_grad!) && throw(ArgumentError("r_pdmp_custom requires slab-only prior_grad! when slab_prior is supplied"))
         _validate_sampling_slab_prior(slab_prior)
         provider = build_slab_provider(slab_prior, String[], can_stick_vec, d)
         odds = build_model_prior_odds(model_prior, beta_indices(provider), d)
@@ -1662,6 +1674,7 @@ function r_pdmp_stan_for_brms(
         unc_names = String[]
     )
     sm = BridgeStan.StanModel(path_to_stan_model, path_to_stan_data; warn=false)
+    _reject_ungated_slab_prior(slab_prior, "r_pdmp_stan_for_brms")
     posterior_model = PDMPModel(sm; hvp = isnothing(slab_prior) && !use_fd_hvp)
     can_stick_vec = _as_bool_vector(can_stick)
     parameter_prior_vec = isnothing(parameter_prior) ? nothing : _as_float_vector(parameter_prior)

@@ -232,6 +232,28 @@ validate_pdmp_params <- function(d, flow, algorithm, T, t0 = 0.0, t_warmup = 0.0
   if (is.null(coef_idx)) sum(can_stick) else length(coef_idx)
 }
 
+.slab_state_indices <- function(value, d, unc_names = NULL, arg = "logscale") {
+  if (is.character(value)) {
+    if (is.null(unc_names)) {
+      cli::cli_abort("Character slab {.arg {arg}} requires unconstrained parameter names; use integer indices for custom-gradient {.fn pdmp_sample}.")
+    }
+    idx <- match(value, unc_names)
+    if (anyNA(idx)) {
+      missing <- value[is.na(idx)]
+      cli::cli_abort(c(
+        "{.arg {arg}} contains names not found among unconstrained parameter names.",
+        "x" = "Unknown names: {.val {missing}}."
+      ))
+    }
+    return(idx)
+  }
+  idx <- as.integer(value)
+  if (any(idx < 1L) || any(idx > d)) {
+    cli::cli_abort("Integer {.arg {arg}} values must be 1-based indices in 1:d.")
+  }
+  idx
+}
+
 .validate_slab_prior_dimensions <- function(slab_prior, d, can_stick, unc_names = NULL, model_prior = NULL) {
   if (is.null(slab_prior)) return(invisible(TRUE))
   .validate_slab_prior_sampling_contract(slab_prior)
@@ -260,6 +282,34 @@ validate_pdmp_params <- function(d, flow, algorithm, T, t0 = 0.0, t_warmup = 0.0
   } else if (slab_prior$type == "exchangeable_gaussian") {
     if (slab_prior$u + p * slab_prior$v <= 0) {
       cli::cli_abort("Exchangeable slab covariance requires {.code u + p * v > 0}.")
+    }
+  } else if (slab_prior$type == "independent_logscale_gaussian") {
+    logscale_idx <- .slab_state_indices(slab_prior$logscale, d, unc_names, arg = "logscale")
+    if (length(logscale_idx) == 1L) logscale_idx <- rep(logscale_idx, p)
+    if (length(logscale_idx) != p) {
+      cli::cli_abort("Argument {.arg logscale} must have length 1 or match the number of slab coefficients.")
+    }
+    beta_idx <- if (is.null(coef_idx)) which(can_stick) else coef_idx
+    if (length(slab_prior$log_base_scales) != 1L && length(slab_prior$log_base_scales) != p) {
+      cli::cli_abort("Argument {.arg log_base_scales} must have length 1 or match the number of slab coefficients.")
+    }
+    if (length(intersect(beta_idx, logscale_idx)) > 0L) {
+      cli::cli_abort("Slab {.arg logscale} coordinates must be disjoint from slab {.arg coef} coordinates.")
+    }
+    if (any(can_stick[unique(logscale_idx)])) {
+      cli::cli_abort("Slab {.arg logscale} coordinates must be non-stickable.")
+    }
+  } else if (slab_prior$type == "global_logscale_exchangeable_gaussian") {
+    logscale_idx <- .slab_state_indices(slab_prior$logscale, d, unc_names, arg = "logscale")
+    if (length(logscale_idx) != 1L) {
+      cli::cli_abort("Argument {.arg logscale} must have length 1.")
+    }
+    beta_idx <- if (is.null(coef_idx)) which(can_stick) else coef_idx
+    if (logscale_idx %in% beta_idx) {
+      cli::cli_abort("Slab {.arg logscale} coordinate must be disjoint from slab {.arg coef} coordinates.")
+    }
+    if (can_stick[logscale_idx]) {
+      cli::cli_abort("Slab {.arg logscale} coordinate must be non-stickable.")
     }
   }
   invisible(TRUE)
@@ -589,11 +639,13 @@ validate_stan_subsample <- function(subsample, standata, standata_path, path_to_
 #'   \code{independent_slab_density()}, \code{gaussian_scale_mixture_slab()},
 #'   or \code{arbitrary_slab_boundary()}. Mutually exclusive with
 #'   \code{parameter_prior}. The custom-gradient path requires
-#'   \code{prior_grad} so the dependent target can subtract the base prior
-#'   gradient before adding the active slab gradient.
+#'   \code{prior_grad} so the dependent target can subtract the slab component
+#'   before adding the active slab gradient.
 #' @param prior_grad Optional function computing the NEGATIVE gradient of the
-#'   base prior to subtract in the dependent-slab target. Required when
-#'   \code{slab_prior} is supplied to \code{pdmp_sample()}.
+#'   slab prior component to subtract in the dependent-slab target. Do not
+#'   include nuisance-prior terms here; nuisance coordinates should remain in
+#'   the posterior gradient \code{f}. Required when \code{slab_prior} is
+#'   supplied to \code{pdmp_sample()}.
 #' @param grid_n Integer, number of grid points for GridThinningStrategy (default: 30).
 #' @param grid_t_max Numeric, maximum time for grid in GridThinningStrategy (default: 2.0).
 #' @param post_warmup_simplify Logical. If \code{TRUE}, the grid-thinning
@@ -670,7 +722,7 @@ pdmp_sample <- function(f, d,
   # Test the hessian with a sample input
   if (!is.null(slab_prior)) {
     if (!rlang::is_function(prior_grad)) {
-      cli::cli_abort("Argument {.arg prior_grad} must be provided as a function when {.arg slab_prior} is supplied.")
+      cli::cli_abort("Argument {.arg prior_grad} must be provided as a slab-only negative-gradient function when {.arg slab_prior} is supplied.")
     }
     tryCatch({
       test_output <- prior_grad(params$x0)
@@ -843,6 +895,9 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
     slab_prior, sticky, flow, algorithm, model_prior, parameter_prior,
     subsample = subsample
   )
+  if (!is.null(slab_prior)) {
+    cli::cli_abort("Dependent {.arg slab_prior} is temporarily gated for Stan models until target composition subtracts only the slab component or adds back nuisance priors.")
+  }
   if (!is.null(slab_prior) && is.null(prior_standata_path)) {
     cli::cli_abort("Argument {.arg prior_standata} is required when {.arg slab_prior} is supplied.")
   }

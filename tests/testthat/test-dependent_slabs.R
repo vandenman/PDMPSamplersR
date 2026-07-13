@@ -96,6 +96,26 @@ test_that("slab_prior requires sticky and reconciles coef with can_stick", {
   expect_error(
     PDMPSamplersR:::validate_pdmp_params(
       d, "ZigZag", "GridThinningStrategy", 10,
+      sticky = TRUE, can_stick = c(TRUE, TRUE, FALSE, FALSE),
+      model_prior = bernoulli(0.5),
+      slab_prior = independent_logscale_gaussian_slab(0, logscale = 1, coef = 1)
+    ),
+    "disjoint"
+  )
+
+  expect_error(
+    PDMPSamplersR:::validate_pdmp_params(
+      d, "ZigZag", "GridThinningStrategy", 10,
+      sticky = TRUE, can_stick = c(TRUE, FALSE, TRUE, FALSE),
+      model_prior = bernoulli(0.5),
+      slab_prior = global_logscale_exchangeable_gaussian_slab(logscale = 3, u = 1, v = 0, coef = 1)
+    ),
+    "non-stickable"
+  )
+
+  expect_error(
+    PDMPSamplersR:::validate_pdmp_params(
+      d, "ZigZag", "GridThinningStrategy", 10,
       sticky = TRUE, can_stick = NULL,
       model_prior = bernoulli(0.5),
       slab_prior = dense_gaussian_slab(0, matrix(1, 1, 1), coef = 5)
@@ -191,7 +211,7 @@ test_that("public custom-gradient dependent slab path can run a tiny chain", {
   expect_s3_class(result, "pdmp_result")
 })
 
-test_that("Stan-backed dependent slabs require a prior-only target", {
+test_that("Stan-backed dependent slabs are gated pending target composition contract", {
   expect_error(
     pdmp_sample_from_stanmodel(
       "missing.stan", "missing.json",
@@ -200,7 +220,7 @@ test_that("Stan-backed dependent slabs require a prior-only target", {
       model_prior = bernoulli(0.5),
       slab_prior = dense_gaussian_slab(0, matrix(1, 1, 1), coef = 1)
     ),
-    "prior_standata"
+    "target composition|temporarily gated"
   )
 })
 
@@ -241,6 +261,13 @@ test_that("Julia bridge builds dependent slab concrete types", {
   JuliaCall::julia_assign("r_global_exch_slab", global_exch)
   global_provider_type <- JuliaCall::julia_eval("string(typeof(build_slab_provider(r_global_exch_slab, r_unc_names, r_can_stick, 3)))")
   expect_match(global_provider_type, "GlobalLogscaleExchangeableGaussianSlab")
+  global_clock_type <- JuliaCall::julia_eval("
+    string(typeof(default_aggregate_unstick_clock(
+      build_slab_provider(r_global_exch_slab, r_unc_names, r_can_stick, 3),
+      build_model_prior_odds(r_model_prior, [2, 3], 3)
+    )))
+  ")
+  expect_match(global_clock_type, "ChebyshevResidualAggregateClock")
 
   alg_type <- JuliaCall::julia_eval("
     string(typeof(wrap_dependent_sticky(

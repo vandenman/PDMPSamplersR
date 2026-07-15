@@ -41,12 +41,64 @@ function build_flow(flow_type::String, prec::AbstractMatrix{Float64}, flow_mean:
 end
 
 function build_algorithm(algorithm_type::String; c0::Float64, d::Integer, grid_n::Int, grid_t_max::Float64,
-        use_fd_hvp::Bool=false, post_warmup_simplify::Bool=false)
+        use_fd_hvp::Bool=false, post_warmup_simplify::Bool=false, grid_bound::String="constant",
+        linear_area_threshold::Float64=0.95, linear_min_area_gain::Float64=0.0,
+        lazy_low_tightness_threshold::Float64=0.1,
+        lazy_max_low_tightness_rejections::Int=3,
+        lazy_max_rejections::Int=0)
     if algorithm_type == "ThinningStrategy"
         return ThinningStrategy(GlobalBounds(c0 / d, d))
     elseif algorithm_type == "GridThinningStrategy"
         return GridThinningStrategy(; N = grid_n, t_max = grid_t_max,
-            use_fd_hvp = use_fd_hvp, post_warmup_simplify = post_warmup_simplify)
+            use_fd_hvp = use_fd_hvp, post_warmup_simplify = post_warmup_simplify,
+            bound = Symbol(grid_bound),
+            linear_area_threshold = linear_area_threshold,
+            linear_min_area_gain = linear_min_area_gain,
+            lazy_low_tightness_threshold = lazy_low_tightness_threshold,
+            lazy_max_low_tightness_rejections = lazy_max_low_tightness_rejections,
+            lazy_max_rejections = lazy_max_rejections)
+    elseif algorithm_type == "PositiveVariationGridThinningStrategy"
+        pv_max_skip_width = parse(Float64, get(ENV, "PDMP_POSITIVE_VARIATION_MAX_SKIP_WIDTH", "0.25"))
+        pv_dense_cell_width = parse(Float64, get(ENV, "PDMP_POSITIVE_VARIATION_DENSE_CELL_WIDTH", "0.0"))
+        pv_skip_slope_safety = parse(Float64, get(ENV, "PDMP_POSITIVE_VARIATION_SKIP_SLOPE_SAFETY", "0.0"))
+        pv_use_derivative_hermite = parse(Bool, get(ENV, "PDMP_POSITIVE_VARIATION_USE_DERIVATIVE_HERMITE", "false"))
+        pv_derivative_hermite_on_demand = parse(Bool, get(ENV, "PDMP_POSITIVE_VARIATION_DERIVATIVE_HERMITE_ON_DEMAND", "false"))
+        pv_derivative_hermite_trigger_scale = parse(Float64, get(ENV, "PDMP_POSITIVE_VARIATION_DERIVATIVE_HERMITE_TRIGGER_SCALE", "10.0"))
+        pv_validation_rtol = parse(Float64, get(ENV, "PDMP_POSITIVE_VARIATION_VALIDATION_RTOL", "0.05"))
+        return PositiveVariationGridThinningStrategy(; N = grid_n, t_max = grid_t_max,
+            validation_rtol = pv_validation_rtol,
+            max_skip_width = pv_max_skip_width,
+            dense_cell_width = pv_dense_cell_width,
+            skip_slope_safety = pv_skip_slope_safety,
+            use_derivative_hermite = pv_use_derivative_hermite,
+            derivative_hermite_on_demand = pv_derivative_hermite_on_demand,
+            derivative_hermite_trigger_scale = pv_derivative_hermite_trigger_scale,
+            fallback = GridThinningStrategy(; N = grid_n, t_max = grid_t_max,
+                use_fd_hvp = use_fd_hvp, post_warmup_simplify = post_warmup_simplify,
+                bound = Symbol(grid_bound),
+                linear_area_threshold = linear_area_threshold,
+                linear_min_area_gain = linear_min_area_gain,
+                lazy_low_tightness_threshold = lazy_low_tightness_threshold,
+                lazy_max_low_tightness_rejections = lazy_max_low_tightness_rejections,
+                lazy_max_rejections = lazy_max_rejections))
+    elseif algorithm_type == "VectorVariationThinningStrategy"
+        vv_max_skip_width = parse(Float64, get(ENV, "PDMP_VECTOR_VARIATION_MAX_SKIP_WIDTH", "0.25"))
+        vv_validation_rtol = parse(Float64, get(ENV, "PDMP_VECTOR_VARIATION_VALIDATION_RTOL", "0.05"))
+        vv_max_refinement_depth = parse(Int, get(ENV, "PDMP_VECTOR_VARIATION_MAX_REFINEMENT_DEPTH", "8"))
+        vv_n_min = parse(Int, get(ENV, "PDMP_VECTOR_VARIATION_N_MIN", "5"))
+        return VectorVariationThinningStrategy(; N = grid_n, t_max = grid_t_max,
+            N_min = vv_n_min,
+            validation_rtol = vv_validation_rtol,
+            max_skip_width = vv_max_skip_width,
+            max_refinement_depth = vv_max_refinement_depth,
+            fallback = GridThinningStrategy(; N = grid_n, t_max = grid_t_max,
+                use_fd_hvp = use_fd_hvp, post_warmup_simplify = post_warmup_simplify,
+                bound = Symbol(grid_bound),
+                linear_area_threshold = linear_area_threshold,
+                linear_min_area_gain = linear_min_area_gain,
+                lazy_low_tightness_threshold = lazy_low_tightness_threshold,
+                lazy_max_low_tightness_rejections = lazy_max_low_tightness_rejections,
+                lazy_max_rejections = lazy_max_rejections))
     elseif algorithm_type == "RootsPoissonStrategy"
         return RootsPoissonTimeStrategy()
     else
@@ -623,6 +675,11 @@ function extract_stats(chains::PDMPChains)
         "support_boundary_refresh_failures" => vals(:support_boundary_refresh_failures),
         "gradient_calls"        => vals(:∇f_calls),
         "hessian_calls"         => vals(:∇²f_calls),
+        "stochastic_gradient_calls" => vals(:stochastic_gradient_calls),
+        "full_gradient_calls" => vals(:full_gradient_calls),
+        "full_reflection_gradient_calls" => vals(:full_reflection_gradient_calls),
+        "prior_gradient_calls" => vals(:prior_gradient_calls),
+        "fd_curvature_gradient_calls" => vals(:fd_curvature_gradient_calls),
         "elapsed_time"          => vals(:elapsed_time),
         "grid_builds"           => vals(:grid_builds),
         "grid_shrinks"          => vals(:grid_shrinks),
@@ -631,16 +688,26 @@ function extract_stats(chains::PDMPChains)
         "grid_points_evaluated" => vals(:grid_points_evaluated),
         "grid_points_skipped"   => vals(:grid_points_skipped),
         "grid_N_current"        => vals(:grid_N_current),
+        "grid_schedule_samples" => vals(:grid_schedule_samples),
+        "grid_N_sum"            => vals(:grid_N_sum),
+        "grid_tmax_sum"         => vals(:grid_tmax_sum),
+        "grid_h_sum"            => vals(:grid_h_sum),
         "lazy_fallback_low_tightness" => vals(:lazy_fallback_low_tightness),
         "lazy_fallback_bound_violation" => vals(:lazy_fallback_bound_violation),
         "lazy_proposal_attempts" => vals(:lazy_proposal_attempts),
         "lazy_proposal_rejections" => vals(:lazy_proposal_rejections),
+        "positive_variation_cells" => vals(:positive_variation_cells),
+        "positive_variation_refinements" => vals(:positive_variation_refinements),
+        "positive_variation_fallbacks" => vals(:positive_variation_fallbacks),
+        "positive_variation_accepts" => vals(:positive_variation_accepts),
+        "positive_variation_skipped_cells" => vals(:positive_variation_skipped_cells),
         "grid_resets_from_dynamics_adaptation" => vals(:grid_resets_from_dynamics_adaptation),
         "grid_endpoint_evaluations" => vals(:grid_endpoint_evaluations),
         "grid_cached_endpoint_reuses" => vals(:grid_cached_endpoint_reuses),
         "grid_acceptance_tests" => vals(:grid_acceptance_tests),
         "grid_acceptance_gradient_calls" => vals(:grid_acceptance_gradient_calls),
         "grid_horizon_hits" => vals(:grid_horizon_hits),
+        "grid_budget_tail_restarts" => vals(:grid_budget_tail_restarts),
         "constant_bound_attempts" => vals(:constant_bound_attempts),
         "constant_bound_accepts" => vals(:constant_bound_accepts),
         "constant_bound_rejections" => vals(:constant_bound_rejections),
@@ -657,6 +724,36 @@ function extract_stats(chains::PDMPChains)
         "main_gradient_calls" => vals(:main_gradient_calls),
         "warmup_hessian_calls" => vals(:warmup_hessian_calls),
         "main_hessian_calls" => vals(:main_hessian_calls),
+        "warmup_stochastic_gradient_calls" => vals(:warmup_stochastic_gradient_calls),
+        "main_stochastic_gradient_calls" => vals(:main_stochastic_gradient_calls),
+        "warmup_full_gradient_calls" => vals(:warmup_full_gradient_calls),
+        "main_full_gradient_calls" => vals(:main_full_gradient_calls),
+        "warmup_full_reflection_gradient_calls" => vals(:warmup_full_reflection_gradient_calls),
+        "main_full_reflection_gradient_calls" => vals(:main_full_reflection_gradient_calls),
+        "warmup_prior_gradient_calls" => vals(:warmup_prior_gradient_calls),
+        "main_prior_gradient_calls" => vals(:main_prior_gradient_calls),
+        "warmup_fd_curvature_gradient_calls" => vals(:warmup_fd_curvature_gradient_calls),
+        "main_fd_curvature_gradient_calls" => vals(:main_fd_curvature_gradient_calls),
+        "warmup_exact_curvature_calls" => vals(:warmup_exact_curvature_calls),
+        "main_exact_curvature_calls" => vals(:main_exact_curvature_calls),
+        "warmup_grid_endpoint_evaluations" => vals(:warmup_grid_endpoint_evaluations),
+        "main_grid_endpoint_evaluations" => vals(:main_grid_endpoint_evaluations),
+        "warmup_grid_endpoint_gradient_calls" => vals(:warmup_grid_endpoint_gradient_calls),
+        "main_grid_endpoint_gradient_calls" => vals(:main_grid_endpoint_gradient_calls),
+        "warmup_grid_endpoint_hessian_calls" => vals(:warmup_grid_endpoint_hessian_calls),
+        "main_grid_endpoint_hessian_calls" => vals(:main_grid_endpoint_hessian_calls),
+        "warmup_grid_endpoint_derivative_calls" => vals(:warmup_grid_endpoint_derivative_calls),
+        "main_grid_endpoint_derivative_calls" => vals(:main_grid_endpoint_derivative_calls),
+        "warmup_grid_acceptance_gradient_calls" => vals(:warmup_grid_acceptance_gradient_calls),
+        "main_grid_acceptance_gradient_calls" => vals(:main_grid_acceptance_gradient_calls),
+        "warmup_grid_acceptance_tests" => vals(:warmup_grid_acceptance_tests),
+        "main_grid_acceptance_tests" => vals(:main_grid_acceptance_tests),
+        "warmup_grid_cached_endpoint_reuses" => vals(:warmup_grid_cached_endpoint_reuses),
+        "main_grid_cached_endpoint_reuses" => vals(:main_grid_cached_endpoint_reuses),
+        "warmup_grid_points_evaluated" => vals(:warmup_grid_points_evaluated),
+        "main_grid_points_evaluated" => vals(:main_grid_points_evaluated),
+        "warmup_grid_endpoint_derivative_points_loaded" => vals(:warmup_grid_endpoint_derivative_points_loaded),
+        "main_grid_endpoint_derivative_points_loaded" => vals(:main_grid_endpoint_derivative_points_loaded),
         "warmup_elapsed_time" => vals(:warmup_elapsed_time),
         "main_elapsed_time" => vals(:main_elapsed_time),
         "ct_ess"                => ct_ess,
@@ -692,6 +789,12 @@ function r_pdmp_stan(
         grid_n::Int = 30,
         grid_t_max::Float64 = 2.0,
         post_warmup_simplify::Bool = true,
+        grid_bound::String = "constant",
+        linear_area_threshold::Float64 = 0.95,
+        linear_min_area_gain::Float64 = 0.0,
+        lazy_low_tightness_threshold::Float64 = 0.1,
+        lazy_max_low_tightness_rejections::Int = 3,
+        lazy_max_rejections::Int = 0,
         t0::Float64 = 0.0,
         T::Float64 = 10000.0,
         t_warmup::Float64 = 0.0,
@@ -735,7 +838,10 @@ function r_pdmp_stan(
 
     prec = _to_precision(flow_cov_mat, d)
     flow = build_flow(flow_type, prec, flow_mean_vec; adaptive_scheme)
-    alg0 = build_algorithm(algorithm_type; c0, d, grid_n, grid_t_max, post_warmup_simplify)
+    alg0 = build_algorithm(algorithm_type; c0, d, grid_n, grid_t_max,
+        post_warmup_simplify, grid_bound, linear_area_threshold, linear_min_area_gain,
+        lazy_low_tightness_threshold, lazy_max_low_tightness_rejections,
+        lazy_max_rejections)
     alg = isnothing(slab_prior) ?
         wrap_sticky(alg0, sticky, model_prior, parameter_prior_vec, can_stick_vec) :
         wrap_dependent_sticky(alg0, sticky, model_prior, slab_prior, can_stick_vec, flow_type, unc_names_vec)
@@ -771,6 +877,9 @@ function r_pdmp_custom(
         grid_n::Int = 30,
         grid_t_max::Float64 = 2.0,
         post_warmup_simplify::Bool = true,
+        grid_bound::String = "constant",
+        linear_area_threshold::Float64 = 0.95,
+        linear_min_area_gain::Float64 = 0.0,
         t0::Float64 = 0.0,
         T::Float64 = 10000.0,
         t_warmup::Float64 = 0.0,
@@ -832,7 +941,8 @@ function r_pdmp_custom(
 
     prec = _to_precision(flow_cov_mat, d)
     flow = build_flow(flow_type, prec, flow_mean_vec; adaptive_scheme)
-    alg0 = build_algorithm(algorithm_type; c0, d, grid_n, grid_t_max, post_warmup_simplify)
+    alg0 = build_algorithm(algorithm_type; c0, d, grid_n, grid_t_max,
+        post_warmup_simplify, grid_bound, linear_area_threshold, linear_min_area_gain)
     alg = isnothing(slab_prior) ?
         wrap_sticky(alg0, sticky, model_prior, parameter_prior_vec, can_stick_vec) :
         wrap_dependent_sticky(alg0, sticky, model_prior, slab_prior, can_stick_vec, flow_type)
@@ -877,6 +987,9 @@ function r_pdmp_custom_subsampled(
         grid_n::Int = 30,
         grid_t_max::Float64 = 2.0,
         post_warmup_simplify::Bool = true,
+        grid_bound::String = "constant",
+        linear_area_threshold::Float64 = 0.95,
+        linear_min_area_gain::Float64 = 0.0,
         t0::Float64 = 0.0,
         T::Float64 = 10000.0,
         t_warmup::Float64 = 0.0,
@@ -932,7 +1045,9 @@ function r_pdmp_custom_subsampled(
     prec = isempty(flow_cov) ? Diagonal(ones(d)) : _to_precision(flow_cov, d)
     fmean = isempty(flow_mean) ? zeros(d) : flow_mean
     flow = build_flow(flow_type, prec, fmean; adaptive_scheme)
-    alg = build_algorithm(algorithm_type; c0, d, grid_n, grid_t_max, post_warmup_simplify)
+    alg = build_algorithm(algorithm_type; c0, d, grid_n, grid_t_max,
+        post_warmup_simplify, grid_bound, linear_area_threshold,
+        linear_min_area_gain)
 
     chains = pdmp_sample(x0, flow, model, alg, t0, T, t_warmup;
                          progress = show_progress, n_chains, threaded, seed)
@@ -1486,6 +1601,9 @@ function r_pdmp_brms_subsampled(
         c0::Float64 = 1e-2,
         grid_n::Int = 30,
         grid_t_max::Float64 = 2.0,
+        grid_bound::String = "constant",
+        linear_area_threshold::Float64 = 0.95,
+        linear_min_area_gain::Float64 = 0.0,
         t0::Float64 = 0.0,
         T::Float64 = 10000.0,
         t_warmup::Float64 = 0.0,
@@ -1554,7 +1672,9 @@ function r_pdmp_brms_subsampled(
     fmean = _as_flow_mean(flow_mean, d)
     prec = inv(Symmetric(_as_flow_cov(flow_cov, d)))
     flow = build_flow(flow_type, prec, fmean; adaptive_scheme)
-    alg0 = build_algorithm(algorithm_type; c0, d, grid_n, grid_t_max, use_fd_hvp, post_warmup_simplify)
+    alg0 = build_algorithm(algorithm_type; c0, d, grid_n, grid_t_max,
+        use_fd_hvp, post_warmup_simplify, grid_bound, linear_area_threshold,
+        linear_min_area_gain)
     alg = isnothing(slab_prior) ?
         wrap_sticky(alg0, sticky, model_prior, parameter_prior, can_stick) :
         wrap_dependent_sticky(alg0, sticky, model_prior, slab_prior, can_stick, flow_type, unc_names)
@@ -1652,6 +1772,9 @@ function r_pdmp_stan_for_brms(
         c0::Float64 = 1e-2,
         grid_n::Int = 30,
         grid_t_max::Float64 = 2.0,
+        grid_bound::String = "constant",
+        linear_area_threshold::Float64 = 0.95,
+        linear_min_area_gain::Float64 = 0.0,
         t0::Float64 = 0.0,
         T::Float64 = 10000.0,
         t_warmup::Float64 = 0.0,
@@ -1698,7 +1821,9 @@ function r_pdmp_stan_for_brms(
     prec = _to_precision(flow_cov_mat, d)
 
     flow = build_flow(flow_type, prec, fmean; adaptive_scheme)
-    alg0 = build_algorithm(algorithm_type; c0, d, grid_n, grid_t_max, use_fd_hvp, post_warmup_simplify)
+    alg0 = build_algorithm(algorithm_type; c0, d, grid_n, grid_t_max,
+        use_fd_hvp, post_warmup_simplify, grid_bound, linear_area_threshold,
+        linear_min_area_gain)
     alg = isnothing(slab_prior) ?
         wrap_sticky(alg0, sticky, model_prior, parameter_prior_vec, can_stick_vec) :
         wrap_dependent_sticky(alg0, sticky, model_prior, slab_prior, can_stick_vec, flow_type, unc_names_vec)

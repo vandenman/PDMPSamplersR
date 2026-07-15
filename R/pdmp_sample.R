@@ -28,9 +28,15 @@ validate_pdmp_params <- function(d, flow, algorithm, T, t0 = 0.0, t_warmup = 0.0
                                 slab_prior = NULL,
                                 grid_n = 30, grid_t_max = 2.0,
                                 post_warmup_simplify = FALSE,
+                                grid_bound = "constant",
+                                linear_area_threshold = 0.95,
+                                linear_min_area_gain = 0.0,
                                 n_chains = 1L, threaded = FALSE, seed = NULL,
                                 adaptive_scheme = "diagonal",
-                                unc_names = NULL) {
+                                unc_names = NULL,
+                                lazy_low_tightness_threshold = 0.1,
+                                lazy_max_low_tightness_rejections = 3L,
+                                lazy_max_rejections = 0L) {
 
   # Validate basic parameters
   d <- cast_integer(d, n = 1)
@@ -45,13 +51,16 @@ validate_pdmp_params <- function(d, flow, algorithm, T, t0 = 0.0, t_warmup = 0.0
     cli::cli_abort("Argument {.arg t_warmup} ({t_warmup}) must be less than {.code T - t0} ({T - t0}).")
 
   flow <- match.arg(flow, c("ZigZag", "BouncyParticle", "Boomerang", "AdaptiveBoomerang", "PreconditionedZigZag", "PreconditionedBPS"))
-  algorithm <- match.arg(algorithm, c("ThinningStrategy", "GridThinningStrategy", "RootsPoissonStrategy"))
+  grid_like_algorithms <- c("GridThinningStrategy", "PositiveVariationGridThinningStrategy",
+                            "VectorVariationThinningStrategy")
+  algorithm <- match.arg(algorithm, c("ThinningStrategy", grid_like_algorithms, "RootsPoissonStrategy"))
   adaptive_scheme <- match.arg(adaptive_scheme, c("diagonal", "fullrank"))
+  grid_bound <- match.arg(grid_bound, c("constant", "flat", "linear", "auto"))
 
   # AdaptiveBoomerang requires GridThinningStrategy and a warmup period
   if (flow == "AdaptiveBoomerang") {
-    if (algorithm != "GridThinningStrategy")
-      cli::cli_abort("{.val AdaptiveBoomerang} requires {.val GridThinningStrategy} as the algorithm.")
+    if (!algorithm %in% grid_like_algorithms)
+      cli::cli_abort("{.val AdaptiveBoomerang} requires a grid-like algorithm.")
     if (t_warmup == 0) {
       t_warmup <- (T - t0) / 5
       cli::cli_inform("Setting {.arg t_warmup} to {t_warmup} (20% of sampling time) for {.val AdaptiveBoomerang}.")
@@ -60,8 +69,8 @@ validate_pdmp_params <- function(d, flow, algorithm, T, t0 = 0.0, t_warmup = 0.0
 
   # PreconditionedZigZag and PreconditionedBPS require GridThinningStrategy and a warmup period
   if (flow %in% c("PreconditionedZigZag", "PreconditionedBPS")) {
-    if (algorithm != "GridThinningStrategy")
-      cli::cli_abort("{.val {flow}} requires {.val GridThinningStrategy} as the algorithm.")
+    if (!algorithm %in% grid_like_algorithms)
+      cli::cli_abort("{.val {flow}} requires a grid-like algorithm.")
     if (t_warmup == 0) {
       t_warmup <- (T - t0) / 5
       cli::cli_inform("Setting {.arg t_warmup} to {t_warmup} (20% of sampling time) for {.val {flow}}.")
@@ -189,6 +198,21 @@ validate_pdmp_params <- function(d, flow, algorithm, T, t0 = 0.0, t_warmup = 0.0
   validate_type(grid_n, type = "integer", n = 1, positive = TRUE)
   validate_type(grid_t_max, type = "double", n = 1, positive = TRUE)
   validate_type(post_warmup_simplify, type = "logical", n = 1)
+  validate_type(linear_area_threshold, type = "double", n = 1)
+  validate_type(linear_min_area_gain, type = "double", n = 1)
+  validate_type(lazy_low_tightness_threshold, type = "double", n = 1)
+  lazy_max_low_tightness_rejections <- cast_integer(lazy_max_low_tightness_rejections, n = 1)
+  lazy_max_rejections <- cast_integer(lazy_max_rejections, n = 1)
+  validate_type(lazy_max_low_tightness_rejections, type = "integer", n = 1, positive = TRUE)
+  validate_type(lazy_max_rejections, type = "integer", n = 1)
+  if (linear_area_threshold < 0)
+    cli::cli_abort("Argument {.arg linear_area_threshold} must be non-negative.")
+  if (linear_min_area_gain < 0)
+    cli::cli_abort("Argument {.arg linear_min_area_gain} must be non-negative.")
+  if (lazy_low_tightness_threshold < 0)
+    cli::cli_abort("Argument {.arg lazy_low_tightness_threshold} must be non-negative.")
+  if (lazy_max_rejections < 0)
+    cli::cli_abort("Argument {.arg lazy_max_rejections} must be non-negative.")
 
   return(list(
     d = d, flow = flow, algorithm = algorithm, T = T, t0 = t0, t_warmup = t_warmup,
@@ -198,6 +222,12 @@ validate_pdmp_params <- function(d, flow, algorithm, T, t0 = 0.0, t_warmup = 0.0
     slab_prior = slab_prior,
     grid_n = grid_n, grid_t_max = grid_t_max,
     post_warmup_simplify = post_warmup_simplify,
+    grid_bound = grid_bound,
+    linear_area_threshold = linear_area_threshold,
+    linear_min_area_gain = linear_min_area_gain,
+    lazy_low_tightness_threshold = lazy_low_tightness_threshold,
+    lazy_max_low_tightness_rejections = lazy_max_low_tightness_rejections,
+    lazy_max_rejections = lazy_max_rejections,
     n_chains = n_chains, threaded = threaded, seed = seed,
     adaptive_scheme = adaptive_scheme
   ))
@@ -612,12 +642,14 @@ validate_stan_subsample <- function(subsample, standata, standata_path, path_to_
 #'   "BouncyParticle", "Boomerang", "AdaptiveBoomerang", "PreconditionedZigZag",
 #'   or "PreconditionedBPS".
 #'   The `"AdaptiveBoomerang"` flow learns its reference (mean and precision)
-#'   during warmup and requires `"GridThinningStrategy"` as the algorithm.
+#'   during warmup and requires a grid-like algorithm.
 #'   The `"PreconditionedZigZag"` and `"PreconditionedBPS"` flows learn a
 #'   diagonal preconditioner during warmup and also require
-#'   `"GridThinningStrategy"` as the algorithm.
+#'   a grid-like algorithm.
 #' @param algorithm Character string specifying the algorithm. One of
-#'   "ThinningStrategy", "GridThinningStrategy", or "RootsPoissonStrategy".
+#'   "ThinningStrategy", "GridThinningStrategy",
+#'   "PositiveVariationGridThinningStrategy", "VectorVariationThinningStrategy",
+#'   or "RootsPoissonStrategy".
 #' @param T Numeric, total sampling time (default: 50000).
 #' @param t0 Numeric, initial time (default: 0.0).
 #' @param t_warmup Numeric, warmup time (default: 0.0). Events during warmup are discarded.
@@ -651,6 +683,15 @@ validate_stan_subsample <- function(subsample, standata, standata_path, path_to_
 #' @param post_warmup_simplify Logical. If \code{TRUE}, the grid-thinning
 #'   strategy may switch to a constant bound after warmup, reducing
 #'   gradient calls during the main sampling phase.
+#' @param grid_bound Character string selecting the GridThinning proposal
+#'   envelope. \code{"constant"} preserves the historical behavior.
+#'   \code{"flat"}, \code{"linear"}, and \code{"auto"} expose signed-rate
+#'   affine envelope machinery when supported by the chosen flow and derivative
+#'   provider.
+#' @param linear_area_threshold Numeric gate for \code{grid_bound = "linear"}
+#'   or \code{"auto"}; affine cells are skipped when their relative area gain is
+#'   too small.
+#' @param linear_min_area_gain Numeric absolute area-gain gate for affine cells.
 #' @param show_progress Logical, whether to show progress bar (default: TRUE).
 #' @param n_chains Integer, number of chains to run (default: 1).
 #' @param threaded Logical, whether to run chains in parallel (default: FALSE).
@@ -675,7 +716,9 @@ validate_stan_subsample <- function(subsample, standata, standata_path, path_to_
 #' @export
 pdmp_sample <- function(f, d,
                         flow = c("ZigZag", "BouncyParticle", "Boomerang", "AdaptiveBoomerang", "PreconditionedZigZag", "PreconditionedBPS"),
-                        algorithm = c("ThinningStrategy", "GridThinningStrategy", "RootsPoissonStrategy"),
+                        algorithm = c("ThinningStrategy", "GridThinningStrategy",
+                                      "PositiveVariationGridThinningStrategy", "VectorVariationThinningStrategy",
+                                      "RootsPoissonStrategy"),
                         T = 50000, t0 = 0.0, t_warmup = 0.0,
                         flow_mean = NULL, flow_cov = NULL, c0 = 1e-2,
                         x0 = NULL, theta0 = NULL,
@@ -683,7 +726,14 @@ pdmp_sample <- function(f, d,
                         sticky = FALSE, can_stick = NULL, model_prior = NULL, parameter_prior = NULL,
                         slab_prior = NULL,
                         grid_n = 30, grid_t_max = 2.0,
+                        use_fd_hvp = FALSE,
                         post_warmup_simplify = FALSE,
+                        grid_bound = c("constant", "flat", "linear", "auto"),
+                        linear_area_threshold = 0.95,
+                        linear_min_area_gain = 0.0,
+                        lazy_low_tightness_threshold = 0.1,
+                        lazy_max_low_tightness_rejections = 3L,
+                        lazy_max_rejections = 0L,
                         show_progress = TRUE,
                         n_chains = 1L, threaded = FALSE, seed = NULL,
                         adaptive_scheme = c("diagonal", "fullrank"),
@@ -703,6 +753,7 @@ pdmp_sample <- function(f, d,
                                 c0, x0, theta0, show_progress,
                                 sticky, can_stick, model_prior, parameter_prior, slab_prior,
                                 grid_n, grid_t_max, post_warmup_simplify,
+                                grid_bound, linear_area_threshold, linear_min_area_gain,
                                 n_chains, threaded, seed,
                                 adaptive_scheme = adaptive_scheme)
 
@@ -784,6 +835,9 @@ pdmp_sample <- function(f, d,
     grad!, d, x0, flow, algorithm, flow_mean, flow_cov;
     c0 = c0, grid_n = grid_n, grid_t_max = grid_t_max,
     post_warmup_simplify = post_warmup_simplify,
+    grid_bound = grid_bound,
+    linear_area_threshold = linear_area_threshold,
+    linear_min_area_gain = linear_min_area_gain,
     t0 = t0, T = T, t_warmup = t_warmup,
     hessian = hessian_f,
     sticky = sticky, can_stick = can_stick,
@@ -850,14 +904,23 @@ pdmp_sample <- function(f, d,
 pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
                         prior_stanmodel = NULL, prior_standata = NULL,
                         flow = c("ZigZag", "BouncyParticle", "Boomerang", "AdaptiveBoomerang", "PreconditionedZigZag", "PreconditionedBPS"),
-                        algorithm = c("ThinningStrategy", "GridThinningStrategy", "RootsPoissonStrategy"),
+                        algorithm = c("ThinningStrategy", "GridThinningStrategy",
+                                      "PositiveVariationGridThinningStrategy", "VectorVariationThinningStrategy",
+                                      "RootsPoissonStrategy"),
                         T = 50000, t0 = 0.0, t_warmup = 0.0,
                         flow_mean = NULL, flow_cov = NULL, c0 = 1e-2,
                         x0 = NULL, theta0 = NULL,
                         sticky = FALSE, can_stick = NULL, model_prior = NULL, parameter_prior = NULL,
                         slab_prior = NULL,
                         grid_n = 30, grid_t_max = 2.0,
+                        use_fd_hvp = FALSE,
                         post_warmup_simplify = FALSE,
+                        grid_bound = c("constant", "flat", "linear", "auto"),
+                        linear_area_threshold = 0.95,
+                        linear_min_area_gain = 0.0,
+                        lazy_low_tightness_threshold = 0.1,
+                        lazy_max_low_tightness_rejections = 3L,
+                        lazy_max_rejections = 0L,
                         show_progress = TRUE,
                         n_chains = 1L, threaded = FALSE, seed = NULL,
                         adaptive_scheme = c("diagonal", "fullrank"),
@@ -952,6 +1015,7 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
   }
 
   support_boundary <- validate_support_boundary_control(support_boundary)
+  validate_type(use_fd_hvp, type = "logical", n = 1)
 
   JuliaCall::julia_assign("_path_to_stan_model", path_to_stanmodel)
   JuliaCall::julia_assign("_path_to_stan_data",  standata_path)
@@ -960,7 +1024,8 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
 
   if (is.null(subsample)) {
     # Create PDMPModel in Julia and get dimension for the ordinary full-data path.
-    JuliaCall::julia_command("_stan_model = BridgeStan.StanModel(_path_to_stan_model, _path_to_stan_data; warn=false); _pdmp_model = PDMPModel(_stan_model);")
+    JuliaCall::julia_assign("_use_fd_hvp", isTRUE(use_fd_hvp))
+    JuliaCall::julia_command("_stan_model = BridgeStan.StanModel(_path_to_stan_model, _path_to_stan_data; warn=false); _pdmp_model = PDMPModel(_stan_model; hvp = !_use_fd_hvp);")
     d <- JuliaCall::julia_eval("_pdmp_model.d")
     unc_names <- character(0)
     if (!is.null(slab_prior)) {
@@ -995,9 +1060,13 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
                                  c0, x0, theta0, show_progress,
                                  sticky, can_stick, model_prior, parameter_prior, slab_prior,
                                  grid_n, grid_t_max, post_warmup_simplify,
+                                 grid_bound, linear_area_threshold, linear_min_area_gain,
                                  n_chains, threaded, seed,
                                  adaptive_scheme = adaptive_scheme,
-                                 unc_names = unc_names)
+                                 unc_names = unc_names,
+                                 lazy_low_tightness_threshold = lazy_low_tightness_threshold,
+                                 lazy_max_low_tightness_rejections = lazy_max_low_tightness_rejections,
+                                 lazy_max_rejections = lazy_max_rejections)
 
   if (isTRUE(params$threaded) && params$n_chains > 1L) {
     cli::cli_warn(c(
@@ -1025,6 +1094,12 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
       _pdmp_model, x0, flow, algorithm, flow_mean, flow_cov;
       c0 = c0, grid_n = grid_n, grid_t_max = grid_t_max,
       post_warmup_simplify = post_warmup_simplify,
+      grid_bound = grid_bound,
+      linear_area_threshold = linear_area_threshold,
+      linear_min_area_gain = linear_min_area_gain,
+      lazy_low_tightness_threshold = lazy_low_tightness_threshold,
+      lazy_max_low_tightness_rejections = lazy_max_low_tightness_rejections,
+      lazy_max_rejections = lazy_max_rejections,
       t0 = t0, T = T, t_warmup = t_warmup,
       sticky = sticky, can_stick = can_stick,
       model_prior = model_prior, parameter_prior = parameter_prior,
@@ -1067,6 +1142,9 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
       _subsample_N, _subsample_size,
       flow, algorithm, flow_mean, flow_cov, _subsample_output_csv;
       c0 = c0, grid_n = grid_n, grid_t_max = grid_t_max,
+      grid_bound = grid_bound,
+      linear_area_threshold = linear_area_threshold,
+      linear_min_area_gain = linear_min_area_gain,
       t0 = t0, T = T, t_warmup = t_warmup,
       n_anchor_updates = _subsample_n_anchor_updates,
       adaptive_scheme = adaptive_scheme,

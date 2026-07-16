@@ -28,7 +28,8 @@ function build_flow(flow_type::String, prec::AbstractMatrix{Float64}, flow_mean:
         return Boomerang(prec, flow_mean)
     elseif flow_type == "AdaptiveBoomerang"
         d = length(flow_mean)
-        return AdaptiveBoomerang(d; scheme=Symbol(adaptive_scheme))
+        λref = parse(Float64, get(ENV, "PDMP_ADAPTIVE_BOOMERANG_LAMBDA_REF", "0.1"))
+        return AdaptiveBoomerang(d; λref=λref, scheme=Symbol(adaptive_scheme))
     elseif flow_type == "PreconditionedZigZag"
         d = length(flow_mean)
         return PreconditionedZigZag(prec, flow_mean)
@@ -65,6 +66,7 @@ function build_algorithm(algorithm_type::String; c0::Float64, d::Integer, grid_n
         pv_derivative_hermite_on_demand = parse(Bool, get(ENV, "PDMP_POSITIVE_VARIATION_DERIVATIVE_HERMITE_ON_DEMAND", "false"))
         pv_derivative_hermite_trigger_scale = parse(Float64, get(ENV, "PDMP_POSITIVE_VARIATION_DERIVATIVE_HERMITE_TRIGGER_SCALE", "10.0"))
         pv_validation_rtol = parse(Float64, get(ENV, "PDMP_POSITIVE_VARIATION_VALIDATION_RTOL", "0.05"))
+        pv_approximate = parse(Bool, get(ENV, "PDMP_POSITIVE_VARIATION_APPROXIMATE", "false"))
         return PositiveVariationGridThinningStrategy(; N = grid_n, t_max = grid_t_max,
             validation_rtol = pv_validation_rtol,
             max_skip_width = pv_max_skip_width,
@@ -73,6 +75,7 @@ function build_algorithm(algorithm_type::String; c0::Float64, d::Integer, grid_n
             use_derivative_hermite = pv_use_derivative_hermite,
             derivative_hermite_on_demand = pv_derivative_hermite_on_demand,
             derivative_hermite_trigger_scale = pv_derivative_hermite_trigger_scale,
+            approximate = pv_approximate,
             fallback = GridThinningStrategy(; N = grid_n, t_max = grid_t_max,
                 use_fd_hvp = use_fd_hvp, post_warmup_simplify = post_warmup_simplify,
                 bound = Symbol(grid_bound),
@@ -86,11 +89,17 @@ function build_algorithm(algorithm_type::String; c0::Float64, d::Integer, grid_n
         vv_validation_rtol = parse(Float64, get(ENV, "PDMP_VECTOR_VARIATION_VALIDATION_RTOL", "0.05"))
         vv_max_refinement_depth = parse(Int, get(ENV, "PDMP_VECTOR_VARIATION_MAX_REFINEMENT_DEPTH", "8"))
         vv_n_min = parse(Int, get(ENV, "PDMP_VECTOR_VARIATION_N_MIN", "5"))
+        vv_use_derivative_hermite = parse(Bool, get(ENV, "PDMP_VECTOR_VARIATION_USE_DERIVATIVE_HERMITE", "false"))
+        vv_derivative_hermite_on_demand = parse(Bool, get(ENV, "PDMP_VECTOR_VARIATION_DERIVATIVE_HERMITE_ON_DEMAND", "false"))
+        vv_derivative_hermite_trigger_scale = parse(Float64, get(ENV, "PDMP_VECTOR_VARIATION_DERIVATIVE_HERMITE_TRIGGER_SCALE", "10.0"))
         return VectorVariationThinningStrategy(; N = grid_n, t_max = grid_t_max,
             N_min = vv_n_min,
             validation_rtol = vv_validation_rtol,
             max_skip_width = vv_max_skip_width,
             max_refinement_depth = vv_max_refinement_depth,
+            use_derivative_hermite = vv_use_derivative_hermite,
+            derivative_hermite_on_demand = vv_derivative_hermite_on_demand,
+            derivative_hermite_trigger_scale = vv_derivative_hermite_trigger_scale,
             fallback = GridThinningStrategy(; N = grid_n, t_max = grid_t_max,
                 use_fd_hvp = use_fd_hvp, post_warmup_simplify = post_warmup_simplify,
                 bound = Symbol(grid_bound),
@@ -604,6 +613,11 @@ function r_chain_mu(chains::PDMPChains; chain::Int)
     base isa AnyBoomerang ? Vector{Float64}(base.μ) : Float64[]
 end
 
+function _final_lambda_ref(chains::PDMPChains, chain::Int)
+    base = PDMPSamplers._underlying_flow(chains.traces[chain].flow)
+    return base isa AnyBoomerang ? Float64(base.λref) : NaN
+end
+
 function r_from_skeleton(times_list::AbstractVector, positions_list::AbstractVector,
                           velocities_list::AbstractVector, is_boomerang_list::AbstractVector,
                           mu_list::AbstractVector, is_mutable_boomerang_list::AbstractVector)
@@ -666,6 +680,7 @@ function extract_stats(chains::PDMPChains)
     end
     vals(name::Symbol) = Float64[_counter_float(s, name) for s in all]
     return Dict{String, StatsValue}(
+        "final_lambda_ref"      => Float64[_final_lambda_ref(chains, i) for i in eachindex(chains.traces)],
         "reflections_events"    => vals(:reflections_events),
         "reflections_accepted"  => vals(:reflections_accepted),
         "refreshment_events"    => vals(:refreshment_events),
@@ -756,6 +771,10 @@ function extract_stats(chains::PDMPChains)
         "main_grid_endpoint_derivative_points_loaded" => vals(:main_grid_endpoint_derivative_points_loaded),
         "warmup_elapsed_time" => vals(:warmup_elapsed_time),
         "main_elapsed_time" => vals(:main_elapsed_time),
+        "boomerang_interference_events" => vals(:boomerang_interference_events),
+        "boomerang_target_c_share_sum" => vals(:boomerang_target_c_share_sum),
+        "boomerang_target_d_share_sum" => vals(:boomerang_target_d_share_sum),
+        "boomerang_nuisance_driven_target_disturbances" => vals(:boomerang_nuisance_driven_target_disturbances),
         "ct_ess"                => ct_ess,
     )
 end

@@ -96,6 +96,21 @@ test_that("pdmp_sample rejects invalid gradient function", {
   expect_error(pdmp_sample(function(x) x[1], d = 2, flow = "ZigZag", T = 100), "length")
 })
 
+test_that("shared-node grid bounds require explicit inflation", {
+  shared <- PDMPSamplersR:::validate_pdmp_params(
+    d = 2, flow = "ZigZag", algorithm = "GridThinningStrategy", T = 10,
+    grid_bound = "shared_node", grid_curvature_bound = 2
+  )
+  expect_identical(shared$grid_bound, "shared_node")
+  expect_error(
+    PDMPSamplersR:::validate_pdmp_params(
+      d = 2, flow = "ZigZag", algorithm = "GridThinningStrategy", T = 10,
+      grid_bound = "shared_node"
+    ),
+    "grid_curvature_bound"
+  )
+})
+
 test_that("pdmp_sample forwards support-boundary diagnostics", {
   skip_on_cran()
   skip_if_no_pdmp_julia_backend()

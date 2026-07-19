@@ -1,6 +1,6 @@
 module PDMPSamplersRBridge
 
-using PDMPSamplers, LinearAlgebra, BridgeStan, Random, Statistics
+using PDMPSamplers, LinearAlgebra, BridgeStan, Random, Statistics, Libdl
 
 export build_flow, build_algorithm, wrap_sticky
 export build_model_prior_odds, build_slab_provider, wrap_dependent_sticky
@@ -42,7 +42,9 @@ function build_flow(flow_type::String, prec::AbstractMatrix{Float64}, flow_mean:
 end
 
 function build_algorithm(algorithm_type::String; c0::Float64, d::Integer, grid_n::Int, grid_t_max::Float64,
-        use_fd_hvp::Bool=false, post_warmup_simplify::Bool=false, grid_bound::String="constant",
+        use_fd_hvp::Bool=false, curvature_backend::String="auto",
+        post_warmup_simplify::Bool=false, grid_bound::String="constant",
+        grid_curvature_bound::Union{Nothing,Float64}=nothing,
         linear_area_threshold::Float64=0.95, linear_min_area_gain::Float64=0.0,
         lazy_low_tightness_threshold::Float64=0.1,
         lazy_max_low_tightness_rejections::Int=3,
@@ -50,9 +52,13 @@ function build_algorithm(algorithm_type::String; c0::Float64, d::Integer, grid_n
     if algorithm_type == "ThinningStrategy"
         return ThinningStrategy(GlobalBounds(c0 / d, d))
     elseif algorithm_type == "GridThinningStrategy"
+        grid_n_min = parse(Int, get(ENV, "PDMP_GRID_N_MIN", string(min(grid_n, 5))))
         return GridThinningStrategy(; N = grid_n, t_max = grid_t_max,
-            use_fd_hvp = use_fd_hvp, post_warmup_simplify = post_warmup_simplify,
+            N_min = grid_n_min,
+            use_fd_hvp = use_fd_hvp, curvature_backend = Symbol(curvature_backend),
+            post_warmup_simplify = post_warmup_simplify,
             bound = Symbol(grid_bound),
+            curvature_bound = grid_curvature_bound,
             linear_area_threshold = linear_area_threshold,
             linear_min_area_gain = linear_min_area_gain,
             lazy_low_tightness_threshold = lazy_low_tightness_threshold,
@@ -77,8 +83,10 @@ function build_algorithm(algorithm_type::String; c0::Float64, d::Integer, grid_n
             derivative_hermite_trigger_scale = pv_derivative_hermite_trigger_scale,
             approximate = pv_approximate,
             fallback = GridThinningStrategy(; N = grid_n, t_max = grid_t_max,
-                use_fd_hvp = use_fd_hvp, post_warmup_simplify = post_warmup_simplify,
+                use_fd_hvp = use_fd_hvp, curvature_backend = Symbol(curvature_backend),
+                post_warmup_simplify = post_warmup_simplify,
                 bound = Symbol(grid_bound),
+                curvature_bound = grid_curvature_bound,
                 linear_area_threshold = linear_area_threshold,
                 linear_min_area_gain = linear_min_area_gain,
                 lazy_low_tightness_threshold = lazy_low_tightness_threshold,
@@ -101,8 +109,10 @@ function build_algorithm(algorithm_type::String; c0::Float64, d::Integer, grid_n
             derivative_hermite_on_demand = vv_derivative_hermite_on_demand,
             derivative_hermite_trigger_scale = vv_derivative_hermite_trigger_scale,
             fallback = GridThinningStrategy(; N = grid_n, t_max = grid_t_max,
-                use_fd_hvp = use_fd_hvp, post_warmup_simplify = post_warmup_simplify,
+                use_fd_hvp = use_fd_hvp, curvature_backend = Symbol(curvature_backend),
+                post_warmup_simplify = post_warmup_simplify,
                 bound = Symbol(grid_bound),
+                curvature_bound = grid_curvature_bound,
                 linear_area_threshold = linear_area_threshold,
                 linear_min_area_gain = linear_min_area_gain,
                 lazy_low_tightness_threshold = lazy_low_tightness_threshold,
@@ -126,6 +136,18 @@ function wrap_sticky(alg::PDMPSamplers.PoissonTimeStrategy, sticky::Bool, model_
     end
 
     return Sticky(alg, κ, BitVector(can_stick))
+end
+
+function build_warmup_stop(t_warmup::Float64)
+    enabled = parse(Bool, get(ENV, "PDMP_ADAPTIVE_WARMUP_STOP", "false"))
+    enabled || return nothing
+    min_time = parse(Float64, get(ENV, "PDMP_ADAPTIVE_WARMUP_MIN_TIME", string(0.25 * t_warmup)))
+    max_time = parse(Float64, get(ENV, "PDMP_ADAPTIVE_WARMUP_MAX_TIME", string(t_warmup)))
+    stable_time = parse(Float64, get(ENV, "PDMP_ADAPTIVE_WARMUP_STABLE_TIME", string(0.25 * t_warmup)))
+    min_events = parse(Int, get(ENV, "PDMP_ADAPTIVE_WARMUP_MIN_EVENTS", "100"))
+    check_every = parse(Int, get(ENV, "PDMP_ADAPTIVE_WARMUP_CHECK_EVERY", "25"))
+    return PDMPSamplers.AdaptiveWarmupCriterion(;
+        min_time, max_time, stable_time, min_events, check_every)
 end
 
 _haskey(x, key::Symbol) = haskey(x, key) || haskey(x, String(key))
@@ -369,12 +391,45 @@ function _as_flow_cov(flow_cov, d::Int)
     return Matrix{Float64}(flow_cov)
 end
 
+_compile_env_enabled(name::String) = lowercase(get(ENV, name, "false")) in ("1", "true", "yes", "y")
+
+function _compile_cache_checksum(bytes::Vector{UInt8})
+    value = UInt64(0xcbf29ce484222325)
+    @inbounds for byte in bytes
+        value = (value ⊻ UInt64(byte)) * UInt64(0x100000001b3)
+    end
+    return value
+end
+
+function _cached_stan_source(path_to_stan_model::String, hpp_path::String,
+        stanc_args::Vector{String}, make_args::Vector{String})
+    cache_root = get(ENV, "PDMPSAMPLERSR_BRIDGESTAN_CACHE_DIR",
+        joinpath(first(DEPOT_PATH), "pdmpsamplersr", "bridgestan"))
+    source_bytes = read(path_to_stan_model)
+    header_bytes = isfile(hpp_path) ? read(hpp_path) : UInt8[]
+    option_bytes = Vector{UInt8}(codeunits(join([stanc_args; make_args], '\0')))
+    checksum = _compile_cache_checksum([source_bytes; header_bytes; option_bytes])
+    build_dir = joinpath(cache_root, string(checksum; base=16, pad=16))
+    mkpath(build_dir)
+    cached_source = joinpath(build_dir, basename(path_to_stan_model))
+    isfile(cached_source) || cp(path_to_stan_model, cached_source)
+    return cached_source
+end
+
 function _compile_model_with_header(path_to_stan_model::String, hpp_path::String)
     !endswith(path_to_stan_model, ".stan") && return path_to_stan_model
-    hpp_path_for_make = replace(normpath(hpp_path), "\\" => "/")
-    BridgeStan.compile_model(path_to_stan_model;
-        stanc_args=["--allow-undefined"],
-        make_args=["USER_HEADER=$(hpp_path_for_make)"])
+    hpp_path_for_make = isempty(hpp_path) ? "" : replace(normpath(hpp_path), "\\" => "/")
+    stanc_flags = _compile_env_enabled("PDMPSAMPLERSR_BRIDGESTAN_STANC_O1") ?
+        "--allow-undefined --O1" : "--allow-undefined"
+    stanc_args = [stanc_flags]
+    make_args = isempty(hpp_path_for_make) ? String[] : ["USER_HEADER=$(hpp_path_for_make)"]
+    _compile_env_enabled("PDMPSAMPLERSR_BRIDGESTAN_NATIVE") &&
+        push!(make_args, "CXXFLAGS+=-march=native")
+    source = _compile_env_enabled("PDMPSAMPLERSR_BRIDGESTAN_CACHE") ?
+        _cached_stan_source(path_to_stan_model, hpp_path, stanc_args, make_args) : path_to_stan_model
+    library = replace(source, r"\.stan$" => "_model.$(Libdl.dlext)")
+    isfile(library) && return library
+    return BridgeStan.compile_model(source; stanc_args, make_args)
 end
 
 function r_stan_param_unc_num_with_header(path_to_stan_model::String,
@@ -644,7 +699,7 @@ function r_from_skeleton(times_list::AbstractVector, positions_list::AbstractVec
     PDMPChains(traces, PDMPSamplers.StatisticCounter[])
 end
 
-const StatsValue = Union{Vector{Float64}, Matrix{Float64}}
+const StatsValue = Union{Vector{Float64}, Matrix{Float64}, Vector{String}}
 
 function _ct_ess_matrix(chains::PDMPChains)
     n_chains = length(chains.traces)
@@ -679,6 +734,7 @@ function extract_stats(chains::PDMPChains)
         zeros(0, 0)
     end
     vals(name::Symbol) = Float64[_counter_float(s, name) for s in all]
+    textvals(name::Symbol) = String[string(getproperty(s, name)) for s in all]
     return Dict{String, StatsValue}(
         "final_lambda_ref"      => Float64[_final_lambda_ref(chains, i) for i in eachindex(chains.traces)],
         "reflections_events"    => vals(:reflections_events),
@@ -707,6 +763,22 @@ function extract_stats(chains::PDMPChains)
         "grid_N_sum"            => vals(:grid_N_sum),
         "grid_tmax_sum"         => vals(:grid_tmax_sum),
         "grid_h_sum"            => vals(:grid_h_sum),
+        "grid_initial_N"        => vals(:grid_initial_N),
+        "grid_final_N"          => vals(:grid_final_N),
+        "grid_initial_tmax"     => vals(:grid_initial_tmax),
+        "grid_final_tmax"       => vals(:grid_final_tmax),
+        "grid_initial_h"        => vals(:grid_initial_h),
+        "grid_final_h"          => vals(:grid_final_h),
+        "grid_warmup_objective_events" => vals(:grid_warmup_objective_events),
+        "grid_warmup_objective_endpoint_gradients" => vals(:grid_warmup_objective_endpoint_gradients),
+        "grid_warmup_objective_acceptance_gradients" => vals(:grid_warmup_objective_acceptance_gradients),
+        "grid_warmup_objective_gradients_per_event" => vals(:grid_warmup_objective_gradients_per_event),
+        "grid_warmup_objective_horizon_hits" => vals(:grid_warmup_objective_horizon_hits),
+        "grid_warmup_objective_horizon_rate" => vals(:grid_warmup_objective_horizon_rate),
+        "grid_warmup_objective_rejections" => vals(:grid_warmup_objective_rejections),
+        "grid_warmup_objective_rejection_rate" => vals(:grid_warmup_objective_rejection_rate),
+        "grid_schedule_frozen" => vals(:grid_schedule_frozen),
+        "curvature_backend" => textvals(:curvature_backend),
         "lazy_fallback_low_tightness" => vals(:lazy_fallback_low_tightness),
         "lazy_fallback_bound_violation" => vals(:lazy_fallback_bound_violation),
         "lazy_proposal_attempts" => vals(:lazy_proposal_attempts),
@@ -728,6 +800,10 @@ function extract_stats(chains::PDMPChains)
         "constant_bound_rejections" => vals(:constant_bound_rejections),
         "constant_bound_violations" => vals(:constant_bound_violations),
         "constant_bound_safety_fallbacks" => vals(:constant_bound_safety_fallbacks),
+        "grid_bound_violations" => vals(:grid_bound_violations),
+        "shared_node_cells" => vals(:shared_node_cells),
+        "shared_node_two_point_cells" => vals(:shared_node_two_point_cells),
+        "shared_node_three_point_cells" => vals(:shared_node_three_point_cells),
         "sticky_inner_searches" => vals(:sticky_inner_searches),
         "sticky_inner_wins" => vals(:sticky_inner_wins),
         "sticky_inner_wasted_by_sticky" => vals(:sticky_inner_wasted_by_sticky),
@@ -743,6 +819,8 @@ function extract_stats(chains::PDMPChains)
         "main_stochastic_gradient_calls" => vals(:main_stochastic_gradient_calls),
         "warmup_full_gradient_calls" => vals(:warmup_full_gradient_calls),
         "main_full_gradient_calls" => vals(:main_full_gradient_calls),
+        "warmup_potential_calls" => vals(:warmup_potential_calls),
+        "main_potential_calls" => vals(:main_potential_calls),
         "warmup_full_reflection_gradient_calls" => vals(:warmup_full_reflection_gradient_calls),
         "main_full_reflection_gradient_calls" => vals(:main_full_reflection_gradient_calls),
         "warmup_prior_gradient_calls" => vals(:warmup_prior_gradient_calls),
@@ -807,8 +885,10 @@ function r_pdmp_stan(
         c0::Float64 = 1e-2,
         grid_n::Int = 30,
         grid_t_max::Float64 = 2.0,
+        curvature_backend::String = "auto",
         post_warmup_simplify::Bool = true,
         grid_bound::String = "constant",
+        grid_curvature_bound::Union{Nothing,Float64} = nothing,
         linear_area_threshold::Float64 = 0.95,
         linear_min_area_gain::Float64 = 0.0,
         lazy_low_tightness_threshold::Float64 = 0.1,
@@ -857,8 +937,9 @@ function r_pdmp_stan(
 
     prec = _to_precision(flow_cov_mat, d)
     flow = build_flow(flow_type, prec, flow_mean_vec; adaptive_scheme)
-    alg0 = build_algorithm(algorithm_type; c0, d, grid_n, grid_t_max,
-        post_warmup_simplify, grid_bound, linear_area_threshold, linear_min_area_gain,
+    alg0 = build_algorithm(algorithm_type; c0, d, grid_n, grid_t_max, curvature_backend,
+        post_warmup_simplify, grid_bound, grid_curvature_bound,
+        linear_area_threshold, linear_min_area_gain,
         lazy_low_tightness_threshold, lazy_max_low_tightness_rejections,
         lazy_max_rejections)
     alg = isnothing(slab_prior) ?
@@ -880,7 +961,9 @@ function r_pdmp_stan(
     chains = pdmp_sample(x0_vec, flow, sampling_model, alg, t0, T, t_warmup;
                          progress = show_progress, n_chains = n_chains, threaded = threaded,
                          seed = seed,
-                         support_boundary_options = sbopts)
+                         warmup_stop = build_warmup_stop(t_warmup),
+                         support_boundary_options = sbopts,
+                         statistic_counter = PDMPSamplers.DevelStatisticCounter)
     return _pack_result(chains)
 end
 
@@ -897,6 +980,7 @@ function r_pdmp_custom(
         grid_t_max::Float64 = 2.0,
         post_warmup_simplify::Bool = true,
         grid_bound::String = "constant",
+        grid_curvature_bound::Union{Nothing,Float64} = nothing,
         linear_area_threshold::Float64 = 0.95,
         linear_min_area_gain::Float64 = 0.0,
         t0::Float64 = 0.0,
@@ -961,7 +1045,8 @@ function r_pdmp_custom(
     prec = _to_precision(flow_cov_mat, d)
     flow = build_flow(flow_type, prec, flow_mean_vec; adaptive_scheme)
     alg0 = build_algorithm(algorithm_type; c0, d, grid_n, grid_t_max,
-        post_warmup_simplify, grid_bound, linear_area_threshold, linear_min_area_gain)
+        post_warmup_simplify, grid_bound, grid_curvature_bound,
+        linear_area_threshold, linear_min_area_gain)
     alg = isnothing(slab_prior) ?
         wrap_sticky(alg0, sticky, model_prior, parameter_prior_vec, can_stick_vec) :
         wrap_dependent_sticky(alg0, sticky, model_prior, slab_prior, can_stick_vec, flow_type)
@@ -1065,7 +1150,7 @@ function r_pdmp_custom_subsampled(
     fmean = isempty(flow_mean) ? zeros(d) : flow_mean
     flow = build_flow(flow_type, prec, fmean; adaptive_scheme)
     alg = build_algorithm(algorithm_type; c0, d, grid_n, grid_t_max,
-        post_warmup_simplify, grid_bound, linear_area_threshold,
+        post_warmup_simplify, grid_bound, grid_curvature_bound = nothing, linear_area_threshold,
         linear_min_area_gain)
 
     chains = pdmp_sample(x0, flow, model, alg, t0, T, t_warmup;
@@ -1621,6 +1706,7 @@ function r_pdmp_brms_subsampled(
         grid_n::Int = 30,
         grid_t_max::Float64 = 2.0,
         grid_bound::String = "constant",
+        grid_curvature_bound::Union{Nothing,Float64} = nothing,
         linear_area_threshold::Float64 = 0.95,
         linear_min_area_gain::Float64 = 0.0,
         t0::Float64 = 0.0,
@@ -1692,7 +1778,8 @@ function r_pdmp_brms_subsampled(
     prec = inv(Symmetric(_as_flow_cov(flow_cov, d)))
     flow = build_flow(flow_type, prec, fmean; adaptive_scheme)
     alg0 = build_algorithm(algorithm_type; c0, d, grid_n, grid_t_max,
-        use_fd_hvp, post_warmup_simplify, grid_bound, linear_area_threshold,
+        use_fd_hvp, post_warmup_simplify, grid_bound, grid_curvature_bound,
+        linear_area_threshold,
         linear_min_area_gain)
     alg = isnothing(slab_prior) ?
         wrap_sticky(alg0, sticky, model_prior, parameter_prior, can_stick) :
@@ -1792,6 +1879,7 @@ function r_pdmp_stan_for_brms(
         grid_n::Int = 30,
         grid_t_max::Float64 = 2.0,
         grid_bound::String = "constant",
+        grid_curvature_bound::Union{Nothing,Float64} = nothing,
         linear_area_threshold::Float64 = 0.95,
         linear_min_area_gain::Float64 = 0.0,
         t0::Float64 = 0.0,
@@ -1841,7 +1929,8 @@ function r_pdmp_stan_for_brms(
 
     flow = build_flow(flow_type, prec, fmean; adaptive_scheme)
     alg0 = build_algorithm(algorithm_type; c0, d, grid_n, grid_t_max,
-        use_fd_hvp, post_warmup_simplify, grid_bound, linear_area_threshold,
+        use_fd_hvp, post_warmup_simplify, grid_bound, grid_curvature_bound,
+        linear_area_threshold,
         linear_min_area_gain)
     alg = isnothing(slab_prior) ?
         wrap_sticky(alg0, sticky, model_prior, parameter_prior_vec, can_stick_vec) :

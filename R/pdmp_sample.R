@@ -29,6 +29,7 @@ validate_pdmp_params <- function(d, flow, algorithm, T, t0 = 0.0, t_warmup = 0.0
                                 grid_n = 30, grid_t_max = 2.0,
                                 post_warmup_simplify = FALSE,
                                 grid_bound = "constant",
+                                grid_curvature_bound = NULL,
                                 linear_area_threshold = 0.95,
                                 linear_min_area_gain = 0.0,
                                 n_chains = 1L, threaded = FALSE, seed = NULL,
@@ -55,7 +56,7 @@ validate_pdmp_params <- function(d, flow, algorithm, T, t0 = 0.0, t_warmup = 0.0
                             "VectorVariationThinningStrategy")
   algorithm <- match.arg(algorithm, c("ThinningStrategy", grid_like_algorithms, "RootsPoissonStrategy"))
   adaptive_scheme <- match.arg(adaptive_scheme, c("diagonal", "fullrank"))
-  grid_bound <- match.arg(grid_bound, c("constant", "flat", "linear", "auto"))
+  grid_bound <- match.arg(grid_bound, c("constant", "flat", "linear", "auto", "value_quadratic", "shared_node"))
 
   # AdaptiveBoomerang requires GridThinningStrategy and a warmup period
   if (flow == "AdaptiveBoomerang") {
@@ -84,7 +85,7 @@ validate_pdmp_params <- function(d, flow, algorithm, T, t0 = 0.0, t_warmup = 0.0
   validate_type(n_chains, type = "integer", n = 1, positive = TRUE)
   validate_type(threaded, type = "logical", n = 1)
 
-  if (threaded && rlang::is_false(.pdmpsamplers_julia_eval("r_threading_available()"))) {
+  if (threaded && rlang::is_false(.pdmpsamplers_julia_eval("PDMPSamplersRBridge.r_threading_available()"))) {
     cli::cli_warn("Argument {.arg threaded} is set to TRUE but Julia was started with only one thread so this has no effect. Call Sys.setenv(\"JULIA_NUM_THREADS\"=<number>) to set the desired number of threads at the start of an analysis.")
   }
 
@@ -198,6 +199,14 @@ validate_pdmp_params <- function(d, flow, algorithm, T, t0 = 0.0, t_warmup = 0.0
   validate_type(grid_n, type = "integer", n = 1, positive = TRUE)
   validate_type(grid_t_max, type = "double", n = 1, positive = TRUE)
   validate_type(post_warmup_simplify, type = "logical", n = 1)
+  if (!is.null(grid_curvature_bound)) {
+    validate_type(grid_curvature_bound, type = "double", n = 1)
+    if (!is.finite(grid_curvature_bound) || grid_curvature_bound < 0)
+      cli::cli_abort("Argument {.arg grid_curvature_bound} must be NULL or a finite non-negative number.")
+  }
+  if (grid_bound == "shared_node" && is.null(grid_curvature_bound)) {
+    cli::cli_abort("Argument {.arg grid_curvature_bound} is required for experimental {.val shared_node} bounds.")
+  }
   validate_type(linear_area_threshold, type = "double", n = 1)
   validate_type(linear_min_area_gain, type = "double", n = 1)
   validate_type(lazy_low_tightness_threshold, type = "double", n = 1)
@@ -223,6 +232,7 @@ validate_pdmp_params <- function(d, flow, algorithm, T, t0 = 0.0, t_warmup = 0.0
     grid_n = grid_n, grid_t_max = grid_t_max,
     post_warmup_simplify = post_warmup_simplify,
     grid_bound = grid_bound,
+    grid_curvature_bound = grid_curvature_bound,
     linear_area_threshold = linear_area_threshold,
     linear_min_area_gain = linear_min_area_gain,
     lazy_low_tightness_threshold = lazy_low_tightness_threshold,
@@ -687,7 +697,9 @@ validate_stan_subsample <- function(subsample, standata, standata_path, path_to_
 #'   envelope. \code{"constant"} preserves the historical behavior.
 #'   \code{"flat"}, \code{"linear"}, and \code{"auto"} expose signed-rate
 #'   affine envelope machinery when supported by the chosen flow and derivative
-#'   provider.
+#'   provider. code{"shared_node"} is an experimental numerical clock using
+#'   consecutive rate nodes and secant-disagreement inflation; it is not a
+#'   mathematically certified thinning envelope.
 #' @param linear_area_threshold Numeric gate for \code{grid_bound = "linear"}
 #'   or \code{"auto"}; affine cells are skipped when their relative area gain is
 #'   too small.
@@ -728,7 +740,8 @@ pdmp_sample <- function(f, d,
                         grid_n = 30, grid_t_max = 2.0,
                         use_fd_hvp = FALSE,
                         post_warmup_simplify = FALSE,
-                        grid_bound = c("constant", "flat", "linear", "auto"),
+                        grid_bound = c("constant", "flat", "linear", "auto", "value_quadratic", "shared_node"),
+                        grid_curvature_bound = NULL,
                         linear_area_threshold = 0.95,
                         linear_min_area_gain = 0.0,
                         lazy_low_tightness_threshold = 0.1,
@@ -753,7 +766,8 @@ pdmp_sample <- function(f, d,
                                 c0, x0, theta0, show_progress,
                                 sticky, can_stick, model_prior, parameter_prior, slab_prior,
                                 grid_n, grid_t_max, post_warmup_simplify,
-                                grid_bound, linear_area_threshold, linear_min_area_gain,
+                                grid_bound, grid_curvature_bound,
+                                linear_area_threshold, linear_min_area_gain,
                                 n_chains, threaded, seed,
                                 adaptive_scheme = adaptive_scheme)
 
@@ -831,11 +845,12 @@ pdmp_sample <- function(f, d,
   JuliaCall::julia_assign("support_boundary_refresh_probe_time", support_boundary$refresh_probe_time)
   JuliaCall::julia_assign("support_boundary_min_safe_time", support_boundary$min_safe_time)
 
-  result <- .pdmpsamplers_julia_eval("r_pdmp_custom(
+  result <- .pdmpsamplers_julia_eval("PDMPSamplersRBridge.r_pdmp_custom(
     grad!, d, x0, flow, algorithm, flow_mean, flow_cov;
     c0 = c0, grid_n = grid_n, grid_t_max = grid_t_max,
     post_warmup_simplify = post_warmup_simplify,
     grid_bound = grid_bound,
+    grid_curvature_bound = grid_curvature_bound,
     linear_area_threshold = linear_area_threshold,
     linear_min_area_gain = linear_min_area_gain,
     t0 = t0, T = T, t_warmup = t_warmup,
@@ -894,6 +909,11 @@ pdmp_sample <- function(f, d,
 #'   `path_to_stanmodel`), `hpp_path`, `n_anchor_updates`, `hvp_mode`,
 #'   `use_hcv`, `use_anchor_bank`, `use_fd_hvp`, `compute_lp`, and
 #'   `resample_dt`.
+#' @param curvature_backend Character string selecting directional curvature:
+#'   `"exact"` or `"finite_difference"`. Finite differences use
+#'   shifted exact gradients but approximate their directional derivative and
+#'   therefore have step-size and truncation error. `NULL` preserves the
+#'   legacy `use_fd_hvp` mapping.
 #' @inheritParams pdmp_sample
 #'
 #' @return A \code{pdmp_result} object. Use \code{mean}, \code{var},
@@ -914,8 +934,10 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
                         slab_prior = NULL,
                         grid_n = 30, grid_t_max = 2.0,
                         use_fd_hvp = FALSE,
+                        curvature_backend = NULL,
                         post_warmup_simplify = FALSE,
-                        grid_bound = c("constant", "flat", "linear", "auto"),
+                        grid_bound = c("constant", "flat", "linear", "auto", "value_quadratic", "shared_node"),
+                        grid_curvature_bound = NULL,
                         linear_area_threshold = 0.95,
                         linear_min_area_gain = 0.0,
                         lazy_low_tightness_threshold = 0.1,
@@ -1014,8 +1036,28 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
     prior_standata_path <- normalizePath(prior_standata_path, mustWork = TRUE)
   }
 
+  compile_control_enabled <- any(tolower(Sys.getenv(c(
+    "PDMPSAMPLERSR_BRIDGESTAN_CACHE",
+    "PDMPSAMPLERSR_BRIDGESTAN_NATIVE",
+    "PDMPSAMPLERSR_BRIDGESTAN_STANC_O1"
+  ), "false")) %in% c("1", "true", "yes", "y"))
+  if (compile_control_enabled && grepl("\\.stan$", path_to_stanmodel)) {
+    path_to_stanmodel <- .pdmpsamplers_julia_call("_compile_model_with_header", path_to_stanmodel, "")
+  }
+  if (compile_control_enabled && !is.null(slab_prior) && grepl("\\.stan$", prior_stanmodel)) {
+    prior_stanmodel <- .pdmpsamplers_julia_call("_compile_model_with_header", prior_stanmodel, "")
+  }
+
   support_boundary <- validate_support_boundary_control(support_boundary)
   validate_type(use_fd_hvp, type = "logical", n = 1)
+  if (is.null(curvature_backend)) {
+    curvature_backend <- if (isTRUE(use_fd_hvp)) "finite_difference" else "exact"
+  } else {
+    curvature_backend <- match.arg(curvature_backend, c("exact", "finite_difference"))
+    if (isTRUE(use_fd_hvp) && curvature_backend != "finite_difference") {
+      cli::cli_abort("Argument {.arg use_fd_hvp = TRUE} conflicts with {.arg curvature_backend = {curvature_backend}}.")
+    }
+  }
 
   JuliaCall::julia_assign("_path_to_stan_model", path_to_stanmodel)
   JuliaCall::julia_assign("_path_to_stan_data",  standata_path)
@@ -1024,8 +1066,8 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
 
   if (is.null(subsample)) {
     # Create PDMPModel in Julia and get dimension for the ordinary full-data path.
-    JuliaCall::julia_assign("_use_fd_hvp", isTRUE(use_fd_hvp))
-    JuliaCall::julia_command("_stan_model = BridgeStan.StanModel(_path_to_stan_model, _path_to_stan_data; warn=false); _pdmp_model = PDMPModel(_stan_model; hvp = !_use_fd_hvp);")
+    JuliaCall::julia_assign("_curvature_backend", curvature_backend)
+    JuliaCall::julia_command("_stan_model = BridgeStan.StanModel(_path_to_stan_model, _path_to_stan_data; warn=false); _pdmp_model = PDMPModel(_stan_model; hvp = _curvature_backend != \"finite_difference\");")
     d <- JuliaCall::julia_eval("_pdmp_model.d")
     unc_names <- character(0)
     if (!is.null(slab_prior)) {
@@ -1060,7 +1102,8 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
                                  c0, x0, theta0, show_progress,
                                  sticky, can_stick, model_prior, parameter_prior, slab_prior,
                                  grid_n, grid_t_max, post_warmup_simplify,
-                                 grid_bound, linear_area_threshold, linear_min_area_gain,
+                                 grid_bound, grid_curvature_bound,
+                                 linear_area_threshold, linear_min_area_gain,
                                  n_chains, threaded, seed,
                                  adaptive_scheme = adaptive_scheme,
                                  unc_names = unc_names,
@@ -1090,11 +1133,13 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
   JuliaCall::julia_assign("support_boundary_min_safe_time", support_boundary$min_safe_time)
 
   if (is.null(subsample)) {
-    result <- .pdmpsamplers_julia_eval("r_pdmp_stan(
+    result <- .pdmpsamplers_julia_eval("PDMPSamplersRBridge.r_pdmp_stan(
       _pdmp_model, x0, flow, algorithm, flow_mean, flow_cov;
       c0 = c0, grid_n = grid_n, grid_t_max = grid_t_max,
+      curvature_backend = _curvature_backend,
       post_warmup_simplify = post_warmup_simplify,
       grid_bound = grid_bound,
+      grid_curvature_bound = grid_curvature_bound,
       linear_area_threshold = linear_area_threshold,
       linear_min_area_gain = linear_min_area_gain,
       lazy_low_tightness_threshold = lazy_low_tightness_threshold,
@@ -1136,7 +1181,7 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
     JuliaCall::julia_assign("_subsample_bank_capacity", as.integer(subsample$bank_capacity))
     JuliaCall::julia_assign("_subsample_use_fd_hcv", subsample$use_fd_hcv)
 
-    result <- .pdmpsamplers_julia_eval("r_pdmp_brms_subsampled(
+    result <- .pdmpsamplers_julia_eval("PDMPSamplersRBridge.r_pdmp_brms_subsampled(
       _path_to_stan_model, _path_to_subsampled_stan_model, _subsample_hpp_path,
       _path_to_stan_data, _path_to_prior_stan_data,
       _subsample_N, _subsample_size,

@@ -125,7 +125,7 @@ pdmp_sample_subsampled <- function(
   JuliaCall::julia_assign("_grad_full_r", grad_full)
   JuliaCall::julia_assign("_use_full_for_reflections", use_full_gradient_for_reflections)
 
-  result <- JuliaCall::julia_eval("r_pdmp_custom_subsampled(
+  result <- .pdmpsamplers_julia_eval("PDMPSamplersRBridge.r_pdmp_custom_subsampled(
     _grad_sub_r, d, _n_obs, _subsample_size, x0, flow, algorithm,
     flow_mean, flow_cov;
     hvp_sub_r = _hvp_sub_r,

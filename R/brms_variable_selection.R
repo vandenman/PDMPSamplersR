@@ -365,11 +365,7 @@ validate_brms_sticky <- function(sticky, can_stick, model_prior, parameter_prior
         return(list(sticky = FALSE, can_stick = NULL, model_prior = NULL, parameter_prior = NULL))
 
     if (isTRUE(subsampled))
-        cli::cli_warn(c(
-            "Sticky dynamics with subsampled gradients are experimental and do not yet provide a runtime advantage.",
-            "i" = "Benchmarking shows the subsampled path is ~12-16x slower than full-data sticky sampling with default settings.",
-            "i" = "Further investigation is planned at the Julia package level. Use with caution."
-        ))
+        cli::cli_inform("Using the exact marked-subsampling path with sticky dynamics.")
 
     # model_prior is required
     if (is.null(model_prior) || !(is.bernoulli(model_prior) || is.betabernoulli(model_prior)))

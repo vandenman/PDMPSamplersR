@@ -10,9 +10,10 @@ brm_pdmp(
   family = gaussian(),
   prior = NULL,
   flow = c("ZigZag", "BouncyParticle", "Boomerang", "AdaptiveBoomerang",
-    "PreconditionedZigZag", "PreconditionedBPS"),
+    "PreconditionedZigZag", "PreconditionedBPS", "DensePreconditionedZigZag",
+    "DensePreconditionedBPS"),
   algorithm = c("GridThinningStrategy", "ThinningStrategy", "RootsPoissonStrategy"),
-  adaptive_scheme = c("diagonal", "fullrank"),
+  adaptive_scheme = c("diagonal", "fullrank", "lowrank"),
   T = 50000,
   t0 = 0,
   t_warmup = 0,
@@ -28,15 +29,12 @@ brm_pdmp(
   seed = NULL,
   compute_lp = FALSE,
   subsample_size = NULL,
-  n_anchor_updates = 10L,
-  resample_dt = NULL,
-  hvp_mode = c("scaled", "none"),
+  n_anchor_updates = 0L,
   use_hcv = FALSE,
   use_anchor_bank = FALSE,
   bank_capacity = 20L,
   use_fd_hvp = FALSE,
   post_warmup_simplify = FALSE,
-  use_fd_hcv = FALSE,
   sticky = FALSE,
   can_stick = NULL,
   model_prior = NULL,
@@ -61,7 +59,8 @@ brm_pdmp(
 
 \item{algorithm}{Character string specifying the Poisson time strategy.}
 
-\item{adaptive_scheme}{Character string for preconditioner adaptation.}
+\item{adaptive_scheme}{Character string for AdaptiveBoomerang covariance
+adaptation: `"diagonal"`, `"fullrank"`, or `"lowrank"`.}
 
 \item{T}{Numeric total simulation time.}
 
@@ -71,11 +70,16 @@ brm_pdmp(
  When subsampling is active and `t_warmup` is 0, it is automatically
 set to 20\% of the sampling time.}
 
-\item{flow_mean}{Numeric vector for the flow reference mean, or NULL.}
+\item{flow_mean}{Numeric vector for the flow reference mean, or NULL. For
+marked subsampling this is also the fixed control-variate anchor and
+initial position; supplying a posterior mode or other representative point
+can materially tighten the residual envelope.}
 
 \item{flow_cov}{Numeric matrix for the flow covariance, or NULL.}
 
-\item{c0}{Numeric thinning bound constant.}
+\item{c0}{Numeric thinning bound constant. With `ThinningStrategy` this
+user-configured bound must dominate the deterministic marked component;
+violations are detected and stop the sampler.}
 
 \item{grid_n}{Integer number of grid points for GridThinningStrategy.}
 
@@ -99,33 +103,38 @@ for each sample (default: FALSE). Adds overhead but enables
 `bridge_sampler()` and populates the `lp__` diagnostic column.}
 
 \item{subsample_size}{Integer number of observations per subsample,
-or NULL (default) for full-data gradients. When non-NULL, a
-BridgeStan control-variate subsampled gradient is used. Must be
-less than `nrow(data)`. Fixed-effects and random-effects models are
-supported for subsampling.}
+or NULL (default) for full-data gradients. With `GridThinningStrategy`
+or a representable `ThinningStrategy` envelope,
+marked acceleration is selected automatically when affine predictor,
+first-batch likelihood, and trajectory providers are all available for
+the requested dynamics. Ineligible models use exact full gradients.}
 
 \item{n_anchor_updates}{Integer number of anchor updates during warmup
-(default: 10). Only used when `subsample_size` is non-NULL.}
+(default: 0). For analytic marked sampling, each update prepares a
+coherent anchor state containing the full and deterministic anchor
+gradients, cached likelihood predictors, and residual envelope.}
 
-\item{resample_dt}{Numeric time step for resampling, or NULL (default)
-for no resampling. Only used when `subsample_size` is non-NULL.}
+\item{use_hcv}{Logical; enable the certified analytic damped Hessian
+control variate for marked affine Bernoulli-logit or binomial-logit
+sampling (default: FALSE). Its likelihood Hessian and Taylor-remainder
+envelope are prepared with each anchor, with Cauchy damping
+`d / (d + ||x - anchor||^2)` in `d` unconstrained dimensions;
+finite-difference HCV is not used.}
 
-\item{hvp_mode}{Character string controlling Hessian-vector product
-scaling in subsampled gradients. One of `"scaled"` (default) or
-`"none"`.}
-
-\item{use_hcv}{Logical; enable damped Hessian control variate (HCV)
-correction for subsampled gradients (default: FALSE). Requires
-`subsample_size` to be set. Adds a second-order correction that
-reduces gradient variance near the anchor.}
-
-\item{use_anchor_bank}{Logical; enable anchor bank with LRU eviction
-for subsampled gradients (default: FALSE). Requires `subsample_size`
-to be set. Maintains multiple cached anchor points and selects the
-nearest one at each trajectory step.}
+\item{use_anchor_bank}{Logical; retain prepared warmup anchors and select
+the nearest one at event boundaries (default: FALSE). Selection is
+chain-local and performs no full-data gradient or envelope rebuild.
+Requires `n_anchor_updates > 0`; use only `n_anchor_updates` for the
+lower-memory single-anchor update mode.}
 
 \item{bank_capacity}{Integer capacity of the anchor bank (default: 20).
-Only used when `use_anchor_bank` is TRUE.}
+Least-recently-used entries are replaced during warmup. Each populated
+entry stores predictor and kernel caches of order `N * K` plus a complete
+residual envelope of order `N * R`; memory therefore grows linearly in
+the populated capacity and can be substantial for large `N` or many
+growth-envelope components. Benchmark representative models before using
+a large capacity. Analytic HCV additionally stores one dense `d * d`
+likelihood Hessian per populated anchor.}
 
 \item{use_fd_hvp}{Logical; use finite-difference directional curvature
 instead of BridgeStan's Hessian-vector product (default: FALSE).
@@ -137,15 +146,12 @@ thinning mode after warmup when the sampler is well-adapted
 (default: FALSE). Activates when the reflection ratio is below 30\%
 and at least 10 events have been observed.}
 
-\item{use_fd_hcv}{Logical; use finite-difference approximation for the
-HVP inside the HCV correction (default: FALSE). Replaces the exact
-BridgeStan HVP at the anchor with a cheaper gradient-based FD
-approximation. Also disables HVP for grid thinning. Only used when
-`use_hcv` is TRUE.}
-
 \item{sticky}{Logical; enable spike-and-slab variable selection for
 population-level coefficients (default: FALSE). Requires
-`model_prior` to be set.}
+`model_prior` to be set. Sticky transitions redraw the complete velocity
+from the exact law on each active coordinate stratum; no pre-freeze
+velocity is restored. This applies to every supported dynamics, including
+dense-preconditioned Zig-Zag.}
 
 \item{can_stick}{Optional logical vector indicating which non-intercept
 population-level coefficients are candidates for selection. Length
@@ -198,8 +204,19 @@ parameters, not from `lp__`.
 With a single chain, `Rhat` will report `NA`. Use `n_chains >= 2`
 for convergence diagnostics.
 
-When `subsample_size` is specified, the function uses BridgeStan
-data-swapping to compute control-variate subsampled gradients. A
-centering fix is applied to the brms-generated Stan code so that
-predictor centering remains consistent across subsamples.
+Marked acceleration is enabled when the model has certified affine predictor,
+likelihood, and dynamics providers. The first provider batch covers weighted
+and subsetted Bernoulli/binomial logit models, categorical/multinomial logit,
+Poisson log models (including `rate()`), and Gaussian location-scale models
+(including known `se()` values and affine sigma predictors). Independent
+affine multivariate Bernoulli responses are also supported. Unknown geometry
+falls back to the exact full-gradient sampler. Priors, Jacobians, and
+unconditional custom target additions remain in an opaque deterministic
+BridgeStan provider.
+
+PDMPSamplers.jl applies `N / m`, draws a fresh marked subset per proposal,
+uses dynamics-specific linear or harmonic trajectory bounds, and reuses the
+accepted stochastic gradient for the event. Marked subsampling supports
+`GridThinningStrategy` generally and `ThinningStrategy` when the residual
+envelope has an affine global roof (or the trajectory is periodic).
 }

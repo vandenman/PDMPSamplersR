@@ -118,15 +118,15 @@ test_that("pdmp_sample forwards support-boundary diagnostics", {
   d <- 2
   neg_grad <- function(x) {
     if (x[1] >= 1) stop("Outside support")
-    x
+    c(-1, 0)
   }
-  neg_hess <- function(x) diag(d)
+  neg_hess <- function(x) matrix(0, d, d)
 
   expect_error(
     pdmp_sample(
       neg_grad, d = d, flow = "BouncyParticle",
       algorithm = "GridThinningStrategy", T = 10,
-      x0 = c(0, 0), theta0 = c(1, 0), hessian = neg_hess,
+      x0 = c(0.999, 0), theta0 = c(1, 0), hessian = neg_hess,
       show_progress = FALSE, materialize = FALSE, seed = 42,
       support_boundary = support_boundary_control(
         mode = "line_search",
@@ -145,14 +145,14 @@ test_that("pdmp_sample accepts line_search_truncated_refresh for BPS-family flow
   d <- 2
   neg_grad <- function(x) {
     if (x[1] >= 1) stop("Outside support")
-    x
+    c(-1, 0)
   }
-  neg_hess <- function(x) diag(d)
+  neg_hess <- function(x) matrix(0, d, d)
 
   result <- pdmp_sample(
     neg_grad, d = d, flow = "BouncyParticle",
     algorithm = "GridThinningStrategy", T = 5,
-    x0 = c(0, 0), theta0 = c(1, 0), hessian = neg_hess,
+    x0 = c(0.999, 0), theta0 = c(1, 0), hessian = neg_hess,
     show_progress = FALSE, materialize = FALSE, seed = 42,
     support_boundary = support_boundary_control(
       mode = "line_search_truncated_refresh",

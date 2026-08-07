@@ -11,7 +11,9 @@ pdmp_sample_from_stanmodel(
   prior_standata = NULL,
   flow = c("ZigZag", "BouncyParticle", "Boomerang", "AdaptiveBoomerang",
     "PreconditionedZigZag", "PreconditionedBPS"),
-  algorithm = c("ThinningStrategy", "GridThinningStrategy", "RootsPoissonStrategy"),
+  algorithm = c("ThinningStrategy", "GridThinningStrategy",
+    "PositiveVariationGridThinningStrategy", "VectorVariationThinningStrategy",
+    "RootsPoissonStrategy"),
   T = 50000,
   t0 = 0,
   t_warmup = 0,
@@ -27,15 +29,23 @@ pdmp_sample_from_stanmodel(
   slab_prior = NULL,
   grid_n = 30,
   grid_t_max = 2,
+  use_fd_hvp = FALSE,
+  curvature_backend = NULL,
   post_warmup_simplify = FALSE,
+  grid_bound = c("constant", "flat", "linear", "auto", "value_quadratic", "shared_node"),
+  grid_curvature_bound = NULL,
+  linear_area_threshold = 0.95,
+  linear_min_area_gain = 0,
+  lazy_low_tightness_threshold = 0.1,
+  lazy_max_low_tightness_rejections = 3L,
+  lazy_max_rejections = 0L,
   show_progress = TRUE,
   n_chains = 1L,
   threaded = FALSE,
   seed = NULL,
   adaptive_scheme = c("diagonal", "fullrank"),
   materialize = TRUE,
-  support_boundary = support_boundary_control(),
-  subsample = NULL
+  support_boundary = support_boundary_control()
 )
 }
 \arguments{
@@ -58,13 +68,15 @@ the base prior target. Required when \code{slab_prior} is supplied.}
 "BouncyParticle", "Boomerang", "AdaptiveBoomerang", "PreconditionedZigZag",
 or "PreconditionedBPS".
 The `"AdaptiveBoomerang"` flow learns its reference (mean and precision)
-during warmup and requires `"GridThinningStrategy"` as the algorithm.
+during warmup and requires a grid-like algorithm.
 The `"PreconditionedZigZag"` and `"PreconditionedBPS"` flows learn a
 diagonal preconditioner during warmup and also require
-`"GridThinningStrategy"` as the algorithm.}
+a grid-like algorithm.}
 
 \item{algorithm}{Character string specifying the algorithm. One of
-"ThinningStrategy", "GridThinningStrategy", or "RootsPoissonStrategy".}
+"ThinningStrategy", "GridThinningStrategy",
+"PositiveVariationGridThinningStrategy", "VectorVariationThinningStrategy",
+or "RootsPoissonStrategy".}
 
 \item{T}{Numeric, total sampling time (default: 50000).}
 
@@ -96,17 +108,37 @@ Dependent-slab sampling also accepts \code{exchangeable_model_size_prior()}.}
 \code{dense_gaussian_slab()}, \code{exchangeable_gaussian_slab()},
 \code{independent_slab_density()}, \code{gaussian_scale_mixture_slab()},
 or \code{arbitrary_slab_boundary()}. Mutually exclusive with
-\code{parameter_prior}. Stan-backed dependent slabs require
-\code{prior_standata} and optionally \code{prior_stanmodel} for the
-base-prior target.}
+\code{parameter_prior}. The custom-gradient path requires
+\code{prior_grad} so the dependent target can subtract the slab component
+before adding the active slab gradient.}
 
 \item{grid_n}{Integer, number of grid points for GridThinningStrategy (default: 30).}
 
 \item{grid_t_max}{Numeric, maximum time for grid in GridThinningStrategy (default: 2.0).}
 
+\item{curvature_backend}{Character string selecting directional curvature:
+`"exact"` or `"finite_difference"`. Finite differences use
+shifted exact gradients but approximate their directional derivative and
+therefore have step-size and truncation error. `NULL` preserves the
+legacy `use_fd_hvp` mapping.}
+
 \item{post_warmup_simplify}{Logical. If \code{TRUE}, the grid-thinning
 strategy may switch to a constant bound after warmup, reducing
 gradient calls during the main sampling phase.}
+
+\item{grid_bound}{Character string selecting the GridThinning proposal
+envelope. \code{"constant"} preserves the historical behavior.
+\code{"flat"}, \code{"linear"}, and \code{"auto"} expose signed-rate
+affine envelope machinery when supported by the chosen flow and derivative
+provider. code{"shared_node"} is an experimental numerical clock using
+consecutive rate nodes and secant-disagreement inflation; it is not a
+mathematically certified thinning envelope.}
+
+\item{linear_area_threshold}{Numeric gate for \code{grid_bound = "linear"}
+or \code{"auto"}; affine cells are skipped when their relative area gain is
+too small.}
+
+\item{linear_min_area_gain}{Numeric absolute area-gain gate for affine cells.}
 
 \item{show_progress}{Logical, whether to show progress bar (default: TRUE).}
 
@@ -130,13 +162,6 @@ This can save time and memory if you don't need to save the result or if you pla
 
 \item{support_boundary}{A list created by \code{support_boundary_control()} that
 controls support-boundary diagnostics and heuristic event/refresh recovery.}
-
-\item{subsample}{NULL (default) for full-data sampling, or a named list with
-at least `size` and `prior_standata`. Optional entries include
-`path_to_stanmodel` (the external-C++ subsampled Stan model; defaults to
-`path_to_stanmodel`), `hpp_path`, `n_anchor_updates`, `hvp_mode`,
-`use_hcv`, `use_anchor_bank`, `use_fd_hvp`, `compute_lp`, and
-`resample_dt`.}
 }
 \value{
 A \code{pdmp_result} object. Use \code{mean}, \code{var},

@@ -367,8 +367,7 @@ validate_pdmp_params <- function(d, flow, algorithm, T, t0 = 0.0, t_warmup = 0.0
 }
 
 .validate_dependent_slab_early <- function(slab_prior, sticky, flow, algorithm,
-                                           model_prior, parameter_prior,
-                                           subsample = NULL) {
+                                           model_prior, parameter_prior) {
   if (is.null(slab_prior)) return(invisible(TRUE))
   .validate_slab_prior_sampling_contract(slab_prior)
   if (!isTRUE(sticky)) {
@@ -388,9 +387,6 @@ validate_pdmp_params <- function(d, flow, algorithm, T, t0 = 0.0, t_warmup = 0.0
   }
   if (algorithm != "GridThinningStrategy") {
     cli::cli_abort("Dependent {.arg slab_prior} sticky sampling currently requires {.val GridThinningStrategy}.")
-  }
-  if (!is.null(subsample)) {
-    cli::cli_abort("Dependent {.arg slab_prior} is not yet supported together with {.arg subsample}.")
   }
   invisible(TRUE)
 }
@@ -499,146 +495,6 @@ validate_support_boundary_control <- function(support_boundary) {
   do.call(support_boundary_control, utils::modifyList(defaults, support_boundary))
 }
 
-.standata_n_obs <- function(standata, standata_path, subsample) {
-  if (!is.null(subsample$N)) {
-    n <- cast_integer(subsample$N, n = 1)
-    validate_type(n, type = "integer", n = 1, positive = TRUE)
-    return(n)
-  }
-
-  if (is.list(standata) && !is.null(standata$N)) {
-    n <- cast_integer(standata$N, n = 1)
-    validate_type(n, type = "integer", n = 1, positive = TRUE)
-    return(n)
-  }
-
-  if (requireNamespace("jsonlite", quietly = TRUE)) {
-    data <- tryCatch(
-      jsonlite::read_json(standata_path, simplifyVector = TRUE),
-      error = function(e) NULL
-    )
-    if (is.list(data) && !is.null(data$N)) {
-      n <- cast_integer(data$N, n = 1)
-      validate_type(n, type = "integer", n = 1, positive = TRUE)
-      return(n)
-    }
-  }
-
-  cli::cli_abort(c(
-    "Could not determine the number of observations for subsampling.",
-    "i" = "Provide {.field N} in {.arg standata} or set {.code subsample$N}."
-  ))
-}
-
-.write_or_validate_standata_path <- function(data, arg = "subsample$prior_standata") {
-  if (is.list(data)) {
-    path <- tempfile(fileext = ".json")
-    write_stan_json(data, path)
-    return(list(path = path, temporary = TRUE))
-  }
-
-  validate_type(data, type = "character", n = 1)
-  if (!file.exists(data))
-    cli::cli_abort("{.arg {arg}} file not found: {.path {data}}")
-  if (!grepl("\\.json$", data))
-    cli::cli_abort("{.arg {arg}} should be a JSON file path or a named list.")
-  list(path = data, temporary = FALSE)
-}
-
-validate_stan_subsample <- function(subsample, standata, standata_path, path_to_stanmodel) {
-  if (is.null(subsample)) return(NULL)
-  if (!is.list(subsample))
-    cli::cli_abort("{.arg subsample} must be NULL or a named list.")
-
-  if (is.null(subsample$size))
-    cli::cli_abort("{.arg subsample$size} must be provided.")
-  N <- .standata_n_obs(standata, standata_path, subsample)
-  size <- cast_integer(subsample$size, n = 1)
-  validate_type(size, type = "integer", n = 1, positive = TRUE)
-  if (size >= N)
-    cli::cli_abort("{.arg subsample$size} ({size}) must be between 1 and {.code N - 1} ({N - 1L}).")
-
-  prior <- subsample$prior_standata
-  if (is.null(prior)) prior <- subsample$prior_data
-  if (is.null(prior)) prior <- subsample$prior_standata_path
-  if (is.null(prior))
-    cli::cli_abort("{.arg subsample$prior_standata} must be provided as a named list or JSON path.")
-  prior_info <- .write_or_validate_standata_path(prior, "subsample$prior_standata")
-
-  stanmodel_sub <- subsample$path_to_stanmodel
-  if (is.null(stanmodel_sub)) stanmodel_sub <- subsample$stan_file_ext
-  if (is.null(stanmodel_sub)) stanmodel_sub <- subsample$stanmodel
-  if (is.null(stanmodel_sub)) stanmodel_sub <- path_to_stanmodel
-  validate_type(stanmodel_sub, type = "character", n = 1)
-  if (!file.exists(stanmodel_sub))
-    cli::cli_abort("Subsampled Stan model file not found: {.path {stanmodel_sub}}")
-  if (!grepl("\\.(so|dll|dylib|stan)$", stanmodel_sub))
-    cli::cli_abort("{.arg subsample$path_to_stanmodel} should point to a Stan model or compiled Stan library.")
-
-  hpp <- subsample$hpp_path
-  if (is.null(hpp)) hpp <- subsample$external_hpp
-  if (is.null(hpp)) hpp <- hpp_path()
-  validate_type(hpp, type = "character", n = 1)
-  if (!file.exists(hpp))
-    cli::cli_abort("Subsampled Stan external header not found: {.path {hpp}}")
-
-  n_anchor_updates <- if (is.null(subsample$n_anchor_updates)) 10L else cast_integer(subsample$n_anchor_updates, n = 1)
-  validate_type(n_anchor_updates, type = "integer", n = 1)
-  if (n_anchor_updates < 0)
-    cli::cli_abort("{.arg subsample$n_anchor_updates} must be non-negative.")
-
-  hvp_mode <- if (is.null(subsample$hvp_mode)) "scaled" else subsample$hvp_mode
-  validate_type(hvp_mode, type = "character", n = 1)
-  if (!hvp_mode %in% c("scaled", "none"))
-    cli::cli_abort("{.arg subsample$hvp_mode} must be one of {.val scaled} or {.val none}.")
-
-  bool_option <- function(name, default) {
-    value <- subsample[[name]]
-    if (is.null(value)) value <- default
-    validate_type(value, type = "logical", n = 1)
-    value
-  }
-  double_option <- function(name, default, non_negative = TRUE) {
-    value <- subsample[[name]]
-    if (is.null(value)) value <- default
-    validate_type(value, type = "double", n = 1)
-    if (non_negative && value < 0)
-      cli::cli_abort("{.arg {paste0('subsample$', name)}} must be non-negative.")
-    value
-  }
-  integer_option <- function(name, default, positive = TRUE) {
-    value <- subsample[[name]]
-    if (is.null(value)) value <- default
-    value <- cast_integer(value, n = 1)
-    validate_type(value, type = "integer", n = 1)
-    if (positive && value <= 0)
-      cli::cli_abort("{.arg {paste0('subsample$', name)}} must be positive.")
-    value
-  }
-
-  list(
-    N = N,
-    size = size,
-    prior_path = prior_info$path,
-    prior_temporary = prior_info$temporary,
-    path_to_stanmodel = stanmodel_sub,
-    hpp_path = hpp,
-    n_anchor_updates = n_anchor_updates,
-    hvp_mode = hvp_mode,
-    use_hcv = bool_option("use_hcv", FALSE),
-    use_anchor_bank = bool_option("use_anchor_bank", FALSE),
-    use_fd_hvp = bool_option("use_fd_hvp", FALSE),
-    compute_lp = bool_option("compute_lp", FALSE),
-    resample_dt = double_option("resample_dt", 0.0),
-    discretize_dt = double_option("discretize_dt", 0.0),
-    bank_capacity = integer_option("bank_capacity", 20L),
-    use_fd_hcv = bool_option("use_fd_hcv", FALSE),
-    output_csv = if (is.null(subsample$output_csv)) tempfile(fileext = ".csv") else {
-      validate_type(subsample$output_csv, type = "character", n = 1)
-      subsample$output_csv
-    }
-  )
-}
 
 #' PDMP Sampling
 #'
@@ -903,12 +759,6 @@ pdmp_sample <- function(f, d,
 #'   \code{prior_standata} is supplied.
 #' @param prior_standata Optional prior-only Stan data path or named list for
 #'   the base prior target. Required when \code{slab_prior} is supplied.
-#' @param subsample NULL (default) for full-data sampling, or a named list with
-#'   at least `size` and `prior_standata`. Optional entries include
-#'   `path_to_stanmodel` (the external-C++ subsampled Stan model; defaults to
-#'   `path_to_stanmodel`), `hpp_path`, `n_anchor_updates`, `hvp_mode`,
-#'   `use_hcv`, `use_anchor_bank`, `use_fd_hvp`, `compute_lp`, and
-#'   `resample_dt`.
 #' @param curvature_backend Character string selecting directional curvature:
 #'   `"exact"` or `"finite_difference"`. Finite differences use
 #'   shifted exact gradients but approximate their directional derivative and
@@ -947,8 +797,7 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
                         n_chains = 1L, threaded = FALSE, seed = NULL,
                         adaptive_scheme = c("diagonal", "fullrank"),
                         materialize = TRUE,
-                        support_boundary = support_boundary_control(),
-                        subsample = NULL) {
+                        support_boundary = support_boundary_control()) {
 
   # Validate file paths on R side before setting up Julia
   validate_type(path_to_stanmodel, type = "character", n = 1)
@@ -977,8 +826,7 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
     }
   }
   .validate_dependent_slab_early(
-    slab_prior, sticky, flow, algorithm, model_prior, parameter_prior,
-    subsample = subsample
+    slab_prior, sticky, flow, algorithm, model_prior, parameter_prior
   )
   if (!is.null(slab_prior)) {
     cli::cli_abort("Dependent {.arg slab_prior} is temporarily gated for Stan models until target composition subtracts only the slab component or adds back nuisance priors.")
@@ -1022,10 +870,6 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
     }
   }
 
-  subsample <- validate_stan_subsample(subsample, standata, standata_path, path_to_stanmodel)
-  if (!is.null(subsample) && isTRUE(subsample$prior_temporary))
-    on.exit(unlink(subsample$prior_path), add = TRUE)
-
   check_for_julia_setup()
 
   # Normalize paths to absolute
@@ -1042,10 +886,10 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
     "PDMPSAMPLERSR_BRIDGESTAN_STANC_O1"
   ), "false")) %in% c("1", "true", "yes", "y"))
   if (compile_control_enabled && grepl("\\.stan$", path_to_stanmodel)) {
-    path_to_stanmodel <- .pdmpsamplers_julia_call("_compile_model_with_header", path_to_stanmodel, "")
+    path_to_stanmodel <- .pdmpsamplers_julia_call("_compile_model", path_to_stanmodel)
   }
   if (compile_control_enabled && !is.null(slab_prior) && grepl("\\.stan$", prior_stanmodel)) {
-    prior_stanmodel <- .pdmpsamplers_julia_call("_compile_model_with_header", prior_stanmodel, "")
+    prior_stanmodel <- .pdmpsamplers_julia_call("_compile_model", prior_stanmodel)
   }
 
   support_boundary <- validate_support_boundary_control(support_boundary)
@@ -1064,37 +908,24 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
   JuliaCall::julia_assign("_path_to_prior_stan_model", prior_stanmodel)
   JuliaCall::julia_assign("_path_to_prior_stan_data_full", prior_standata_path)
 
-  if (is.null(subsample)) {
-    # Create PDMPModel in Julia and get dimension for the ordinary full-data path.
-    JuliaCall::julia_assign("_curvature_backend", curvature_backend)
-    JuliaCall::julia_command("_stan_model = BridgeStan.StanModel(_path_to_stan_model, _path_to_stan_data; warn=false); _pdmp_model = PDMPModel(_stan_model; hvp = _curvature_backend != \"finite_difference\");")
-    d <- JuliaCall::julia_eval("_pdmp_model.d")
-    unc_names <- character(0)
-    if (!is.null(slab_prior)) {
-      JuliaCall::julia_command("_prior_stan_model = BridgeStan.StanModel(_path_to_prior_stan_model, _path_to_prior_stan_data_full; warn=false); _prior_pdmp_model = PDMPModel(_prior_stan_model);")
-      d_prior <- JuliaCall::julia_eval("_prior_pdmp_model.d")
-      if (!identical(as.integer(d), as.integer(d_prior))) {
-        cli::cli_abort("Posterior and prior Stan models must have the same unconstrained dimension.")
-      }
-      unc_names <- JuliaCall::julia_eval("BridgeStan.param_unc_names(_stan_model)")
-      prior_unc_names <- JuliaCall::julia_eval("BridgeStan.param_unc_names(_prior_stan_model)")
-      if (!identical(unc_names, prior_unc_names)) {
-        cli::cli_abort("Posterior and prior Stan models must have identical unconstrained parameter names.")
-      }
-    } else {
-      JuliaCall::julia_command("_prior_pdmp_model = nothing;")
+  # Create the full-data PDMPModel and determine its unconstrained dimension.
+  JuliaCall::julia_assign("_curvature_backend", curvature_backend)
+  JuliaCall::julia_command("_stan_model = BridgeStan.StanModel(_path_to_stan_model, _path_to_stan_data; warn=false); _pdmp_model = PDMPModel(_stan_model; hvp = _curvature_backend != \"finite_difference\");")
+  d <- JuliaCall::julia_eval("_pdmp_model.d")
+  unc_names <- character(0)
+  if (!is.null(slab_prior)) {
+    JuliaCall::julia_command("_prior_stan_model = BridgeStan.StanModel(_path_to_prior_stan_model, _path_to_prior_stan_data_full; warn=false); _prior_pdmp_model = PDMPModel(_prior_stan_model);")
+    d_prior <- JuliaCall::julia_eval("_prior_pdmp_model.d")
+    if (!identical(as.integer(d), as.integer(d_prior))) {
+      cli::cli_abort("Posterior and prior Stan models must have the same unconstrained dimension.")
+    }
+    unc_names <- JuliaCall::julia_eval("BridgeStan.param_unc_names(_stan_model)")
+    prior_unc_names <- JuliaCall::julia_eval("BridgeStan.param_unc_names(_prior_stan_model)")
+    if (!identical(unc_names, prior_unc_names)) {
+      cli::cli_abort("Posterior and prior Stan models must have identical unconstrained parameter names.")
     }
   } else {
-    subsample$path_to_stanmodel <- normalizePath(subsample$path_to_stanmodel, mustWork = TRUE)
-    subsample$prior_path <- normalizePath(subsample$prior_path, mustWork = TRUE)
-    subsample$hpp_path <- normalizePath(subsample$hpp_path, mustWork = TRUE)
-    d <- .pdmpsamplers_julia_call(
-      "r_stan_param_unc_num_with_header",
-      path_to_stanmodel,
-      standata_path,
-      subsample$hpp_path
-    )
-    unc_names <- character(0)
+    JuliaCall::julia_command("_prior_pdmp_model = nothing;")
   }
 
   # Use common validation function
@@ -1132,8 +963,7 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
   JuliaCall::julia_assign("support_boundary_refresh_probe_time", support_boundary$refresh_probe_time)
   JuliaCall::julia_assign("support_boundary_min_safe_time", support_boundary$min_safe_time)
 
-  if (is.null(subsample)) {
-    result <- .pdmpsamplers_julia_eval("PDMPSamplersRBridge.r_pdmp_stan(
+  result <- .pdmpsamplers_julia_eval("PDMPSamplersRBridge.r_pdmp_stan(
       _pdmp_model, x0, flow, algorithm, flow_mean, flow_cov;
       c0 = c0, grid_n = grid_n, grid_t_max = grid_t_max,
       curvature_backend = _curvature_backend,
@@ -1163,54 +993,6 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
       support_boundary_refresh_probe_time = support_boundary_refresh_probe_time,
       support_boundary_min_safe_time = support_boundary_min_safe_time
     );")
-  } else {
-    JuliaCall::julia_assign("_path_to_subsampled_stan_model", subsample$path_to_stanmodel)
-    JuliaCall::julia_assign("_path_to_prior_stan_data", subsample$prior_path)
-    JuliaCall::julia_assign("_subsample_hpp_path", subsample$hpp_path)
-    JuliaCall::julia_assign("_subsample_N", as.integer(subsample$N))
-    JuliaCall::julia_assign("_subsample_size", as.integer(subsample$size))
-    JuliaCall::julia_assign("_subsample_output_csv", subsample$output_csv)
-    JuliaCall::julia_assign("_subsample_n_anchor_updates", as.integer(subsample$n_anchor_updates))
-    JuliaCall::julia_assign("_subsample_hvp_mode", subsample$hvp_mode)
-    JuliaCall::julia_assign("_subsample_use_hcv", subsample$use_hcv)
-    JuliaCall::julia_assign("_subsample_use_anchor_bank", subsample$use_anchor_bank)
-    JuliaCall::julia_assign("_subsample_use_fd_hvp", subsample$use_fd_hvp)
-    JuliaCall::julia_assign("_subsample_compute_lp", subsample$compute_lp)
-    JuliaCall::julia_assign("_subsample_resample_dt", subsample$resample_dt)
-    JuliaCall::julia_assign("_subsample_discretize_dt", subsample$discretize_dt)
-    JuliaCall::julia_assign("_subsample_bank_capacity", as.integer(subsample$bank_capacity))
-    JuliaCall::julia_assign("_subsample_use_fd_hcv", subsample$use_fd_hcv)
-
-    result <- .pdmpsamplers_julia_eval("PDMPSamplersRBridge.r_pdmp_brms_subsampled(
-      _path_to_stan_model, _path_to_subsampled_stan_model, _subsample_hpp_path,
-      _path_to_stan_data, _path_to_prior_stan_data,
-      _subsample_N, _subsample_size,
-      flow, algorithm, flow_mean, flow_cov, _subsample_output_csv;
-      c0 = c0, grid_n = grid_n, grid_t_max = grid_t_max,
-      grid_bound = grid_bound,
-      linear_area_threshold = linear_area_threshold,
-      linear_min_area_gain = linear_min_area_gain,
-      t0 = t0, T = T, t_warmup = t_warmup,
-      n_anchor_updates = _subsample_n_anchor_updates,
-      adaptive_scheme = adaptive_scheme,
-      discretize_dt = _subsample_discretize_dt,
-      show_progress = show_progress,
-      n_chains = n_chains, threaded = threaded, seed = seed,
-      compute_lp = _subsample_compute_lp,
-      resample_dt = _subsample_resample_dt,
-      hvp_mode = _subsample_hvp_mode,
-      use_hcv = _subsample_use_hcv,
-      use_anchor_bank = _subsample_use_anchor_bank,
-      bank_capacity = _subsample_bank_capacity,
-      use_fd_hvp = _subsample_use_fd_hvp,
-      post_warmup_simplify = post_warmup_simplify,
-      use_fd_hcv = _subsample_use_fd_hcv,
-      sticky = sticky, can_stick = can_stick,
-      model_prior = model_prior, parameter_prior = parameter_prior,
-      slab_prior = slab_prior,
-      unc_names = _unc_names
-    );")
-  }
   if (is.environment(result)) result <- as.list(result)
   result <- new_pdmp_result(
     chains   = result$chains,

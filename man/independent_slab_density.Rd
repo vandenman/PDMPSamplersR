@@ -5,6 +5,8 @@
 \alias{dense_gaussian_slab}
 \alias{exchangeable_gaussian_slab}
 \alias{gaussian_scale_mixture_slab}
+\alias{independent_logscale_gaussian_slab}
+\alias{global_logscale_exchangeable_gaussian_slab}
 \alias{arbitrary_slab_boundary}
 \title{Dependent slab prior constructors}
 \usage{
@@ -16,6 +18,17 @@ exchangeable_gaussian_slab(mean = 0, u, v, zero_mean = TRUE, coef = NULL)
 
 gaussian_scale_mixture_slab(mean_cov, active_prior_neggrad = NULL, coef = NULL)
 
+independent_logscale_gaussian_slab(log_base_scales, logscale, coef = NULL)
+
+global_logscale_exchangeable_gaussian_slab(
+  logscale,
+  u,
+  v,
+  mean = 0,
+  logscale_offset = 0,
+  coef = NULL
+)
+
 arbitrary_slab_boundary(log_q_zero, active_prior_neggrad, coef = NULL)
 }
 \arguments{
@@ -26,8 +39,7 @@ Julia bridge over the selected sticky coefficients.}
 integer vector of 1-based unconstrained parameter indices, controlled by
 this slab. If omitted, the bridge uses \code{can_stick}.}
 
-\item{mean}{Numeric mean vector for a fixed Gaussian slab, or common mean for
-an exchangeable Gaussian slab.}
+\item{mean}{Common mean for an exchangeable Gaussian slab.}
 
 \item{cov}{Positive-definite covariance matrix for a fixed Gaussian slab.}
 
@@ -46,15 +58,24 @@ fields \code{mean} and \code{cov}.}
 negative-gradient contribution. It is called as
 \code{active_prior_neggrad(x, active)}, where \code{active} is a logical
 vector over the slab coefficients, and should return a full unconstrained
-negative-gradient vector. This callback is required when a callback Gaussian
-slab is used for dependent-slab sampling.}
+negative-gradient vector. This callback is required when a callback
+Gaussian slab is used for dependent-slab sampling.}
+
+\item{log_base_scales}{Numeric log base standard deviations for structured
+independent log-scale Gaussian slabs.}
+
+\item{logscale}{Integer or character vector of unconstrained log-scale
+coordinate indices/names. A scalar is recycled over selected coefficients.}
+
+\item{logscale_offset}{Fixed additive offset for a global log-scale.}
 
 \item{log_q_zero}{R function returning a boundary log-density at zero. It is
 called as \code{log_q_zero(x, active, j)}, where \code{j} is a 1-based slab
 coefficient index.}
 }
 \value{
-A slab prior specification for the dependent aggregate sticky bridge.
+A slab prior specification for the dependent aggregate sticky
+  bridge.
 }
 \description{
 These constructors describe slab priors for the dependent aggregate sticky

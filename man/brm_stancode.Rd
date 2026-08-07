@@ -9,7 +9,6 @@ brm_stancode(
   data,
   family = gaussian(),
   prior = NULL,
-  subsample_size = NULL,
   stanvars = NULL,
   sample_prior = "no",
   ...
@@ -24,12 +23,6 @@ brm_stancode(
 
 \item{prior}{A `brmsprior` object or NULL for default priors.}
 
-\item{subsample_size}{Integer number of observations per subsample,
-or NULL (default) for full-data gradients. When non-NULL, a
-BridgeStan control-variate subsampled gradient is used. Must be
-less than `nrow(data)`. Fixed-effects and random-effects models are
-supported for subsampling.}
-
 \item{stanvars}{Optional `stanvar` object for custom Stan code.}
 
 \item{sample_prior}{Currently only `"no"` is supported.}
@@ -37,19 +30,11 @@ supported for subsampling.}
 \item{...}{Additional arguments passed to [brms::brm()] for model setup.}
 }
 \value{
-A character string when `subsample_size` is NULL, or a
-  named list with elements `standard` and `ext_cpp`.
+A character string containing the generated Stan program.
 }
 \description{
-Returns the Stan code that [brm_pdmp()] would compile, after any
-subsampling modifications. Without `subsample_size`, this is
-identical to `brms::stancode()`. With `subsample_size`, two
-variants are returned:
-\describe{
-  \item{standard}{The standard model (used for the full-data and
-    prior-only models).}
-  \item{ext_cpp}{The model with likelihood rewritten to use
-    external C++ subsetting functions (used for the
-    subsampled-gradient model).}
-}
+This is a thin wrapper around [brms::stancode()] using the same model
+arguments accepted by [brm_pdmp()]. Marked subsampling uses the ordinary
+Stan model plus analytic Julia-side family providers, so no rewritten Stan
+variant is generated.
 }

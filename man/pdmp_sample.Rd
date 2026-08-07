@@ -9,7 +9,9 @@ pdmp_sample(
   d,
   flow = c("ZigZag", "BouncyParticle", "Boomerang", "AdaptiveBoomerang",
     "PreconditionedZigZag", "PreconditionedBPS"),
-  algorithm = c("ThinningStrategy", "GridThinningStrategy", "RootsPoissonStrategy"),
+  algorithm = c("ThinningStrategy", "GridThinningStrategy",
+    "PositiveVariationGridThinningStrategy", "VectorVariationThinningStrategy",
+    "RootsPoissonStrategy"),
   T = 50000,
   t0 = 0,
   t_warmup = 0,
@@ -27,7 +29,15 @@ pdmp_sample(
   slab_prior = NULL,
   grid_n = 30,
   grid_t_max = 2,
+  use_fd_hvp = FALSE,
   post_warmup_simplify = FALSE,
+  grid_bound = c("constant", "flat", "linear", "auto", "value_quadratic", "shared_node"),
+  grid_curvature_bound = NULL,
+  linear_area_threshold = 0.95,
+  linear_min_area_gain = 0,
+  lazy_low_tightness_threshold = 0.1,
+  lazy_max_low_tightness_rejections = 3L,
+  lazy_max_rejections = 0L,
   show_progress = TRUE,
   n_chains = 1L,
   threaded = FALSE,
@@ -47,13 +57,15 @@ and return a numeric vector of the same length.}
 "BouncyParticle", "Boomerang", "AdaptiveBoomerang", "PreconditionedZigZag",
 or "PreconditionedBPS".
 The `"AdaptiveBoomerang"` flow learns its reference (mean and precision)
-during warmup and requires `"GridThinningStrategy"` as the algorithm.
+during warmup and requires a grid-like algorithm.
 The `"PreconditionedZigZag"` and `"PreconditionedBPS"` flows learn a
 diagonal preconditioner during warmup and also require
-`"GridThinningStrategy"` as the algorithm.}
+a grid-like algorithm.}
 
 \item{algorithm}{Character string specifying the algorithm. One of
-"ThinningStrategy", "GridThinningStrategy", or "RootsPoissonStrategy".}
+"ThinningStrategy", "GridThinningStrategy",
+"PositiveVariationGridThinningStrategy", "VectorVariationThinningStrategy",
+or "RootsPoissonStrategy".}
 
 \item{T}{Numeric, total sampling time (default: 50000).}
 
@@ -75,8 +87,10 @@ diagonal preconditioner during warmup and also require
 Only used with GridThinningStrategy to compute the Hessian-vector product.}
 
 \item{prior_grad}{Optional function computing the NEGATIVE gradient of the
-base prior to subtract in the dependent-slab target. Required when
-\code{slab_prior} is supplied to \code{pdmp_sample()}.}
+slab prior component to subtract in the dependent-slab target. Do not
+include nuisance-prior terms here; nuisance coordinates should remain in
+the posterior gradient \code{f}. Required when \code{slab_prior} is
+supplied to \code{pdmp_sample()}.}
 
 \item{sticky}{Logical, whether to use sticky sampling (default: FALSE).}
 
@@ -92,9 +106,9 @@ Dependent-slab sampling also accepts \code{exchangeable_model_size_prior()}.}
 \code{dense_gaussian_slab()}, \code{exchangeable_gaussian_slab()},
 \code{independent_slab_density()}, \code{gaussian_scale_mixture_slab()},
 or \code{arbitrary_slab_boundary()}. Mutually exclusive with
-\code{parameter_prior}. The custom-gradient path requires \code{prior_grad}
-so the dependent target can subtract the base prior gradient before adding the
-active slab gradient.}
+\code{parameter_prior}. The custom-gradient path requires
+\code{prior_grad} so the dependent target can subtract the slab component
+before adding the active slab gradient.}
 
 \item{grid_n}{Integer, number of grid points for GridThinningStrategy (default: 30).}
 
@@ -103,6 +117,20 @@ active slab gradient.}
 \item{post_warmup_simplify}{Logical. If \code{TRUE}, the grid-thinning
 strategy may switch to a constant bound after warmup, reducing
 gradient calls during the main sampling phase.}
+
+\item{grid_bound}{Character string selecting the GridThinning proposal
+envelope. \code{"constant"} preserves the historical behavior.
+\code{"flat"}, \code{"linear"}, and \code{"auto"} expose signed-rate
+affine envelope machinery when supported by the chosen flow and derivative
+provider. code{"shared_node"} is an experimental numerical clock using
+consecutive rate nodes and secant-disagreement inflation; it is not a
+mathematically certified thinning envelope.}
+
+\item{linear_area_threshold}{Numeric gate for \code{grid_bound = "linear"}
+or \code{"auto"}; affine cells are skipped when their relative area gain is
+too small.}
+
+\item{linear_min_area_gain}{Numeric absolute area-gain gate for affine cells.}
 
 \item{show_progress}{Logical, whether to show progress bar (default: TRUE).}
 

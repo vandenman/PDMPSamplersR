@@ -27,11 +27,9 @@ reference:
   - title: Sampling
     contents:
       - pdmp_sample
-      - pdmp_sample_subsampled
       - pdmp_sample_from_stanmodel
       - support_boundary_control
       - write_stan_json
-      - pdmp_subsample_hpp_path
   - title: Results
     contents:
       - materialize
@@ -64,9 +62,6 @@ reference:
       - brm_pdmp
       - brm_stancode
       - brm_standata
-      - log_lik_subsampled
-      - posterior_epred_subsampled
-      - posterior_predict_subsampled
   - title: Variable selection
     contents:
       - model_averaged_mean

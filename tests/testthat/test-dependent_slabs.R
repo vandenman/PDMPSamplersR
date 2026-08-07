@@ -322,7 +322,7 @@ test_that("Julia bridge executes R callback slab provider contracts", {
   expect_true(JuliaCall::julia_eval("
     begin
       provider = build_slab_provider(r_callback_slab, r_callback_names, r_callback_can_stick, 3)
-      mean, cov = gaussian_slab(provider, [1.0, 2.0, -1.0])
+      mean, cov = PDMPSamplers.gaussian_slab(provider, [1.0, 2.0, -1.0])
       mean ≈ [2.25, -0.5] && cov ≈ [2.0 0.3; 0.3 1.5]
     end
   "))
@@ -330,7 +330,8 @@ test_that("Julia bridge executes R callback slab provider contracts", {
     begin
       provider = build_slab_provider(r_callback_slab, r_callback_names, r_callback_can_stick, 3)
       out = fill(NaN, 3)
-      active_prior_neggrad!(provider, out, [1.0, 2.0, -1.0], BitVector([true, true]))
+      PDMPSamplers.active_prior_neggrad!(provider, out,
+        [1.0, 2.0, -1.0], BitVector([true, true]))
       out ≈ [0.75, 0.0, -2.0]
     end
   "))
@@ -338,14 +339,16 @@ test_that("Julia bridge executes R callback slab provider contracts", {
     begin
       provider = build_slab_provider(r_arbitrary_slab, r_callback_names, r_callback_can_stick, 3)
       active = BitVector([true, false])
-      log_boundary_density_zero(provider, [1.0, 2.0, -1.0], active, 2) ≈ 2.0
+      PDMPSamplers.log_boundary_density_zero(
+        provider, [1.0, 2.0, -1.0], active, 2) ≈ 2.0
     end
   "))
   expect_true(JuliaCall::julia_eval("
     begin
       provider = build_slab_provider(r_arbitrary_slab, r_callback_names, r_callback_can_stick, 3)
       out = fill(NaN, 3)
-      active_prior_neggrad!(provider, out, [1.0, 2.0, -1.0], BitVector([true, true]))
+      PDMPSamplers.active_prior_neggrad!(provider, out,
+        [1.0, 2.0, -1.0], BitVector([true, true]))
       out ≈ [3.0, 0.0, -4.0]
     end
   "))

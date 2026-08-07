@@ -15,3 +15,9 @@ stan/omrf
 vignettes/*
 !vignettes/stan-examples.qmd
 .positai
+/results
+/scripts
+/benchmarks/*
+!/benchmarks/marked_anchor_bank.R
+!/benchmarks/marked_hcv.R
+!/benchmarks/summarize_marked_hcv.R

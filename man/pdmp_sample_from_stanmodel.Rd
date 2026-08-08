@@ -9,6 +9,7 @@ pdmp_sample_from_stanmodel(
   standata,
   prior_stanmodel = NULL,
   prior_standata = NULL,
+  marked_subsampling = NULL,
   flow = c("ZigZag", "BouncyParticle", "Boomerang", "AdaptiveBoomerang",
     "PreconditionedZigZag", "PreconditionedBPS"),
   algorithm = c("ThinningStrategy", "GridThinningStrategy",
@@ -57,12 +58,15 @@ BridgeStan will compile it automatically.}
 or a named list that will be written to a temporary JSON file via
 [write_stan_json()].}
 
-\item{prior_stanmodel}{Optional Stan model path for the base prior target
-used by dependent slabs. Defaults to \code{path_to_stanmodel} when
-\code{prior_standata} is supplied.}
+\item{prior_stanmodel}{Deprecated compatibility argument. Full-gradient
+dependent slabs do not require a separate prior model.}
 
-\item{prior_standata}{Optional prior-only Stan data path or named list for
-the base prior target. Required when \code{slab_prior} is supplied.}
+\item{prior_standata}{Optional prior-only Stan data path or named list used
+by \code{marked_subsampling}.}
+
+\item{marked_subsampling}{Optional exact marked custom-Stan specification
+created by \code{stan_marked_subsampling()}. The selected Stan branch must
+be unscaled; Julia applies \code{N / m}.}
 
 \item{flow}{Character string specifying the flow type. One of "ZigZag",
 "BouncyParticle", "Boomerang", "AdaptiveBoomerang", "PreconditionedZigZag",
@@ -108,13 +112,15 @@ Dependent-slab sampling also accepts \code{exchangeable_model_size_prior()}.}
 \code{dense_gaussian_slab()}, \code{exchangeable_gaussian_slab()},
 \code{independent_slab_density()}, \code{gaussian_scale_mixture_slab()},
 or \code{arbitrary_slab_boundary()}. Mutually exclusive with
-\code{parameter_prior}. The custom-gradient path requires
-\code{prior_grad} so the dependent target can subtract the slab component
-before adding the active slab gradient.}
+\code{parameter_prior}. The full Stan model must contain the complete slab;
+the package replaces it by the active coherent slab internally.}
 
 \item{grid_n}{Integer, number of grid points for GridThinningStrategy (default: 30).}
 
 \item{grid_t_max}{Numeric, maximum time for grid in GridThinningStrategy (default: 2.0).}
+
+\item{use_fd_hvp}{Logical compatibility switch selecting finite-difference
+curvature when no exact Hessian-vector product is used.}
 
 \item{curvature_backend}{Character string selecting directional curvature:
 `"exact"` or `"finite_difference"`. Finite differences use
@@ -130,15 +136,27 @@ gradient calls during the main sampling phase.}
 envelope. \code{"constant"} preserves the historical behavior.
 \code{"flat"}, \code{"linear"}, and \code{"auto"} expose signed-rate
 affine envelope machinery when supported by the chosen flow and derivative
-provider. code{"shared_node"} is an experimental numerical clock using
+provider. \code{"shared_node"} is an experimental numerical clock using
 consecutive rate nodes and secant-disagreement inflation; it is not a
 mathematically certified thinning envelope.}
+
+\item{grid_curvature_bound}{Optional nonnegative curvature bound required by
+the experimental \code{"shared_node"} grid bound.}
 
 \item{linear_area_threshold}{Numeric gate for \code{grid_bound = "linear"}
 or \code{"auto"}; affine cells are skipped when their relative area gain is
 too small.}
 
 \item{linear_min_area_gain}{Numeric absolute area-gain gate for affine cells.}
+
+\item{lazy_low_tightness_threshold}{Nonnegative threshold used by lazy grid
+refinement diagnostics.}
+
+\item{lazy_max_low_tightness_rejections}{Nonnegative number of consecutive
+low-tightness rejections allowed before refinement.}
+
+\item{lazy_max_rejections}{Nonnegative total lazy-rejection limit; zero uses
+the package default behavior.}
 
 \item{show_progress}{Logical, whether to show progress bar (default: TRUE).}
 

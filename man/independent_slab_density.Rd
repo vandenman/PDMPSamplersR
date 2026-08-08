@@ -6,6 +6,7 @@
 \alias{exchangeable_gaussian_slab}
 \alias{gaussian_scale_mixture_slab}
 \alias{independent_logscale_gaussian_slab}
+\alias{loglinear_gaussian_scale_slab}
 \alias{global_logscale_exchangeable_gaussian_slab}
 \alias{arbitrary_slab_boundary}
 \title{Dependent slab prior constructors}
@@ -19,6 +20,8 @@ exchangeable_gaussian_slab(mean = 0, u, v, zero_mean = TRUE, coef = NULL)
 gaussian_scale_mixture_slab(mean_cov, active_prior_neggrad = NULL, coef = NULL)
 
 independent_logscale_gaussian_slab(log_base_scales, logscale, coef = NULL)
+
+loglinear_gaussian_scale_slab(log_base_sd, logscale, logscale_design, coef = NULL)
 
 global_logscale_exchangeable_gaussian_slab(
   logscale,
@@ -63,6 +66,10 @@ Gaussian slab is used for dependent-slab sampling.}
 
 \item{log_base_scales}{Numeric log base standard deviations for structured
 independent log-scale Gaussian slabs.}
+
+\item{log_base_sd}{Numeric log base standard deviations for the log-linear slab.}
+
+\item{logscale_design}{Numeric coefficient-by-logscale sparse design matrix.}
 
 \item{logscale}{Integer or character vector of unconstrained log-scale
 coordinate indices/names. A scalar is recycled over selected coefficients.}

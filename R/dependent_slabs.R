@@ -106,6 +106,36 @@ independent_logscale_gaussian_slab <- function(log_base_scales, logscale, coef =
 }
 
 #' @rdname independent_slab_density
+#' @param log_base_sd Numeric log base standard deviations. A scalar is
+#'   recycled over the selected coefficients.
+#' @param logscale_design Numeric coefficient-by-logscale design matrix. Sparse
+#'   matrices are accepted and retained as a compact specification.
+#' @export
+loglinear_gaussian_scale_slab <- function(log_base_sd, logscale,
+                                           logscale_design, coef = NULL) {
+  validate_type(log_base_sd, type = "double")
+  if (!(is.character(logscale) || rlang::is_integerish(logscale))) {
+    cli::cli_abort("Argument {.arg logscale} must be a character or integer vector.")
+  }
+  if (!is.matrix(logscale_design) && !inherits(logscale_design, "Matrix")) {
+    cli::cli_abort("Argument {.arg logscale_design} must be a numeric matrix or sparse Matrix.")
+  }
+  if (!is.numeric(logscale_design) || any(!is.finite(logscale_design))) {
+    cli::cli_abort("Argument {.arg logscale_design} must contain finite numeric values.")
+  }
+  if (!is.character(logscale) && ncol(logscale_design) != length(logscale)) {
+    cli::cli_abort("Columns of {.arg logscale_design} must match {.arg logscale}.")
+  }
+  if (!is.character(logscale)) logscale <- as.integer(logscale)
+  .new_slab_prior(
+    "loglinear_gaussian_scale",
+    list(log_base_scales = log_base_sd, logscale = logscale,
+         logscale_design = as.matrix(logscale_design)),
+    coef = coef
+  )
+}
+
+#' @rdname independent_slab_density
 #' @param logscale_offset Fixed additive offset for a global log-scale.
 #' @export
 global_logscale_exchangeable_gaussian_slab <- function(logscale, u, v, mean = 0, logscale_offset = 0, coef = NULL) {

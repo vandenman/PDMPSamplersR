@@ -250,15 +250,7 @@ validate_pdmp_params <- function(d, flow, algorithm, T, t0 = 0.0, t_warmup = 0.0
     if (is.null(unc_names)) {
       cli::cli_abort("Character slab {.arg coef} requires unconstrained parameter names; use integer indices for custom-gradient {.fn pdmp_sample}.")
     }
-    idx <- match(coef, unc_names)
-    if (anyNA(idx)) {
-      missing <- coef[is.na(idx)]
-      cli::cli_abort(c(
-        "{.arg coef} contains names not found among unconstrained parameter names.",
-        "x" = "Unknown names: {.val {missing}}."
-      ))
-    }
-    return(idx)
+    return(.resolve_unconstrained_spec(coef, unc_names, "coef"))
   }
   idx <- as.integer(coef)
   if (any(idx < 1L) || any(idx > d)) {
@@ -277,15 +269,7 @@ validate_pdmp_params <- function(d, flow, algorithm, T, t0 = 0.0, t_warmup = 0.0
     if (is.null(unc_names)) {
       cli::cli_abort("Character slab {.arg {arg}} requires unconstrained parameter names; use integer indices for custom-gradient {.fn pdmp_sample}.")
     }
-    idx <- match(value, unc_names)
-    if (anyNA(idx)) {
-      missing <- value[is.na(idx)]
-      cli::cli_abort(c(
-        "{.arg {arg}} contains names not found among unconstrained parameter names.",
-        "x" = "Unknown names: {.val {missing}}."
-      ))
-    }
-    return(idx)
+    return(.resolve_unconstrained_spec(value, unc_names, arg))
   }
   idx <- as.integer(value)
   if (any(idx < 1L) || any(idx > d)) {
@@ -337,6 +321,24 @@ validate_pdmp_params <- function(d, flow, algorithm, T, t0 = 0.0, t_warmup = 0.0
       cli::cli_abort("Slab {.arg logscale} coordinates must be disjoint from slab {.arg coef} coordinates.")
     }
     if (any(can_stick[unique(logscale_idx)])) {
+      cli::cli_abort("Slab {.arg logscale} coordinates must be non-stickable.")
+    }
+  } else if (slab_prior$type == "loglinear_gaussian_scale") {
+    logscale_idx <- .slab_state_indices(slab_prior$logscale, d, unc_names, arg = "logscale")
+    beta_idx <- if (is.null(coef_idx)) which(can_stick) else coef_idx
+    if (!all(dim(slab_prior$logscale_design) == c(p, length(logscale_idx)))) {
+      cli::cli_abort("Argument {.arg logscale_design} must have one row per slab coefficient and one column per log-scale coordinate.")
+    }
+    if (!(length(slab_prior$log_base_scales) %in% c(1L, p))) {
+      cli::cli_abort("Argument {.arg log_base_sd} must have length 1 or match the number of slab coefficients.")
+    }
+    if (anyDuplicated(logscale_idx)) {
+      cli::cli_abort("Resolved {.arg logscale} coordinates cannot contain duplicates.")
+    }
+    if (length(intersect(beta_idx, logscale_idx)) > 0L) {
+      cli::cli_abort("Slab {.arg logscale} coordinates must be disjoint from slab {.arg coef} coordinates.")
+    }
+    if (any(can_stick[logscale_idx])) {
       cli::cli_abort("Slab {.arg logscale} coordinates must be non-stickable.")
     }
   } else if (slab_prior$type == "global_logscale_exchangeable_gaussian") {
@@ -526,6 +528,8 @@ validate_support_boundary_control <- function(support_boundary) {
 #' @param theta0 Numeric vector of length d, initial velocity (default: random based on the flow).
 #' @param hessian Function that returns the negative Hessian matrix of size d x d (default: NULL).
 #'   Only used with GridThinningStrategy to compute the Hessian-vector product.
+#' @param use_fd_hvp Logical compatibility switch selecting finite-difference
+#'   curvature when no exact Hessian-vector product is used.
 #' @param sticky Logical, whether to use sticky sampling (default: FALSE).
 #' @param can_stick Logical vector of length d, which coordinates can stick (default: all FALSE).
 #' @param model_prior Prior distribution object for model selection. Legacy
@@ -536,14 +540,9 @@ validate_support_boundary_control <- function(support_boundary) {
 #'   \code{dense_gaussian_slab()}, \code{exchangeable_gaussian_slab()},
 #'   \code{independent_slab_density()}, \code{gaussian_scale_mixture_slab()},
 #'   or \code{arbitrary_slab_boundary()}. Mutually exclusive with
-#'   \code{parameter_prior}. The custom-gradient path requires
-#'   \code{prior_grad} so the dependent target can subtract the slab component
-#'   before adding the active slab gradient.
-#' @param prior_grad Optional function computing the NEGATIVE gradient of the
-#'   slab prior component to subtract in the dependent-slab target. Do not
-#'   include nuisance-prior terms here; nuisance coordinates should remain in
-#'   the posterior gradient \code{f}. Required when \code{slab_prior} is
-#'   supplied to \code{pdmp_sample()}.
+#'   \code{parameter_prior}. The full target supplied through \code{f} must
+#'   contain the complete coherent slab represented by \code{slab_prior}; the
+#'   package replaces that slab by its active-face restriction internally.
 #' @param grid_n Integer, number of grid points for GridThinningStrategy (default: 30).
 #' @param grid_t_max Numeric, maximum time for grid in GridThinningStrategy (default: 2.0).
 #' @param post_warmup_simplify Logical. If \code{TRUE}, the grid-thinning
@@ -553,13 +552,21 @@ validate_support_boundary_control <- function(support_boundary) {
 #'   envelope. \code{"constant"} preserves the historical behavior.
 #'   \code{"flat"}, \code{"linear"}, and \code{"auto"} expose signed-rate
 #'   affine envelope machinery when supported by the chosen flow and derivative
-#'   provider. code{"shared_node"} is an experimental numerical clock using
+#'   provider. \code{"shared_node"} is an experimental numerical clock using
 #'   consecutive rate nodes and secant-disagreement inflation; it is not a
 #'   mathematically certified thinning envelope.
+#' @param grid_curvature_bound Optional nonnegative curvature bound required by
+#'   the experimental `"shared_node"` grid bound.
 #' @param linear_area_threshold Numeric gate for \code{grid_bound = "linear"}
 #'   or \code{"auto"}; affine cells are skipped when their relative area gain is
 #'   too small.
 #' @param linear_min_area_gain Numeric absolute area-gain gate for affine cells.
+#' @param lazy_low_tightness_threshold Nonnegative threshold used by lazy grid
+#'   refinement diagnostics.
+#' @param lazy_max_low_tightness_rejections Nonnegative number of consecutive
+#'   low-tightness rejections allowed before refinement.
+#' @param lazy_max_rejections Nonnegative total lazy-rejection limit; zero uses
+#'   the package default behavior.
 #' @param show_progress Logical, whether to show progress bar (default: TRUE).
 #' @param n_chains Integer, number of chains to run (default: 1).
 #' @param threaded Logical, whether to run chains in parallel (default: FALSE).
@@ -590,7 +597,7 @@ pdmp_sample <- function(f, d,
                         T = 50000, t0 = 0.0, t_warmup = 0.0,
                         flow_mean = NULL, flow_cov = NULL, c0 = 1e-2,
                         x0 = NULL, theta0 = NULL,
-                        hessian = NULL, prior_grad = NULL,
+                        hessian = NULL,
                         sticky = FALSE, can_stick = NULL, model_prior = NULL, parameter_prior = NULL,
                         slab_prior = NULL,
                         grid_n = 30, grid_t_max = 2.0,
@@ -641,24 +648,6 @@ pdmp_sample <- function(f, d,
   })
 
   # Test the hessian with a sample input
-  if (!is.null(slab_prior)) {
-    if (!rlang::is_function(prior_grad)) {
-      cli::cli_abort("Argument {.arg prior_grad} must be provided as a slab-only negative-gradient function when {.arg slab_prior} is supplied.")
-    }
-    tryCatch({
-      test_output <- prior_grad(params$x0)
-      if (!is.numeric(test_output) || length(test_output) != params$d) {
-        cli::cli_abort("{.arg prior_grad} must return a numeric vector of length {params$d}, but returned length {length(test_output)}.")
-      }
-    }, error = function(e) {
-      cli::cli_abort(c(
-        "{.arg prior_grad} failed on test input.",
-        "x" = conditionMessage(e)
-      ))
-    })
-  }
-
-  # Test the hessian with a sample input
   if (!is.null(hessian)) {
     if (!rlang::is_function(hessian)) {
       cli::cli_abort(c(
@@ -689,8 +678,6 @@ pdmp_sample <- function(f, d,
 
   JuliaCall::julia_assign("f", f)
   JuliaCall::julia_command("grad!(out, x) = out .= f(x);")
-  JuliaCall::julia_assign("prior_grad_r", prior_grad)
-  JuliaCall::julia_command("prior_grad!(out, x) = out .= prior_grad_r(x);")
   JuliaCall::julia_assign("hessian_f", hessian)
   JuliaCall::julia_assign("support_boundary_mode", support_boundary$mode)
   JuliaCall::julia_assign("support_boundary_max_bisection_steps", support_boundary$max_bisection_steps)
@@ -714,7 +701,6 @@ pdmp_sample <- function(f, d,
     sticky = sticky, can_stick = can_stick,
     model_prior = model_prior, parameter_prior = parameter_prior,
     slab_prior = slab_prior,
-    prior_grad! = prior_grad!,
     show_progress = show_progress, n_chains = n_chains, threaded = threaded,
     seed = seed,
     adaptive_scheme = adaptive_scheme,
@@ -754,16 +740,18 @@ pdmp_sample <- function(f, d,
 #' @param standata Either a character path to the Stan data file (JSON format),
 #'   or a named list that will be written to a temporary JSON file via
 #'   [write_stan_json()].
-#' @param prior_stanmodel Optional Stan model path for the base prior target
-#'   used by dependent slabs. Defaults to \code{path_to_stanmodel} when
-#'   \code{prior_standata} is supplied.
-#' @param prior_standata Optional prior-only Stan data path or named list for
-#'   the base prior target. Required when \code{slab_prior} is supplied.
+#' @param prior_stanmodel Deprecated compatibility argument. The full-gradient
+#'   dependent-slab path no longer needs a separate prior model.
+#' @param prior_standata Optional prior-only Stan data path or named list used
+#'   by \code{marked_subsampling}; it is not needed for full-gradient slabs.
 #' @param curvature_backend Character string selecting directional curvature:
 #'   `"exact"` or `"finite_difference"`. Finite differences use
 #'   shifted exact gradients but approximate their directional derivative and
 #'   therefore have step-size and truncation error. `NULL` preserves the
 #'   legacy `use_fd_hvp` mapping.
+#' @param marked_subsampling Optional exact marked custom-Stan specification
+#'   created by [stan_marked_subsampling()]. The selected Stan branch must add
+#'   the unscaled sum of the installed observations; Julia applies `N / m`.
 #' @inheritParams pdmp_sample
 #'
 #' @return A \code{pdmp_result} object. Use \code{mean}, \code{var},
@@ -773,6 +761,7 @@ pdmp_sample <- function(f, d,
 #' @export
 pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
                         prior_stanmodel = NULL, prior_standata = NULL,
+                        marked_subsampling = NULL,
                         flow = c("ZigZag", "BouncyParticle", "Boomerang", "AdaptiveBoomerang", "PreconditionedZigZag", "PreconditionedBPS"),
                         algorithm = c("ThinningStrategy", "GridThinningStrategy",
                                       "PositiveVariationGridThinningStrategy", "VectorVariationThinningStrategy",
@@ -804,6 +793,18 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
   flow <- match.arg(flow)
   algorithm <- match.arg(algorithm)
   adaptive_scheme <- match.arg(adaptive_scheme)
+  if (!is.null(marked_subsampling) &&
+      !inherits(marked_subsampling, "stan_marked_subsampling")) {
+    cli::cli_abort("Argument {.arg marked_subsampling} must be created by {.fn stan_marked_subsampling}.")
+  }
+  if (!is.null(marked_subsampling)) {
+    if (!algorithm %in% c("GridThinningStrategy", "ThinningStrategy")) {
+      cli::cli_abort("Marked custom-Stan sampling requires {.val GridThinningStrategy} or {.val ThinningStrategy}.")
+    }
+    if (is.null(prior_standata)) {
+      prior_standata <- marked_subsampling$prior_standata
+    }
+  }
 
   if (is.list(standata)) {
     standata_path <- tempfile(fileext = ".json")
@@ -828,28 +829,20 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
   .validate_dependent_slab_early(
     slab_prior, sticky, flow, algorithm, model_prior, parameter_prior
   )
-  if (!is.null(slab_prior)) {
-    cli::cli_abort("Dependent {.arg slab_prior} is temporarily gated for Stan models until target composition subtracts only the slab component or adds back nuisance priors.")
-  }
-  if (!is.null(slab_prior) && is.null(prior_standata_path)) {
-    cli::cli_abort("Argument {.arg prior_standata} is required when {.arg slab_prior} is supplied.")
-  }
   if (is.null(prior_stanmodel)) {
     prior_stanmodel <- path_to_stanmodel
   } else {
     validate_type(prior_stanmodel, type = "character", n = 1)
   }
 
+  if (!is.null(marked_subsampling) && is.null(prior_standata_path)) {
+    cli::cli_abort("Marked custom-Stan sampling requires prior-only Stan data.")
+  }
+
   if (!file.exists(path_to_stanmodel))
     cli::cli_abort("Stan model file not found: {.path {path_to_stanmodel}}")
   if (!file.exists(standata_path))
     cli::cli_abort("Stan data file not found: {.path {standata_path}}")
-  if (!is.null(slab_prior)) {
-    if (!file.exists(prior_stanmodel))
-      cli::cli_abort("Prior Stan model file not found: {.path {prior_stanmodel}}")
-    if (!file.exists(prior_standata_path))
-      cli::cli_abort("Prior Stan data file not found: {.path {prior_standata_path}}")
-  }
   if (!grepl("\\.(so|dll|dylib|stan)$", path_to_stanmodel))
     cli::cli_abort(c(
       "{.arg path_to_stanmodel} should point to a Stan model ({.file .stan}) or a compiled Stan model ({.file .so}, {.file .dll}, or {.file .dylib}).",
@@ -861,13 +854,15 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
       "i" = "Got: {.path {standata_path}}",
       "i" = "Use {.fn write_stan_json} to create a data file or pass a list directly."
     ))
-  if (!is.null(slab_prior)) {
-    if (!grepl("\\.(so|dll|dylib|stan)$", prior_stanmodel)) {
+  if (!is.null(prior_standata_path)) {
+    if (!file.exists(prior_stanmodel))
+      cli::cli_abort("Prior Stan model file not found: {.path {prior_stanmodel}}")
+    if (!file.exists(prior_standata_path))
+      cli::cli_abort("Prior Stan data file not found: {.path {prior_standata_path}}")
+    if (!grepl("\\.(so|dll|dylib|stan)$", prior_stanmodel))
       cli::cli_abort("{.arg prior_stanmodel} should point to a Stan model or compiled Stan library.")
-    }
-    if (!grepl("\\.json$", prior_standata_path)) {
-      cli::cli_abort("{.arg prior_standata} should be a JSON file path or a list that can be written to JSON.")
-    }
+    if (!grepl("\\.json$", prior_standata_path))
+      cli::cli_abort("{.arg prior_standata} should be a JSON file path or a named list.")
   }
 
   check_for_julia_setup()
@@ -875,7 +870,7 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
   # Normalize paths to absolute
   path_to_stanmodel <- normalizePath(path_to_stanmodel, mustWork = TRUE)
   standata_path     <- normalizePath(standata_path,     mustWork = TRUE)
-  if (!is.null(slab_prior)) {
+  if (!is.null(prior_standata_path)) {
     prior_stanmodel <- normalizePath(prior_stanmodel, mustWork = TRUE)
     prior_standata_path <- normalizePath(prior_standata_path, mustWork = TRUE)
   }
@@ -885,10 +880,16 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
     "PDMPSAMPLERSR_BRIDGESTAN_NATIVE",
     "PDMPSAMPLERSR_BRIDGESTAN_STANC_O1"
   ), "false")) %in% c("1", "true", "yes", "y"))
-  if (compile_control_enabled && grepl("\\.stan$", path_to_stanmodel)) {
+  if (!is.null(marked_subsampling) && grepl("\\.stan$", path_to_stanmodel)) {
+    path_to_stanmodel <- .pdmpsamplers_julia_call(
+      "_compile_model_with_header", path_to_stanmodel,
+      pdmp_subsample_hpp_path()
+    )
+    prior_stanmodel <- path_to_stanmodel
+  } else if (compile_control_enabled && grepl("\\.stan$", path_to_stanmodel)) {
     path_to_stanmodel <- .pdmpsamplers_julia_call("_compile_model", path_to_stanmodel)
   }
-  if (compile_control_enabled && !is.null(slab_prior) && grepl("\\.stan$", prior_stanmodel)) {
+  if (compile_control_enabled && !is.null(prior_standata_path) && grepl("\\.stan$", prior_stanmodel)) {
     prior_stanmodel <- .pdmpsamplers_julia_call("_compile_model", prior_stanmodel)
   }
 
@@ -913,19 +914,39 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
   JuliaCall::julia_command("_stan_model = BridgeStan.StanModel(_path_to_stan_model, _path_to_stan_data; warn=false); _pdmp_model = PDMPModel(_stan_model; hvp = _curvature_backend != \"finite_difference\");")
   d <- JuliaCall::julia_eval("_pdmp_model.d")
   unc_names <- character(0)
-  if (!is.null(slab_prior)) {
-    JuliaCall::julia_command("_prior_stan_model = BridgeStan.StanModel(_path_to_prior_stan_model, _path_to_prior_stan_data_full; warn=false); _prior_pdmp_model = PDMPModel(_prior_stan_model);")
-    d_prior <- JuliaCall::julia_eval("_prior_pdmp_model.d")
-    if (!identical(as.integer(d), as.integer(d_prior))) {
-      cli::cli_abort("Posterior and prior Stan models must have the same unconstrained dimension.")
-    }
+  if (!is.null(slab_prior) || !is.null(marked_subsampling) || is.character(can_stick)) {
     unc_names <- JuliaCall::julia_eval("BridgeStan.param_unc_names(_stan_model)")
-    prior_unc_names <- JuliaCall::julia_eval("BridgeStan.param_unc_names(_prior_stan_model)")
+  }
+  if (is.character(can_stick)) {
+    stick_idx <- .resolve_unconstrained_spec(can_stick, unc_names, "can_stick")
+    can_stick <- rep(FALSE, d)
+    can_stick[stick_idx] <- TRUE
+  }
+  if (!is.null(marked_subsampling)) {
+    JuliaCall::julia_command("_marked_prior_model = BridgeStan.StanModel(_path_to_stan_model, _path_to_prior_stan_data_full; warn=false);")
+    prior_unc_names <- JuliaCall::julia_eval("BridgeStan.param_unc_names(_marked_prior_model)")
     if (!identical(unc_names, prior_unc_names)) {
-      cli::cli_abort("Posterior and prior Stan models must have identical unconstrained parameter names.")
+      cli::cli_abort("Full and prior-only Stan data must yield identical unconstrained parameter names and ordering.")
     }
-  } else {
-    JuliaCall::julia_command("_prior_pdmp_model = nothing;")
+    envelope_spec <- marked_subsampling$residual_envelope
+    if (inherits(envelope_spec, "omrf_residual_envelope")) {
+      threshold_idx <- .resolve_unconstrained_spec(
+        envelope_spec$thresholds, unc_names, "thresholds")
+      interaction_idx <- .resolve_unconstrained_spec(
+        envelope_spec$interactions, unc_names, "interactions")
+      expected_thresholds <- sum(envelope_spec$seen - 1L)
+      expected_interactions <- ncol(envelope_spec$X) *
+        (ncol(envelope_spec$X) - 1L) / 2L
+      if (length(threshold_idx) != expected_thresholds) {
+        cli::cli_abort("Resolved OMRF threshold block has {length(threshold_idx)} coordinates; expected {expected_thresholds}.")
+      }
+      if (length(interaction_idx) != expected_interactions) {
+        cli::cli_abort("Resolved OMRF interaction block has {length(interaction_idx)} coordinates; expected {expected_interactions}.")
+      }
+      if (length(intersect(threshold_idx, interaction_idx))) {
+        cli::cli_abort("Resolved OMRF threshold and interaction blocks overlap.")
+      }
+    }
   }
 
   # Use common validation function
@@ -954,6 +975,7 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
   for (nm in names(params))
     JuliaCall::julia_assign(nm, params[[nm]])
   JuliaCall::julia_assign("_unc_names", unc_names)
+  JuliaCall::julia_assign("_marked_subsampling", marked_subsampling)
   JuliaCall::julia_assign("support_boundary_mode", support_boundary$mode)
   JuliaCall::julia_assign("support_boundary_max_bisection_steps", support_boundary$max_bisection_steps)
   JuliaCall::julia_assign("support_boundary_time_rtol", support_boundary$time_rtol)
@@ -963,7 +985,8 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
   JuliaCall::julia_assign("support_boundary_refresh_probe_time", support_boundary$refresh_probe_time)
   JuliaCall::julia_assign("support_boundary_min_safe_time", support_boundary$min_safe_time)
 
-  result <- .pdmpsamplers_julia_eval("PDMPSamplersRBridge.r_pdmp_stan(
+  if (is.null(marked_subsampling)) {
+    result <- .pdmpsamplers_julia_eval("PDMPSamplersRBridge.r_pdmp_stan(
       _pdmp_model, x0, flow, algorithm, flow_mean, flow_cov;
       c0 = c0, grid_n = grid_n, grid_t_max = grid_t_max,
       curvature_backend = _curvature_backend,
@@ -979,7 +1002,6 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
       sticky = sticky, can_stick = can_stick,
       model_prior = model_prior, parameter_prior = parameter_prior,
       slab_prior = slab_prior,
-      prior_model = _prior_pdmp_model,
       unc_names = _unc_names,
       show_progress = show_progress, n_chains = n_chains, threaded = threaded,
       seed = seed,
@@ -993,13 +1015,36 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
       support_boundary_refresh_probe_time = support_boundary_refresh_probe_time,
       support_boundary_min_safe_time = support_boundary_min_safe_time
     );")
+  } else {
+    result <- .pdmpsamplers_julia_eval("PDMPSamplersRBridge.r_pdmp_stan_marked(
+      _path_to_stan_model, _path_to_stan_data, _path_to_prior_stan_data_full,
+      _marked_subsampling, x0, flow, algorithm, flow_mean, flow_cov;
+      c0 = c0, grid_n = grid_n, grid_t_max = grid_t_max,
+      grid_bound = grid_bound,
+      grid_curvature_bound = grid_curvature_bound,
+      linear_area_threshold = linear_area_threshold,
+      linear_min_area_gain = linear_min_area_gain,
+      t0 = t0, T = T, t_warmup = t_warmup,
+      sticky = sticky, can_stick = can_stick,
+      model_prior = model_prior, parameter_prior = parameter_prior,
+      slab_prior = slab_prior,
+      show_progress = show_progress, n_chains = n_chains,
+      threaded = threaded, seed = seed,
+      adaptive_scheme = adaptive_scheme
+    );")
+  }
   if (is.environment(result)) result <- as.list(result)
+  marked_context_counters <- result$marked_context_counters
   result <- new_pdmp_result(
     chains   = result$chains,
     stats    = result$stats,
     d        = result$d,
     n_chains = result$n_chains
   )
+  if (!is.null(marked_subsampling)) {
+    attr(result, "marked_subsampling") <- TRUE
+    attr(result, "marked_context_counters") <- marked_context_counters
+  }
   if (materialize) result <- .materialize(result)
   result
 }

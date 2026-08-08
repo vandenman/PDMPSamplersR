@@ -164,7 +164,6 @@ test_that("callback Gaussian slabs require active negative gradient for sampling
     pdmp_sample(
       function(x) x,
       d = 2,
-      prior_grad = function(x) x,
       flow = "ZigZag",
       algorithm = "GridThinningStrategy",
       sticky = TRUE,
@@ -176,18 +175,8 @@ test_that("callback Gaussian slabs require active negative gradient for sampling
   )
 })
 
-test_that("public custom-gradient sampling requires prior_grad for slab_prior", {
-  expect_error(
-    pdmp_sample(
-      function(x) x,
-      d = 2,
-      algorithm = "GridThinningStrategy",
-      sticky = TRUE,
-      model_prior = bernoulli(0.5),
-      slab_prior = dense_gaussian_slab(c(0, 0), diag(2), coef = 1:2)
-    ),
-    "prior_grad"
-  )
+test_that("public custom-gradient dependent slab has one full-target contract", {
+  expect_false("prior_grad" %in% names(formals(pdmp_sample)))
 })
 
 test_that("public custom-gradient dependent slab path can run a tiny chain", {
@@ -197,7 +186,6 @@ test_that("public custom-gradient dependent slab path can run a tiny chain", {
   result <- pdmp_sample(
     function(x) x,
     d = 2,
-    prior_grad = function(x) x,
     flow = "ZigZag",
     algorithm = "GridThinningStrategy",
     T = 1,
@@ -211,7 +199,7 @@ test_that("public custom-gradient dependent slab path can run a tiny chain", {
   expect_s3_class(result, "pdmp_result")
 })
 
-test_that("Stan-backed dependent slabs are gated pending target composition contract", {
+test_that("Stan-backed dependent slabs validate files before Julia", {
   expect_error(
     pdmp_sample_from_stanmodel(
       "missing.stan", "missing.json",
@@ -220,7 +208,7 @@ test_that("Stan-backed dependent slabs are gated pending target composition cont
       model_prior = bernoulli(0.5),
       slab_prior = dense_gaussian_slab(0, matrix(1, 1, 1), coef = 1)
     ),
-    "target composition|temporarily gated"
+    "not found"
   )
 })
 

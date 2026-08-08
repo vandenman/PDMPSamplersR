@@ -185,7 +185,6 @@ brm_pdmp <- function(
     if (!flow %in% c("ZigZag", "BouncyParticle") || algorithm != "GridThinningStrategy") {
       cli::cli_abort("Dependent {.arg slab_prior} sticky sampling currently requires ZigZag or BouncyParticle with {.val GridThinningStrategy}.")
     }
-    cli::cli_abort("Dependent {.arg slab_prior} is temporarily gated for {.fn brm_pdmp} until target composition subtracts only the slab component or adds back nuisance priors.")
   }
   if (!is.null(seed)) {
     if (!rlang::is_integerish(seed, n = 1)) {
@@ -531,7 +530,6 @@ brm_pdmp <- function(
       model_prior = sticky_args$model_prior,
       parameter_prior = sticky_args$parameter_prior,
       slab_prior = sticky_args$slab_prior,
-      prior_data_file = if (!is.null(sticky_args$slab_prior)) normalizePath(data_prior_file, mustWork = TRUE) else NULL,
       unc_names = sticky_args$unc_names
     )
   }

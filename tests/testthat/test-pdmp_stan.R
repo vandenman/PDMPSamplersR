@@ -45,13 +45,17 @@ test_that("pdmp_sample_from_stanmodel validates file existence", {
   expect_error(pdmp_sample_from_stanmodel("nonexistent.so",   "data.json"), "not found")
 })
 
-test_that("pdmp_sample_from_stanmodel gates dependent slabs pending target composition", {
+test_that("pdmp_sample_from_stanmodel no longer gates dependent slabs", {
   model_file <- tempfile(fileext = ".stan")
   data_file <- tempfile(fileext = ".json")
   file.create(model_file)
   jsonlite::write_json(list(N = 1), data_file, auto_unbox = TRUE)
   on.exit({unlink(model_file); unlink(data_file)}, add = TRUE)
 
+  testthat::local_mocked_bindings(
+    check_for_julia_setup = function() stop("SENTINEL_SETUP", call. = FALSE),
+    .package = "PDMPSamplersR"
+  )
   expect_error(
     pdmp_sample_from_stanmodel(
       model_file,
@@ -62,7 +66,7 @@ test_that("pdmp_sample_from_stanmodel gates dependent slabs pending target compo
       model_prior = bernoulli(0.5),
       slab_prior = dense_gaussian_slab(0, matrix(1, 1, 1), coef = 1)
     ),
-    "target composition|temporarily gated"
+    "SENTINEL_SETUP"
   )
 })
 
@@ -128,8 +132,9 @@ test_that("pdmp_sample_from_stanmodel rejects wrong data extension", {
   expect_error(pdmp_sample_from_stanmodel(model_file, wrong_data), "JSON")
 })
 
-test_that("pdmp_sample_from_stanmodel gates one-dimensional named independent slab target", {
+test_that("pdmp_sample_from_stanmodel runs one-dimensional named independent slab target", {
   skip_on_cran()
+  skip_if_no_pdmp_julia_backend()
 
   stan_file <- tempfile(fileext = ".stan")
   data_file <- tempfile(fileext = ".json")
@@ -151,8 +156,7 @@ test_that("pdmp_sample_from_stanmodel gates one-dimensional named independent sl
   write_stan_json(list(prior_only = 0L), data_file)
   write_stan_json(list(prior_only = 1L), prior_data_file)
 
-  expect_error(
-    pdmp_sample_from_stanmodel(
+  result <- pdmp_sample_from_stanmodel(
       stan_file,
       data_file,
       prior_standata = prior_data_file,
@@ -169,9 +173,8 @@ test_that("pdmp_sample_from_stanmodel gates one-dimensional named independent sl
       slab_prior = independent_slab_density(1, coef = "beta"),
       show_progress = FALSE,
       materialize = FALSE
-    ),
-    "target composition|temporarily gated"
-  )
+    )
+  expect_s3_class(result, "pdmp_result")
 })
 
 test_that("pdmp_sample_from_stanmodel runs with mvnormal Stan model", {

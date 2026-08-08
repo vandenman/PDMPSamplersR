@@ -21,7 +21,6 @@ pdmp_sample(
   x0 = NULL,
   theta0 = NULL,
   hessian = NULL,
-  prior_grad = NULL,
   sticky = FALSE,
   can_stick = NULL,
   model_prior = NULL,
@@ -86,11 +85,8 @@ or "RootsPoissonStrategy".}
 \item{hessian}{Function that returns the negative Hessian matrix of size d x d (default: NULL).
 Only used with GridThinningStrategy to compute the Hessian-vector product.}
 
-\item{prior_grad}{Optional function computing the NEGATIVE gradient of the
-slab prior component to subtract in the dependent-slab target. Do not
-include nuisance-prior terms here; nuisance coordinates should remain in
-the posterior gradient \code{f}. Required when \code{slab_prior} is
-supplied to \code{pdmp_sample()}.}
+\item{use_fd_hvp}{Logical compatibility switch selecting finite-difference
+curvature when no exact Hessian-vector product is used.}
 
 \item{sticky}{Logical, whether to use sticky sampling (default: FALSE).}
 
@@ -106,9 +102,9 @@ Dependent-slab sampling also accepts \code{exchangeable_model_size_prior()}.}
 \code{dense_gaussian_slab()}, \code{exchangeable_gaussian_slab()},
 \code{independent_slab_density()}, \code{gaussian_scale_mixture_slab()},
 or \code{arbitrary_slab_boundary()}. Mutually exclusive with
-\code{parameter_prior}. The custom-gradient path requires
-\code{prior_grad} so the dependent target can subtract the slab component
-before adding the active slab gradient.}
+\code{parameter_prior}. The full target supplied through \code{f} must
+contain the complete coherent slab; the package replaces it by the active
+slab internally.}
 
 \item{grid_n}{Integer, number of grid points for GridThinningStrategy (default: 30).}
 
@@ -122,15 +118,27 @@ gradient calls during the main sampling phase.}
 envelope. \code{"constant"} preserves the historical behavior.
 \code{"flat"}, \code{"linear"}, and \code{"auto"} expose signed-rate
 affine envelope machinery when supported by the chosen flow and derivative
-provider. code{"shared_node"} is an experimental numerical clock using
+provider. \code{"shared_node"} is an experimental numerical clock using
 consecutive rate nodes and secant-disagreement inflation; it is not a
 mathematically certified thinning envelope.}
+
+\item{grid_curvature_bound}{Optional nonnegative curvature bound required by
+the experimental \code{"shared_node"} grid bound.}
 
 \item{linear_area_threshold}{Numeric gate for \code{grid_bound = "linear"}
 or \code{"auto"}; affine cells are skipped when their relative area gain is
 too small.}
 
 \item{linear_min_area_gain}{Numeric absolute area-gain gate for affine cells.}
+
+\item{lazy_low_tightness_threshold}{Nonnegative threshold used by lazy grid
+refinement diagnostics.}
+
+\item{lazy_max_low_tightness_rejections}{Nonnegative number of consecutive
+low-tightness rejections allowed before refinement.}
+
+\item{lazy_max_rejections}{Nonnegative total lazy-rejection limit; zero uses
+the package default behavior.}
 
 \item{show_progress}{Logical, whether to show progress bar (default: TRUE).}
 

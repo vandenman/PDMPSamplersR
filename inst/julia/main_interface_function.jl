@@ -190,6 +190,23 @@ function _slab_type(slab_prior)
     return String(t)
 end
 
+
+function _resolve_unc_spec(value, unc_names::AbstractVector{<:AbstractString}, label)
+    values = value isa AbstractString ? [String(value)] : String.(value)
+    names = String.(unc_names)
+    idx = Int[]
+    for requested in values
+        exact = findall(==(requested), names)
+        matches = isempty(exact) ? findall(name ->
+            startswith(name, requested * ".") || startswith(name, requested * "["), names) : exact
+        isempty(matches) && throw(ArgumentError(
+            "$label name or block prefix $requested was not found among unconstrained parameter names"))
+        append!(idx, matches)
+    end
+    allunique(idx) || throw(ArgumentError("resolved $label coordinates contain duplicates"))
+    return idx
+end
+
 function _coef_indices(slab_prior, unc_names::AbstractVector{<:AbstractString},
         can_stick::AbstractVector{Bool}, d::Integer)
     coef = _rget(slab_prior, :coef)
@@ -200,19 +217,13 @@ function _coef_indices(slab_prior, unc_names::AbstractVector{<:AbstractString},
     end
     if coef isa AbstractString
         isempty(unc_names) && throw(ArgumentError("character slab coef requires unconstrained parameter names"))
-        pos = findfirst(==(String(coef)), String.(unc_names))
-        isnothing(pos) && throw(ArgumentError("slab coef name $(coef) was not found among unconstrained parameter names"))
-        !can_stick[pos] && throw(ArgumentError("explicit slab coef must be a subset of can_stick coordinates"))
-        return [Int(pos)]
+        idx = _resolve_unc_spec(coef, unc_names, "slab coef")
+        any(i -> !can_stick[i], idx) && throw(ArgumentError("explicit slab coef must be a subset of can_stick coordinates"))
+        return idx
     end
     if coef isa AbstractVector{<:AbstractString}
         isempty(unc_names) && throw(ArgumentError("character slab coef requires unconstrained parameter names"))
-        idx = Int[]
-        for name in coef
-            pos = findfirst(==(String(name)), String.(unc_names))
-            isnothing(pos) && throw(ArgumentError("slab coef name $(name) was not found among unconstrained parameter names"))
-            push!(idx, pos)
-        end
+        idx = _resolve_unc_spec(coef, unc_names, "slab coef")
         any(i -> !can_stick[i], idx) &&
             throw(ArgumentError("explicit slab coef must be a subset of can_stick coordinates"))
         return idx
@@ -227,18 +238,10 @@ end
 function _state_indices(value, unc_names::AbstractVector{<:AbstractString}, d::Integer, label::AbstractString)
     if value isa AbstractString
         isempty(unc_names) && throw(ArgumentError("character $label requires unconstrained parameter names"))
-        pos = findfirst(==(String(value)), String.(unc_names))
-        isnothing(pos) && throw(ArgumentError("$label name $(value) was not found among unconstrained parameter names"))
-        return [Int(pos)]
+        return _resolve_unc_spec(value, unc_names, label)
     elseif value isa AbstractVector{<:AbstractString}
         isempty(unc_names) && throw(ArgumentError("character $label requires unconstrained parameter names"))
-        idx = Int[]
-        for name in value
-            pos = findfirst(==(String(name)), String.(unc_names))
-            isnothing(pos) && throw(ArgumentError("$label name $(name) was not found among unconstrained parameter names"))
-            push!(idx, pos)
-        end
-        return idx
+        return _resolve_unc_spec(value, unc_names, label)
     end
     idx = value isa Integer ? [Int(value)] : Int.(value)
     any(i -> i < 1 || i > d, idx) && throw(ArgumentError("$label indices must lie in 1:d"))
@@ -306,6 +309,20 @@ function build_slab_provider(slab_prior, unc_names::AbstractVector{<:AbstractStr
         any(i -> can_stick[i], unique(logscale_idx)) &&
             throw(ArgumentError("independent_logscale_gaussian_slab logscale coordinates must be non-stickable"))
         return IndependentZeroMeanLogscaleGaussianSlab(beta_idx, logscale_idx, log_base_scales)
+    elseif t == "loglinear_gaussian_scale"
+        log_base_scales = _as_float_vector(_rget(slab_prior, :log_base_scales))
+        length(log_base_scales) == 1 &&
+            (log_base_scales = fill(log_base_scales[1], length(beta_idx)))
+        logscale_idx = _state_indices(_rget(slab_prior, :logscale), unc_names, d, "logscale")
+        design = _as_float_matrix(_rget(slab_prior, :logscale_design))
+        size(design) == (length(beta_idx), length(logscale_idx)) ||
+            throw(DimensionMismatch("logscale_design must have size (beta dimension, logscale dimension)"))
+        isempty(intersect(beta_idx, logscale_idx)) || throw(ArgumentError(
+            "loglinear_gaussian_scale_slab logscale coordinates must be disjoint from slab coef coordinates"))
+        any(i -> can_stick[i], logscale_idx) && throw(ArgumentError(
+            "loglinear_gaussian_scale_slab logscale coordinates must be non-stickable"))
+        return LogLinearGaussianScaleSlab(beta_idx, logscale_idx,
+            log_base_scales, design)
     elseif t == "global_logscale_exchangeable_gaussian"
         logscale_idx = _state_indices(_rget(slab_prior, :logscale), unc_names, d, "logscale")
         length(logscale_idx) == 1 ||
@@ -361,11 +378,6 @@ function wrap_dependent_sticky(alg::PDMPSamplers.PoissonTimeStrategy, sticky::Bo
     return AggregateSticky(alg, clock, BitVector(can_stick))
 end
 
-function _reject_ungated_slab_prior(slab_prior, caller::AbstractString)
-    isnothing(slab_prior) && return nothing
-    throw(ArgumentError("Dependent slab_prior is not yet supported for $(caller); target composition must subtract only the slab component or add back nuisance priors"))
-end
-
 function _validate_sampling_slab_prior(slab_prior)
     isnothing(slab_prior) && return nothing
     if _slab_type(slab_prior) == "callback_gaussian" && isnothing(_rget(slab_prior, :active_prior_neggrad))
@@ -376,18 +388,15 @@ end
 
 function _build_dependent_slab_model(
         posterior_model::PDMPModel,
-        prior_model::PDMPModel,
         model_prior,
         slab_prior,
         can_stick,
         unc_names::AbstractVector{<:AbstractString}=String[])
-    posterior_model.d == prior_model.d ||
-        throw(DimensionMismatch("posterior and prior models must have the same unconstrained dimension"))
     _validate_sampling_slab_prior(slab_prior)
     d = posterior_model.d
     provider = build_slab_provider(slab_prior, unc_names, can_stick, d)
     odds = build_model_prior_odds(model_prior, PDMPSamplers.beta_indices(provider), d)
-    target = DependentSlabTarget(d, posterior_model.grad, prior_model.grad, provider, odds)
+    target = DependentSlabTarget(d, posterior_model.grad, provider, odds)
     return PDMPModel(target)
 end
 
@@ -448,6 +457,23 @@ function _compile_model(path_to_stan_model::String)
         push!(make_args, "CXXFLAGS+=-march=native")
     source = _compile_env_enabled("PDMPSAMPLERSR_BRIDGESTAN_CACHE") ?
         _cached_stan_source(path_to_stan_model, stanc_args, make_args) : path_to_stan_model
+    library = replace(source, r"\.stan$" => "_model.$(Libdl.dlext)")
+    isfile(library) && return library
+    return BridgeStan.compile_model(source; stanc_args, make_args)
+end
+
+function _compile_model_with_header(path_to_stan_model::String, hpp_path::String)
+    !endswith(path_to_stan_model, ".stan") && return path_to_stan_model
+    header = replace(abspath(normpath(hpp_path)), "\\" => "/")
+    stanc_args = ["--allow-undefined"]
+    _compile_env_enabled("PDMPSAMPLERSR_BRIDGESTAN_STANC_O1") &&
+        push!(stanc_args, "--O1")
+    make_args = ["USER_HEADER=$(header)"]
+    _compile_env_enabled("PDMPSAMPLERSR_BRIDGESTAN_NATIVE") &&
+        push!(make_args, "CXXFLAGS+=-march=native")
+    source = _compile_env_enabled("PDMPSAMPLERSR_BRIDGESTAN_CACHE") ?
+        _cached_stan_source(path_to_stan_model, stanc_args, make_args) :
+        path_to_stan_model
     library = replace(source, r"\.stan$" => "_model.$(Libdl.dlext)")
     isfile(library) && return library
     return BridgeStan.compile_model(source; stanc_args, make_args)
@@ -894,9 +920,6 @@ function r_pdmp_stan(
         kwargs...
     )
 
-    if haskey(kwargs, :slab_prior) && !isnothing(kwargs[:slab_prior])
-        _reject_ungated_slab_prior(kwargs[:slab_prior], "r_pdmp_stan")
-    end
     use_fd_hvp = Bool(get(kwargs, :use_fd_hvp, false))
     model = PDMPModel(path_to_stan_model, path_to_stan_data; hvp=!use_fd_hvp)
     return r_pdmp_stan(model, x0, flow_type, algorithm_type, flow_mean, flow_cov; kwargs...)
@@ -930,7 +953,6 @@ function r_pdmp_stan(
         model_prior = nothing,
         parameter_prior = nothing,
         slab_prior = nothing,
-        prior_model::Union{PDMPModel, Nothing} = nothing,
         unc_names = String[],
         show_progress::Bool = true,
         n_chains::Int = 1,
@@ -954,13 +976,10 @@ function r_pdmp_stan(
     can_stick_vec = _as_bool_vector(can_stick)
     parameter_prior_vec = isnothing(parameter_prior) ? nothing : _as_float_vector(parameter_prior)
     unc_names_vec = _as_string_vector(unc_names)
-    _reject_ungated_slab_prior(slab_prior, "r_pdmp_stan")
-
     sampling_model = if isnothing(slab_prior)
         model
     else
-        isnothing(prior_model) && throw(ArgumentError("r_pdmp_stan requires prior_model when slab_prior is supplied"))
-        _build_dependent_slab_model(model, prior_model, model_prior, slab_prior, can_stick_vec, unc_names_vec)
+        _build_dependent_slab_model(model, model_prior, slab_prior, can_stick_vec, unc_names_vec)
     end
 
     prec = _to_precision(flow_cov_mat, d)
@@ -1020,7 +1039,6 @@ function r_pdmp_custom(
         model_prior = nothing,
         parameter_prior = nothing,
         slab_prior = nothing,
-        prior_grad! = nothing,
         show_progress::Bool = true,
         n_chains::Int = 1,
         threaded::Bool = false,
@@ -1062,11 +1080,10 @@ function r_pdmp_custom(
     model = if isnothing(slab_prior)
         PDMPModel(d, FullGradient(grad!), hvp)
     else
-        isnothing(prior_grad!) && throw(ArgumentError("r_pdmp_custom requires slab-only prior_grad! when slab_prior is supplied"))
         _validate_sampling_slab_prior(slab_prior)
         provider = build_slab_provider(slab_prior, String[], can_stick_vec, d)
         odds = build_model_prior_odds(model_prior, PDMPSamplers.beta_indices(provider), d)
-        target = DependentSlabTarget(d, grad!, prior_grad!, provider, odds)
+        target = DependentSlabTarget(d, grad!, provider, odds)
         PDMPModel(target)
     end
 
@@ -1195,6 +1212,7 @@ function r_constrain_and_write_csv(sm::BridgeStan.StanModel, draws_unc::Matrix{F
 end
 
 include(joinpath(@__DIR__, "marked_family_provider.jl"))
+include(joinpath(@__DIR__, "marked_stan_provider.jl"))
 
 function _run_marked_brms_subsampled(lib_path_std::String,
         data_full_file::String, data_prior_file::String,
@@ -1410,12 +1428,9 @@ function r_pdmp_stan_for_brms(
         model_prior = nothing,
         parameter_prior = nothing,
         slab_prior = nothing,
-        prior_model::Union{PDMPModel, Nothing} = nothing,
-        prior_data_file::Union{String, Nothing} = nothing,
         unc_names = String[]
     )
     sm = BridgeStan.StanModel(path_to_stan_model, path_to_stan_data; warn=false)
-    _reject_ungated_slab_prior(slab_prior, "r_pdmp_stan_for_brms")
     posterior_model = PDMPModel(sm; hvp = isnothing(slab_prior) && !use_fd_hvp)
     can_stick_vec = _as_bool_vector(can_stick)
     parameter_prior_vec = isnothing(parameter_prior) ? nothing : _as_float_vector(parameter_prior)
@@ -1423,14 +1438,8 @@ function r_pdmp_stan_for_brms(
     model = if isnothing(slab_prior)
         posterior_model
     else
-        base_prior_model = if isnothing(prior_model)
-            isnothing(prior_data_file) &&
-                throw(ArgumentError("r_pdmp_stan_for_brms requires prior_model or prior_data_file when slab_prior is supplied"))
-            PDMPModel(BridgeStan.StanModel(path_to_stan_model, prior_data_file; warn=false); hvp=false)
-        else
-            prior_model
-        end
-        _build_dependent_slab_model(posterior_model, base_prior_model, model_prior, slab_prior, can_stick_vec, unc_names_vec)
+        _build_dependent_slab_model(posterior_model, model_prior, slab_prior,
+            can_stick_vec, unc_names_vec)
     end
     d = model.d
 

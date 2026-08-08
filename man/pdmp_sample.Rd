@@ -85,9 +85,6 @@ or "RootsPoissonStrategy".}
 \item{hessian}{Function that returns the negative Hessian matrix of size d x d (default: NULL).
 Only used with GridThinningStrategy to compute the Hessian-vector product.}
 
-\item{use_fd_hvp}{Logical compatibility switch selecting finite-difference
-curvature when no exact Hessian-vector product is used.}
-
 \item{sticky}{Logical, whether to use sticky sampling (default: FALSE).}
 
 \item{can_stick}{Logical vector of length d, which coordinates can stick (default: all FALSE).}
@@ -103,12 +100,15 @@ Dependent-slab sampling also accepts \code{exchangeable_model_size_prior()}.}
 \code{independent_slab_density()}, \code{gaussian_scale_mixture_slab()},
 or \code{arbitrary_slab_boundary()}. Mutually exclusive with
 \code{parameter_prior}. The full target supplied through \code{f} must
-contain the complete coherent slab; the package replaces it by the active
-slab internally.}
+contain the complete coherent slab represented by \code{slab_prior}; the
+package replaces that slab by its active-face restriction internally.}
 
 \item{grid_n}{Integer, number of grid points for GridThinningStrategy (default: 30).}
 
 \item{grid_t_max}{Numeric, maximum time for grid in GridThinningStrategy (default: 2.0).}
+
+\item{use_fd_hvp}{Logical compatibility switch selecting finite-difference
+curvature when no exact Hessian-vector product is used.}
 
 \item{post_warmup_simplify}{Logical. If \code{TRUE}, the grid-thinning
 strategy may switch to a constant bound after warmup, reducing
@@ -123,7 +123,7 @@ consecutive rate nodes and secant-disagreement inflation; it is not a
 mathematically certified thinning envelope.}
 
 \item{grid_curvature_bound}{Optional nonnegative curvature bound required by
-the experimental \code{"shared_node"} grid bound.}
+the experimental `"shared_node"` grid bound.}
 
 \item{linear_area_threshold}{Numeric gate for \code{grid_bound = "linear"}
 or \code{"auto"}; affine cells are skipped when their relative area gain is

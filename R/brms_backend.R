@@ -90,7 +90,7 @@
 #'   [exchangeable_model_size_prior()] is reserved for the pending dependent
 #'   slab path.
 #' @param kappa Optional numeric vector of slab densities at zero for each
-#'   stickable coordinate (κ in the sticky PDMP literature). If omitted,
+#'   stickable coordinate (kappa in the sticky PDMP literature). If omitted,
 #'   derived automatically from the brms prior specification (only
 #'   `normal(0, s)` and `student_t(df, 0, s)` are supported for automatic
 #'   derivation).

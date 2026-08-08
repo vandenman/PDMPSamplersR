@@ -120,17 +120,38 @@ loglinear_gaussian_scale_slab <- function(log_base_sd, logscale,
   if (!is.matrix(logscale_design) && !inherits(logscale_design, "Matrix")) {
     cli::cli_abort("Argument {.arg logscale_design} must be a numeric matrix or sparse Matrix.")
   }
-  if (!is.numeric(logscale_design) || any(!is.finite(logscale_design))) {
+  design_values <- if (inherits(logscale_design, "sparseMatrix")) {
+    methods::slot(logscale_design, "x")
+  } else if (inherits(logscale_design, "Matrix")) {
+    as.vector(logscale_design)
+  } else {
+    logscale_design
+  }
+  if (!is.numeric(design_values) || any(!is.finite(design_values))) {
     cli::cli_abort("Argument {.arg logscale_design} must contain finite numeric values.")
   }
   if (!is.character(logscale) && ncol(logscale_design) != length(logscale)) {
     cli::cli_abort("Columns of {.arg logscale_design} must match {.arg logscale}.")
   }
   if (!is.character(logscale)) logscale <- as.integer(logscale)
+  sparse_design <- NULL
+  if (inherits(logscale_design, "sparseMatrix")) {
+    column_design <- methods::as(
+      methods::as(logscale_design, "generalMatrix"), "CsparseMatrix"
+    )
+    sparse_design <- list(
+      nrow = nrow(column_design),
+      ncol = ncol(column_design),
+      colptr = methods::slot(column_design, "p") + 1L,
+      rowval = methods::slot(column_design, "i") + 1L,
+      nzval = as.numeric(methods::slot(column_design, "x"))
+    )
+  }
   .new_slab_prior(
     "loglinear_gaussian_scale",
     list(log_base_scales = log_base_sd, logscale = logscale,
-         logscale_design = as.matrix(logscale_design)),
+         logscale_design = logscale_design,
+         logscale_design_sparse = sparse_design),
     coef = coef
   )
 }

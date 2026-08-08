@@ -164,7 +164,7 @@ the prior on model space for the currently supported legacy sticky path.
 slab path.}
 
 \item{kappa}{Optional numeric vector of slab densities at zero for each
-stickable coordinate (κ in the sticky PDMP literature). If omitted,
+stickable coordinate (kappa in the sticky PDMP literature). If omitted,
 derived automatically from the brms prior specification (only
 `normal(0, s)` and `student_t(df, 0, s)` are supported for automatic
 derivation).}

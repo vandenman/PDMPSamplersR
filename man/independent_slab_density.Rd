@@ -21,7 +21,12 @@ gaussian_scale_mixture_slab(mean_cov, active_prior_neggrad = NULL, coef = NULL)
 
 independent_logscale_gaussian_slab(log_base_scales, logscale, coef = NULL)
 
-loglinear_gaussian_scale_slab(log_base_sd, logscale, logscale_design, coef = NULL)
+loglinear_gaussian_scale_slab(
+  log_base_sd,
+  logscale,
+  logscale_design,
+  coef = NULL
+)
 
 global_logscale_exchangeable_gaussian_slab(
   logscale,
@@ -67,12 +72,14 @@ Gaussian slab is used for dependent-slab sampling.}
 \item{log_base_scales}{Numeric log base standard deviations for structured
 independent log-scale Gaussian slabs.}
 
-\item{log_base_sd}{Numeric log base standard deviations for the log-linear slab.}
-
-\item{logscale_design}{Numeric coefficient-by-logscale sparse design matrix.}
-
 \item{logscale}{Integer or character vector of unconstrained log-scale
 coordinate indices/names. A scalar is recycled over selected coefficients.}
+
+\item{log_base_sd}{Numeric log base standard deviations. A scalar is
+recycled over the selected coefficients.}
+
+\item{logscale_design}{Numeric coefficient-by-logscale design matrix. Sparse
+matrices are accepted and retained as a compact specification.}
 
 \item{logscale_offset}{Fixed additive offset for a global log-scale.}
 

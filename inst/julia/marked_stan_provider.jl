@@ -8,8 +8,9 @@ mutable struct StanMarkedCallCounts
     selected_gradient::Int
     persons_evaluated::Int
     model_constructions::Int
+    data_constructions::Int
 end
-StanMarkedCallCounts() = StanMarkedCallCounts(0, 0, 0, 0, 3)
+StanMarkedCallCounts() = StanMarkedCallCounts(0, 0, 0, 0, 0, 0)
 
 mutable struct StanMarkedContext
     full::PDMPModel
@@ -145,9 +146,16 @@ end
 
 function _new_stan_marked_context(lib_path::String, full_data::String,
         prior_data::String, m::Int)
-    sm_full = BridgeStan.StanModel(lib_path, full_data; warn=false)
-    sm_prior = BridgeStan.StanModel(lib_path, prior_data; warn=false)
-    sm_selected = BridgeStan.StanModel(lib_path, full_data; warn=false)
+    counts = StanMarkedCallCounts()
+    construct = function(data_path)
+        model = BridgeStan.StanModel(lib_path, data_path; warn=false)
+        counts.model_constructions += 1
+        counts.data_constructions += 1
+        return model
+    end
+    sm_full = construct(full_data)
+    sm_prior = construct(prior_data)
+    sm_selected = construct(full_data)
     names = BridgeStan.param_unc_names(sm_full)
     BridgeStan.param_unc_names(sm_prior) == names || throw(ArgumentError(
         "full and prior-only data must produce identical unconstrained parameter names"))
@@ -156,7 +164,7 @@ function _new_stan_marked_context(lib_path::String, full_data::String,
     set_fn, clear_fn = _resolve_subset_hooks(sm_selected)
     ctx = StanMarkedContext(PDMPModel(sm_full), PDMPModel(sm_prior),
         PDMPModel(sm_selected), set_fn, clear_fn, Vector{Int32}(undef, m), m,
-        StanMarkedCallCounts())
+        counts)
     _clear_stan_subset!(ctx)
     return ctx, String.(names)
 end
@@ -183,6 +191,84 @@ function _build_stan_marked_model(lib_path, full_data, prior_data,
     end
     cv = MarkedControlVariate(deterministic, oracle, envelope, anchor, m)
     return PDMPModel(d, cv), ctx, unc_names
+end
+
+function r_stan_marked_diagnostics(lib_path::String, full_data::String,
+        prior_data::String, marked, position, subset, velocity,
+        flow_type::String, flow_mean, flow_cov)
+    N = Int(_rget(marked, :n_observations))
+    m = Int(_rget(marked, :subsample_size))
+    subset_vec = _as_int_vector(subset)
+    length(subset_vec) == m || throw(DimensionMismatch(
+        "diagnostic subset must contain exactly the configured subsample size"))
+    all(i -> 1 <= i <= N, subset_vec) || throw(ArgumentError(
+        "diagnostic subset indices must lie in 1:N"))
+    allunique(subset_vec) || throw(ArgumentError(
+        "diagnostic subset indices must be unique"))
+
+    x = _as_float_vector(position)
+    marked_anchor = _rget(marked, :anchor)
+    anchor = isnothing(marked_anchor) ? copy(x) : _as_float_vector(marked_anchor)
+    ctx, unc_names = _new_stan_marked_context(lib_path, full_data, prior_data, m)
+    d = ctx.full.d
+    length(x) == d || throw(DimensionMismatch("diagnostic position has the wrong dimension"))
+    length(anchor) == d || throw(DimensionMismatch("diagnostic anchor has the wrong dimension"))
+    oracle = StanMarkedOracle(ctx, anchor)
+    deterministic = zeros(d)
+    residual = zeros(d)
+    full = zeros(d)
+    oracle(deterministic, x)
+    oracle(residual, x, subset_vec, anchor)
+    prior_gradient = copy(oracle.prior_x)
+    selected_gradient = copy(oracle.selected_x)
+    selected_likelihood = oracle.selected_x - oracle.prior_x
+    selected_anchor_likelihood = oracle.selected_anchor - oracle.prior_anchor
+    _clear_gradient!(ctx, :full, full, x)
+    marked_gradient = deterministic + (N / m) * residual
+    anchor_deterministic = zeros(d)
+    anchor_residual = zeros(d)
+    oracle(anchor_deterministic, anchor)
+    oracle(anchor_residual, anchor, subset_vec, anchor)
+    anchor_marked = anchor_deterministic + (N / m) * anchor_residual
+    anchor_closure_error = maximum(abs, anchor_marked - oracle.full_anchor)
+
+    envelope_spec = _rget(marked, :residual_envelope)
+    weights = _as_float_matrix(_rget(envelope_spec, :weights))
+    growth = _as_float_vector(_rget(envelope_spec, :growth_rates))
+    envelope = TrajectoryResidualEnvelope(weights, anchor; growth_rates=growth)
+    diagnostic_velocity = _as_float_vector(velocity)
+    length(diagnostic_velocity) == d || throw(DimensionMismatch(
+        "diagnostic velocity has the wrong dimension"))
+    flow = build_flow(flow_type,
+        _to_precision(_as_flow_cov(flow_cov, d), d),
+        _as_flow_mean(flow_mean, d))
+    state = PDMPState(0.0, SkeletonPoint(copy(x), diagnostic_velocity))
+    PDMPSamplers.initialize_flow_state!(state, flow)
+    scales = PDMPSamplers.component_scales!(
+        envelope.scales, envelope, state, flow, 0.0)
+    envelope_rate = (N / m) * sum(i -> dot(scales, @view(weights[:, i])), subset_vec)
+    scaled_residual = (N / m) * residual
+    residual_rate = PDMPSamplers.λ(state, scaled_residual, flow) +
+        PDMPSamplers.λ(state, -scaled_residual, flow)
+
+    return Dict{String,Any}(
+        "parameter_names" => unc_names,
+        "full_gradient" => full,
+        "prior_gradient" => prior_gradient,
+        "selected_gradient" => selected_gradient,
+        "selected_likelihood_gradient" => selected_likelihood,
+        "selected_anchor_likelihood_gradient" => selected_anchor_likelihood,
+        "deterministic_gradient" => deterministic,
+        "residual_gradient" => residual,
+        "marked_gradient" => marked_gradient,
+        "anchor_full_gradient" => copy(oracle.full_anchor),
+        "anchor_closure_error" => anchor_closure_error,
+        "residual_rate" => residual_rate,
+        "envelope_rate" => envelope_rate,
+        "selected_scale" => N / m,
+        "model_constructions" => ctx.counts.model_constructions,
+        "data_constructions" => ctx.counts.data_constructions,
+    )
 end
 
 function r_pdmp_stan_marked(lib_path::String, full_data::String,
@@ -215,6 +301,11 @@ function r_pdmp_stan_marked(lib_path::String, full_data::String,
         push!(contexts, ctx)
         unc_names = names
     end
+    construction_snapshots = [(
+        model=ctx.counts.model_constructions,
+        data=ctx.counts.data_constructions,
+        full_gradient=ctx.counts.full_gradient,
+    ) for ctx in contexts]
     d = first(models).d
     flow = build_flow(flow_type, _to_precision(_as_flow_cov(flow_cov, d), d),
         _as_flow_mean(flow_mean, d); adaptive_scheme)
@@ -236,7 +327,15 @@ function r_pdmp_stan_marked(lib_path::String, full_data::String,
         "prior_gradient_calls" => ctx.counts.prior_gradient,
         "selected_gradient_calls" => ctx.counts.selected_gradient,
         "persons_evaluated" => ctx.counts.persons_evaluated,
-        "model_constructions" => ctx.counts.model_constructions) for ctx in contexts]
+        "model_constructions" => ctx.counts.model_constructions,
+        "data_constructions" => ctx.counts.data_constructions,
+        "initialization_model_constructions" => snapshot.model,
+        "initialization_data_constructions" => snapshot.data,
+        "initialization_full_gradient_calls" => snapshot.full_gradient,
+        "sampling_model_constructions" => ctx.counts.model_constructions - snapshot.model,
+        "sampling_data_constructions" => ctx.counts.data_constructions - snapshot.data,
+        "sampling_full_gradient_calls" => ctx.counts.full_gradient - snapshot.full_gradient,
+    ) for (ctx, snapshot) in zip(contexts, construction_snapshots)]
     result["marked_subsampling"] = true
     return result
 end

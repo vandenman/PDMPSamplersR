@@ -67,9 +67,24 @@ test_that("log-linear Gaussian scale slab validates compact design", {
   )
 })
 
+test_that("log-linear Gaussian scale slab preserves sparse input", {
+  skip_if_not_installed("Matrix")
+  design <- Matrix::sparseMatrix(
+    i = c(1L, 2L, 2L), j = c(1L, 1L, 2L), x = c(1, 0.5, 1),
+    dims = c(2L, 2L)
+  )
+  slab <- loglinear_gaussian_scale_slab(
+    0, logscale = c("global", "node"),
+    logscale_design = design, coef = "interactions_0"
+  )
+  expect_s4_class(slab$logscale_design, "sparseMatrix")
+  expect_equal(slab$logscale_design_sparse$nrow, 2L)
+  expect_equal(slab$logscale_design_sparse$ncol, 2L)
+  expect_equal(length(slab$logscale_design_sparse$nzval), 3L)
+})
+
 test_that("bundled subset header exposes thread-local install and clear hooks", {
-  path <- file.path(testthat::test_path("..", ".."),
-                    "inst", "stan", "pdmp_subsample.hpp")
+  path <- pdmp_subsample_hpp_path()
   code <- paste(readLines(path, warn = FALSE), collapse = "\n")
   expect_match(code, "thread_local")
   expect_match(code, "pdmp_set_subsample_indices", fixed = TRUE)

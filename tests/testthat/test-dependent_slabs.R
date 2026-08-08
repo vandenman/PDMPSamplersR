@@ -245,6 +245,29 @@ test_that("Julia bridge builds dependent slab concrete types", {
   ")
   expect_match(logscale_clock_type, "ExponentialSumAggregateClock")
 
+  if (requireNamespace("Matrix", quietly = TRUE)) {
+    sparse_design <- Matrix::sparseMatrix(
+      i = c(1L, 2L, 2L), j = c(1L, 1L, 2L),
+      x = c(1, 0.5, 1), dims = c(2L, 2L)
+    )
+    structured <- loglinear_gaussian_scale_slab(
+      0, logscale = c("b.Intercept", "log_lambda"),
+      logscale_design = sparse_design, coef = c("b.x1", "b.x2")
+    )
+    JuliaCall::julia_assign("r_structured_sparse_slab", structured)
+    expect_true(JuliaCall::julia_eval("
+      begin
+        provider = build_slab_provider(
+          r_structured_sparse_slab,
+          [\"b.x1\", \"b.x2\", \"b.Intercept\", \"log_lambda\"],
+          BitVector([true, true, false, false]), 4
+        )
+        occursin(\"SparseMatrixCSC\", string(typeof(provider.logscale_design))) &&
+          count(!iszero, provider.logscale_design) == 3
+      end
+    "))
+  }
+
   global_exch <- global_logscale_exchangeable_gaussian_slab(logscale = "b.Intercept", u = 1, v = 0.1, coef = c("b.x1", "b.x2"))
   JuliaCall::julia_assign("r_global_exch_slab", global_exch)
   global_provider_type <- JuliaCall::julia_eval("string(typeof(build_slab_provider(r_global_exch_slab, r_unc_names, r_can_stick, 3)))")

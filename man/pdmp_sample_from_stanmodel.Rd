@@ -58,15 +58,15 @@ BridgeStan will compile it automatically.}
 or a named list that will be written to a temporary JSON file via
 [write_stan_json()].}
 
-\item{prior_stanmodel}{Deprecated compatibility argument. Full-gradient
-dependent slabs do not require a separate prior model.}
+\item{prior_stanmodel}{Deprecated compatibility argument. The full-gradient
+dependent-slab path no longer needs a separate prior model.}
 
 \item{prior_standata}{Optional prior-only Stan data path or named list used
-by \code{marked_subsampling}.}
+by \code{marked_subsampling}; it is not needed for full-gradient slabs.}
 
 \item{marked_subsampling}{Optional exact marked custom-Stan specification
-created by \code{stan_marked_subsampling()}. The selected Stan branch must
-be unscaled; Julia applies \code{N / m}.}
+created by [stan_marked_subsampling()]. The selected Stan branch must add
+the unscaled sum of the installed observations; Julia applies `N / m`.}
 
 \item{flow}{Character string specifying the flow type. One of "ZigZag",
 "BouncyParticle", "Boomerang", "AdaptiveBoomerang", "PreconditionedZigZag",
@@ -112,8 +112,9 @@ Dependent-slab sampling also accepts \code{exchangeable_model_size_prior()}.}
 \code{dense_gaussian_slab()}, \code{exchangeable_gaussian_slab()},
 \code{independent_slab_density()}, \code{gaussian_scale_mixture_slab()},
 or \code{arbitrary_slab_boundary()}. Mutually exclusive with
-\code{parameter_prior}. The full Stan model must contain the complete slab;
-the package replaces it by the active coherent slab internally.}
+\code{parameter_prior}. The full target supplied through \code{f} must
+contain the complete coherent slab represented by \code{slab_prior}; the
+package replaces that slab by its active-face restriction internally.}
 
 \item{grid_n}{Integer, number of grid points for GridThinningStrategy (default: 30).}
 
@@ -141,7 +142,7 @@ consecutive rate nodes and secant-disagreement inflation; it is not a
 mathematically certified thinning envelope.}
 
 \item{grid_curvature_bound}{Optional nonnegative curvature bound required by
-the experimental \code{"shared_node"} grid bound.}
+the experimental `"shared_node"` grid bound.}
 
 \item{linear_area_threshold}{Numeric gate for \code{grid_bound = "linear"}
 or \code{"auto"}; affine cells are skipped when their relative area gain is

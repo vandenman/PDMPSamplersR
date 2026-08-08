@@ -1,6 +1,6 @@
 module PDMPSamplersRBridge
 
-using PDMPSamplers, LinearAlgebra, BridgeStan, Random, Statistics, Libdl
+using PDMPSamplers, LinearAlgebra, BridgeStan, Random, SparseArrays, Statistics, Libdl
 
 export build_flow, build_algorithm, wrap_sticky
 export build_model_prior_odds, build_slab_provider, wrap_dependent_sticky
@@ -13,6 +13,7 @@ export r_chain_sparse_initial_time, r_chain_sparse_initial_position, r_chain_spa
 export r_chain_sparse_event_indices, r_chain_sparse_event_times, r_chain_sparse_event_positions, r_chain_sparse_event_velocities
 export r_from_sparse_skeleton
 export r_pdmp_stan, r_pdmp_custom
+export r_stan_marked_diagnostics
 export write_cmdstan_csv, r_constrain_and_write_csv
 export r_pdmp_brms_marked, r_pdmp_stan_for_brms
 export r_get_param_unc_names
@@ -176,6 +177,8 @@ _haskey(x, key::Symbol) = haskey(x, key) || haskey(x, String(key))
 _rget(x, key::Symbol) = haskey(x, key) ? x[key] : x[String(key)]
 _as_float_vector(x::Number) = [Float64(x)]
 _as_float_vector(x) = Vector{Float64}(x)
+_as_int_vector(x::Number) = [Int(x)]
+_as_int_vector(x) = Vector{Int}(x)
 _as_bool_vector(x::Bool) = Bool[x]
 _as_bool_vector(x::Nothing) = nothing
 _as_bool_vector(x) = Bool.(x)
@@ -184,6 +187,16 @@ _as_string_vector(x::Nothing) = String[]
 _as_string_vector(x) = String.(x)
 _as_float_matrix(x::Number) = reshape([Float64(x)], 1, 1)
 _as_float_matrix(x) = Matrix{Float64}(x)
+
+function _as_float_sparse_matrix(spec)
+    return SparseMatrixCSC(
+        Int(_rget(spec, :nrow)),
+        Int(_rget(spec, :ncol)),
+        _as_int_vector(_rget(spec, :colptr)),
+        _as_int_vector(_rget(spec, :rowval)),
+        _as_float_vector(_rget(spec, :nzval)),
+    )
+end
 
 function _slab_type(slab_prior)
     t = _rget(slab_prior, :type)
@@ -314,7 +327,10 @@ function build_slab_provider(slab_prior, unc_names::AbstractVector{<:AbstractStr
         length(log_base_scales) == 1 &&
             (log_base_scales = fill(log_base_scales[1], length(beta_idx)))
         logscale_idx = _state_indices(_rget(slab_prior, :logscale), unc_names, d, "logscale")
-        design = _as_float_matrix(_rget(slab_prior, :logscale_design))
+        sparse_design = _rget(slab_prior, :logscale_design_sparse)
+        design = isnothing(sparse_design) ?
+            _as_float_matrix(_rget(slab_prior, :logscale_design)) :
+            _as_float_sparse_matrix(sparse_design)
         size(design) == (length(beta_idx), length(logscale_idx)) ||
             throw(DimensionMismatch("logscale_design must have size (beta dimension, logscale dimension)"))
         isempty(intersect(beta_idx, logscale_idx)) || throw(ArgumentError(
@@ -397,7 +413,7 @@ function _build_dependent_slab_model(
     provider = build_slab_provider(slab_prior, unc_names, can_stick, d)
     odds = build_model_prior_odds(model_prior, PDMPSamplers.beta_indices(provider), d)
     target = DependentSlabTarget(d, posterior_model.grad, provider, odds)
-    return PDMPModel(target)
+    return PDMPModel(target; hvp=true)
 end
 
 function _to_precision(flow_cov::AbstractMatrix{Float64}, d::Int)
@@ -475,7 +491,8 @@ function _compile_model_with_header(path_to_stan_model::String, hpp_path::String
         _cached_stan_source(path_to_stan_model, stanc_args, make_args) :
         path_to_stan_model
     library = replace(source, r"\.stan$" => "_model.$(Libdl.dlext)")
-    isfile(library) && return library
+    isfile(library) && mtime(library) >=
+        max(mtime(source), mtime(hpp_path)) && return library
     return BridgeStan.compile_model(source; stanc_args, make_args)
 end
 
@@ -1084,7 +1101,7 @@ function r_pdmp_custom(
         provider = build_slab_provider(slab_prior, String[], can_stick_vec, d)
         odds = build_model_prior_odds(model_prior, PDMPSamplers.beta_indices(provider), d)
         target = DependentSlabTarget(d, grad!, provider, odds)
-        PDMPModel(target)
+        PDMPModel(target; hvp=true)
     end
 
     prec = _to_precision(flow_cov_mat, d)

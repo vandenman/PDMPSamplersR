@@ -47,5 +47,8 @@ stan_parameter_mapping(path_to_stanmodel, standata, parameters = NULL)
 \description{
 Public interfaces for persistent BridgeStan selected-gradient contexts and
 certified exact marked thinning. Julia owns minibatch scaling and draws a fresh
-subset at every marked proposal.
+subset at every marked proposal. The OMRF constructor uses one half of the
+squared operator norm of the stacked person design. The node-wise categorical
+covariance is block diagonal with operator norm at most one half, so this is no
+larger than the former sum of separate node spectral bounds.
 }

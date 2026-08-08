@@ -24,6 +24,7 @@ using .PDMPSamplersRBridge
     PDMPSamplersRBridge._clear_gradient!(ctx, :full, full_gradient, [0.7])
     @test estimate ≈ full_gradient[1] atol=1e-10
     @test ctx.counts.model_constructions == 3
+    @test ctx.counts.data_constructions == 3
     @test ctx.counts.selected_gradient == 2
     @test ctx.counts.persons_evaluated == 4
 
@@ -58,6 +59,12 @@ using .PDMPSamplersRBridge
         show_progress=false, seed=11)
     counters = only(sampled["marked_context_counters"])
     @test counters["model_constructions"] == 3
+    @test counters["data_constructions"] == 3
+    @test counters["initialization_model_constructions"] == 3
+    @test counters["initialization_data_constructions"] == 3
+    @test counters["sampling_model_constructions"] == 0
+    @test counters["sampling_data_constructions"] == 0
+    @test counters["sampling_full_gradient_calls"] == 0
     @test counters["full_gradient_calls"] == 1
     @test counters["persons_evaluated"] ==
         2 * counters["selected_gradient_calls"]
@@ -71,6 +78,9 @@ using .PDMPSamplersRBridge
     two_counts = two_chain["marked_context_counters"]
     @test length(two_counts) == 2
     @test all(counter -> counter["model_constructions"] == 3, two_counts)
+    @test all(counter -> counter["data_constructions"] == 3, two_counts)
+    @test all(counter -> counter["sampling_model_constructions"] == 0, two_counts)
+    @test all(counter -> counter["sampling_data_constructions"] == 0, two_counts)
     @test all(counter -> counter["persons_evaluated"] ==
         2 * counter["selected_gradient_calls"], two_counts)
 

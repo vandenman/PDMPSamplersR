@@ -30,7 +30,7 @@ reference:
       - pdmp_sample_from_stanmodel
       - support_boundary_control
       - write_stan_json
-      - stan_marked_subsampling
+      - stan_subsampling
       - stan_residual_envelope
       - omrf_residual_envelope
       - compile_pdmp_stan_model

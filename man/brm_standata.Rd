@@ -33,6 +33,6 @@ brm_standata(
 A named list containing the generated Stan data.
 }
 \description{
-This is a thin wrapper around [brms::standata()]. Marked subsampling derives
+This is a thin wrapper around [brms::standata()]. Observation subsampling derives
 its deterministic and family geometry from this ordinary standata object.
 }

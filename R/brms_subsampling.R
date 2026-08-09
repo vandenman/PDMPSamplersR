@@ -23,7 +23,7 @@ make_opaque_deterministic_standata <- function(sdata) {
 }
 
 
-marked_custom_code_reason <- function(stanvars) {
+subsampling_custom_code_reason <- function(stanvars) {
   if (is.null(stanvars)) return(NULL)
   model_stanvars <- Filter(
     function(x) identical(x$block %||% "", "model"), unclass(stanvars))
@@ -42,12 +42,12 @@ marked_custom_code_reason <- function(stanvars) {
   NULL
 }
 
-marked_subsampling_eligibility <- function(formula, family, stanvars = NULL,
+subsampling_eligibility <- function(formula, family, stanvars = NULL,
                                            sdata = NULL) {
   if (is.character(family)) family <- do.call(family, list())
   family_name <- family$family %||% ""
   link <- family$link %||% ""
-  custom_reason <- marked_custom_code_reason(stanvars)
+  custom_reason <- subsampling_custom_code_reason(stanvars)
   if (!is.null(custom_reason)) {
     return(list(eligible = FALSE, reason = custom_reason))
   }
@@ -58,7 +58,7 @@ marked_subsampling_eligibility <- function(formula, family, stanvars = NULL,
     (family_name %in% c("categorical", "multinomial") && identical(link, "logit"))
   if (!supported_family) {
     return(list(eligible = FALSE,
-                reason = "no certified marked likelihood provider exists for this family and link"))
+                reason = "no certified subsampling likelihood provider exists for this family and link"))
   }
 
   terms <- tryCatch(
@@ -85,7 +85,7 @@ marked_subsampling_eligibility <- function(formula, family, stanvars = NULL,
     return(list(
       eligible = affine,
       reason = if (affine) NULL else
-        "multivariate marked acceleration requires independent affine Bernoulli responses",
+        "multivariate subsampling acceleration requires independent affine Bernoulli responses",
       has_intercept = TRUE,
       family = if (affine) "independent_bernoulli" else family_name,
       link = link,
@@ -112,7 +112,7 @@ marked_subsampling_eligibility <- function(formula, family, stanvars = NULL,
     return(list(
       eligible = FALSE,
       reason = paste0(
-        "no certified marked likelihood provider exists for response modifier: ",
+        "no certified subsampling likelihood provider exists for response modifier: ",
         paste(unsupported_adforms, collapse = ", ")
       )
     ))
@@ -188,23 +188,23 @@ marked_subsampling_eligibility <- function(formula, family, stanvars = NULL,
   )
 }
 
-marked_observation_multipliers <- function(sdata, family_name) {
+subsampling_observation_multipliers <- function(sdata, family_name) {
   N <- as.integer(sdata$N)
   multiplier <- rep(1, N)
   if (!is.null(sdata$weights)) multiplier <- multiplier * as.numeric(sdata$weights)
   if (family_name %in% c("binomial", "multinomial")) {
     if (is.null(sdata$trials))
-      cli::cli_abort("Binomial marked subsampling requires the brms trials vector.")
+      cli::cli_abort("Binomial observation subsampling requires the brms trials vector.")
     multiplier <- multiplier * as.numeric(sdata$trials)
   }
   if (length(multiplier) != N || any(!is.finite(multiplier)) ||
       any(multiplier < 0)) {
-    cli::cli_abort("Marked observation multipliers must be finite and nonnegative.")
+    cli::cli_abort("Subsampling observation multipliers must be finite and nonnegative.")
   }
   multiplier
 }
 
-build_marked_compact_affine_design <- function(sdata, unc_names, has_intercept,
+build_subsampling_compact_affine_design <- function(sdata, unc_names, has_intercept,
                                                dpar = "mu") {
   suffix <- if (identical(dpar, "mu")) "" else paste0("_", dpar)
   X_name <- paste0("X", suffix)
@@ -260,7 +260,7 @@ build_marked_compact_affine_design <- function(sdata, unc_names, has_intercept,
   )
 }
 
-build_marked_predictor_geometry <- function(sdata, unc_names, eligibility) {
+build_subsampling_predictor_geometry <- function(sdata, unc_names, eligibility) {
   family <- eligibility$family
   N <- as.integer(sdata$N)
   d <- length(unc_names)
@@ -278,7 +278,7 @@ build_marked_predictor_geometry <- function(sdata, unc_names, eligibility) {
     X <- sdata[[X_name]]
     has_intercept <- !is.null(attr(X, "assign")) &&
       length(attr(X, "assign")) > 0L && attr(X, "assign")[[1L]] == 0L
-    build_marked_compact_affine_design(
+    build_subsampling_compact_affine_design(
       sdata, unc_names, has_intercept, dpar
     )
   })
@@ -326,7 +326,7 @@ build_marked_predictor_geometry <- function(sdata, unc_names, eligibility) {
 #' Show the Stan code used by brm_pdmp
 #'
 #' This is a thin wrapper around [brms::stancode()] using the same model
-#' arguments accepted by [brm_pdmp()]. Marked subsampling uses the ordinary
+#' arguments accepted by [brm_pdmp()]. Observation subsampling uses the ordinary
 #' Stan model plus analytic Julia-side family providers, so no rewritten Stan
 #' variant is generated.
 #'
@@ -345,7 +345,7 @@ brm_stancode <- function(
 
 #' Show the Stan data used by brm_pdmp
 #'
-#' This is a thin wrapper around [brms::standata()]. Marked subsampling derives
+#' This is a thin wrapper around [brms::standata()]. Observation subsampling derives
 #' its deterministic and family geometry from this ordinary standata object.
 #'
 #' @inheritParams brm_pdmp

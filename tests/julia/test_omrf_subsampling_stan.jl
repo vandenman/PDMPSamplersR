@@ -86,12 +86,12 @@ end
 
 @testset "OMRF person-level selected gradients" begin
     root = normpath(joinpath(@__DIR__, "..", ".."))
-    stan = joinpath(root, "inst", "stan", "omrf", "omrf_marked.stan")
-    full = joinpath(root, "tests", "stan", "omrf_marked_full.json")
-    prior = joinpath(root, "tests", "stan", "omrf_marked_prior.json")
+    stan = joinpath(root, "inst", "stan", "omrf", "omrf.stan")
+    full = joinpath(root, "tests", "stan", "omrf_subsampling_full.json")
+    prior = joinpath(root, "tests", "stan", "omrf_subsampling_prior.json")
     header = joinpath(root, "inst", "stan", "pdmp_subsample.hpp")
     lib = PDMPSamplersRBridge._compile_model_with_header(stan, header)
-    ctx, names = PDMPSamplersRBridge._new_stan_marked_context(lib, full, prior, 1)
+    ctx, names = PDMPSamplersRBridge._new_stan_subsampling_context(lib, full, prior, 1)
     @test length(names) == 9
     q = collect(range(-0.25, 0.3; length=9))
     X = ([0, 1, 2], [2, 0, 1], [1, 2, 0])
@@ -164,11 +164,11 @@ end
     end
 end
 
-@testset "OMRF marked event law and replicated posterior agreement" begin
+@testset "OMRF subsampling event law and replicated posterior agreement" begin
     root = normpath(joinpath(@__DIR__, "..", ".."))
-    stan = joinpath(root, "inst", "stan", "omrf", "omrf_marked.stan")
-    full = joinpath(root, "tests", "stan", "omrf_marked_full.json")
-    prior = joinpath(root, "tests", "stan", "omrf_marked_prior.json")
+    stan = joinpath(root, "inst", "stan", "omrf", "omrf.stan")
+    full = joinpath(root, "tests", "stan", "omrf_subsampling_full.json")
+    prior = joinpath(root, "tests", "stan", "omrf_subsampling_prior.json")
     header = joinpath(root, "inst", "stan", "pdmp_subsample.hpp")
     lib = PDMPSamplersRBridge._compile_model_with_header(stan, header)
     X = [0 1 2; 2 0 1; 1 2 0]
@@ -176,9 +176,9 @@ end
     anchor = zeros(9)
     position = collect(range(-0.18, 0.22; length=9))
     velocity = collect(range(-0.8, 0.9; length=9))
-    ctx, _ = PDMPSamplersRBridge._new_stan_marked_context(
+    ctx, _ = PDMPSamplersRBridge._new_stan_subsampling_context(
         lib, full, prior, 1)
-    oracle = PDMPSamplersRBridge.StanMarkedOracle(ctx, anchor)
+    oracle = PDMPSamplersRBridge.StanSubsamplingOracle(ctx, anchor, 3)
     deterministic = zeros(9)
     residual = zeros(9)
     estimate_mean = zeros(9)
@@ -203,7 +203,7 @@ end
     bps_reverse = mean(max(0.0, -dot(velocity, estimate)) for estimate in estimates)
     @test bps_forward - bps_reverse ≈ dot(velocity, full_gradient) atol=3e-10
 
-    marked = Dict{String,Any}(
+    subsampling = Dict{String,Any}(
         "n_observations" => 3,
         "subsample_size" => 1,
         "anchor" => anchor,
@@ -221,18 +221,21 @@ end
             0.0, 1_200.0; progress=false, seed)
         trace
     end
-    marked_runs = map(seeds) do seed
-        model, marked_ctx, _ = PDMPSamplersRBridge._build_stan_marked_model(
-            lib, full, prior, marked, anchor, nothing, nothing, falses(9))
+    subsampling_runs = map(seeds) do seed
+        prepared = PDMPSamplersRBridge.prepare_stan_subsampling(
+            lib, full, prior, subsampling, 1)
+        model, subsampling_ctx, _ = PDMPSamplersRBridge._build_stan_subsampling_model(
+            only(prepared.contexts), prepared.unc_names, subsampling,
+            anchor, nothing, falses(9))
         trace, stats = pdmp_sample(
             initial, BouncyParticle(9, 0.4), model,
             GridThinningStrategy(N=12, t_max=0.5, lazy=false,
                 bound_violation=:throw),
             0.0, 1_200.0; progress=false, seed,
             statistic_counter=PDMPSamplers.DevelStatisticCounter)
-        (trace=trace, stats=stats, ctx=marked_ctx)
+        (trace=trace, stats=stats, ctx=subsampling_ctx)
     end
-    marked_traces = getproperty.(marked_runs, :trace)
+    subsampling_traces = getproperty.(subsampling_runs, :trace)
 
     function replicated_summary(traces)
         run_means = reduce(hcat, mean.(traces))
@@ -248,36 +251,36 @@ end
         )
     end
     full_summary = replicated_summary(full_traces)
-    marked_summary = replicated_summary(marked_traces)
-    combined_mcse = sqrt.(full_summary.mcse .^ 2 .+ marked_summary.mcse .^ 2)
-    standardized_difference = abs.(full_summary.mean - marked_summary.mean) ./ combined_mcse
+    subsampling_summary = replicated_summary(subsampling_traces)
+    combined_mcse = sqrt.(full_summary.mcse .^ 2 .+ subsampling_summary.mcse .^ 2)
+    standardized_difference = abs.(full_summary.mean - subsampling_summary.mean) ./ combined_mcse
     @test full_summary.minimum_ess > 20
-    @test marked_summary.minimum_ess > 20
+    @test subsampling_summary.minimum_ess > 20
     @test all(isfinite, standardized_difference)
     @test maximum(standardized_difference) < 4.5
 
-    for run in marked_runs
+    for run in subsampling_runs
         @test run.stats.residual_oracle_calls > 0
         @test run.ctx.counts.persons_evaluated ==
             run.ctx.m * run.ctx.counts.selected_gradient
         @test run.ctx.counts.selected_gradient ==
-            2 * run.stats.residual_oracle_calls
-        @test run.stats.marked_subset_evaluations ==
             run.stats.residual_oracle_calls
-        @test run.stats.marked_final_reflections <=
-            run.stats.marked_subset_evaluations
+        @test run.stats.subsampling_subset_evaluations ==
+            run.stats.residual_oracle_calls
+        @test run.stats.subsampling_final_reflections <=
+            run.stats.subsampling_subset_evaluations
         @test run.stats.full_gradient_calls == 0
     end
 end
 
-@testset "dependent sticky marked target preserves nuisance prior and model odds" begin
+@testset "dependent sticky subsampling target preserves nuisance prior and model odds" begin
     root = normpath(joinpath(@__DIR__, "..", ".."))
-    stan = joinpath(root, "tests", "stan", "marked_gaussian_nuisance.stan")
-    full = joinpath(root, "tests", "stan", "marked_gaussian_nuisance_full.json")
-    prior = joinpath(root, "tests", "stan", "marked_gaussian_nuisance_prior.json")
+    stan = joinpath(root, "tests", "stan", "subsampling_gaussian_nuisance.stan")
+    full = joinpath(root, "tests", "stan", "subsampling_gaussian_nuisance_full.json")
+    prior = joinpath(root, "tests", "stan", "subsampling_gaussian_nuisance_prior.json")
     header = joinpath(root, "inst", "stan", "pdmp_subsample.hpp")
     lib = PDMPSamplersRBridge._compile_model_with_header(stan, header)
-    marked = Dict{String,Any}(
+    subsampling = Dict{String,Any}(
         "n_observations" => 4,
         "subsample_size" => 2,
         "anchor" => zeros(2),
@@ -288,9 +291,11 @@ end
         "type" => "independent_slab_density",
         "coef" => ["beta"],
         "kappa" => [inv(2sqrt(2pi))])
-    model, ctx, _ = PDMPSamplersRBridge._build_stan_marked_model(
-        lib, full, prior, marked, zeros(2), slab,
-        Dict("prob" => [0.5]), BitVector([true, false]))
+    prepared = PDMPSamplersRBridge.prepare_stan_subsampling(
+        lib, full, prior, subsampling, 1)
+    model, ctx, _ = PDMPSamplersRBridge._build_stan_subsampling_model(
+        only(prepared.contexts), prepared.unc_names, subsampling,
+        zeros(2), slab, BitVector([true, false]))
     set_active_set!(model, BitVector([false, true]))
     x = [0.0, 0.35]
     corrected = zeros(2)
@@ -309,26 +314,28 @@ end
         likelihood_gradient + (x[2] - 1) / 0.5^2] atol=2e-10
     @test abs(closure[2] - likelihood_gradient) > 0.1
 
-    sampled = PDMPSamplersRBridge.r_pdmp_stan_marked(
-        lib, full, prior, marked, [0.1, 0.8], "ZigZag",
+    prepared = PDMPSamplersRBridge.prepare_stan_subsampling(
+        lib, full, prior, subsampling, 1)
+    sampled = PDMPSamplersRBridge.r_pdmp_stan_subsampling(
+        prepared, subsampling, [0.1, 0.8], "ZigZag",
         "GridThinningStrategy", zeros(2), Matrix{Float64}(I, 2, 2);
         T=4_000.0, grid_n=12, grid_t_max=0.5,
         sticky=true, can_stick=BitVector([true, false]),
         model_prior=Dict("prob" => [0.5]), slab_prior=slab,
         show_progress=false, seed=944)
-    counters = only(sampled["marked_context_counters"])
+    counters = only(sampled["subsampling_context_counters"])
     stats = sampled["stats"]
     @test counters["persons_evaluated"] ==
         2 * counters["selected_gradient_calls"]
     @test counters["selected_gradient_calls"] ==
-        2 * stats["residual_oracle_calls"][1]
+        stats["residual_oracle_calls"][1]
     @test counters["sampling_full_gradient_calls"] == 0
     @test counters["sampling_model_constructions"] == 0
     @test counters["sampling_data_constructions"] == 0
-    @test stats["marked_subset_evaluations"][1] ==
+    @test stats["subsampling_subset_evaluations"][1] ==
         stats["residual_oracle_calls"][1]
-    @test stats["marked_final_reflections"][1] <=
-        stats["marked_subset_evaluations"][1]
+    @test stats["subsampling_final_reflections"][1] <=
+        stats["subsampling_subset_evaluations"][1]
 
     covariance_inactive = Matrix{Float64}(I, 4, 4) + 0.5^2 * ones(4, 4)
     covariance_active = Matrix{Float64}(I, 4, 4) +
@@ -351,7 +358,7 @@ end
     lib = PDMPSamplersRBridge._compile_model_with_header(stan, header)
     X = [0 0; 0 0; 0 0; 1 1; 1 1; 1 1; 1 0; 0 1]
     weights = reshape(0.5 .* vec(sum(abs2, X; dims=2)), 1, :)
-    marked = Dict{String,Any}(
+    subsampling = Dict{String,Any}(
         "n_observations" => 8,
         "subsample_size" => 2,
         "anchor" => [0.0],
@@ -362,8 +369,10 @@ end
         "type" => "independent_slab_density",
         "coef" => ["interaction"],
         "kappa" => [inv(sqrt(2pi) * prior_sd)])
-    sampled = PDMPSamplersRBridge.r_pdmp_stan_marked(
-        lib, full, prior, marked, [0.1], "ZigZag",
+    prepared = PDMPSamplersRBridge.prepare_stan_subsampling(
+        lib, full, prior, subsampling, 1)
+    sampled = PDMPSamplersRBridge.r_pdmp_stan_subsampling(
+        prepared, subsampling, [0.1], "ZigZag",
         "GridThinningStrategy", [0.0], ones(1, 1);
         T=4_000.0, grid_n=12, grid_t_max=0.5,
         sticky=true, can_stick=trues(1),
@@ -392,5 +401,5 @@ end
     reference = active_evidence / (active_evidence + inactive_evidence)
     observed = inclusion_probs(sampled["chains"]; chain=1)[1]
     @test observed ≈ reference atol=0.07
-    @test only(sampled["marked_context_counters"])["sampling_full_gradient_calls"] == 0
+    @test only(sampled["subsampling_context_counters"])["sampling_full_gradient_calls"] == 0
 end

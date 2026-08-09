@@ -2,6 +2,10 @@ module PDMPSamplersRBridge
 
 using PDMPSamplers, LinearAlgebra, BridgeStan, Random, SparseArrays, Statistics, Libdl
 
+# BridgeStan/Stan Math autodiff state is serialized consistently for every
+# Stan-backed provider used by this bridge.
+const _BRIDGESTAN_CALL_LOCK = ReentrantLock()
+
 export build_flow, build_algorithm, wrap_sticky
 export build_model_prior_odds, build_slab_provider, wrap_dependent_sticky
 export r_discretize, r_mean, r_var, r_std, r_cov, r_cor, r_quantile, r_median, r_cdf, r_ess, r_summary_all
@@ -13,19 +17,20 @@ export r_chain_sparse_initial_time, r_chain_sparse_initial_position, r_chain_spa
 export r_chain_sparse_event_indices, r_chain_sparse_event_times, r_chain_sparse_event_positions, r_chain_sparse_event_velocities
 export r_from_sparse_skeleton
 export r_pdmp_stan, r_pdmp_custom
-export r_stan_marked_diagnostics
+export r_stan_subsampling_diagnostics, prepare_stan_subsampling,
+    r_pdmp_stan_subsampling
 export write_cmdstan_csv, r_constrain_and_write_csv
-export r_pdmp_brms_marked, r_pdmp_stan_for_brms
+export r_pdmp_brms_subsampling, r_pdmp_stan_for_brms
 export r_get_param_unc_names
 export r_threading_available
 
-_marked_collection_values(values::Union{AbstractVector,Tuple}) = values
-_marked_collection_values(values::NamedTuple) = Base.values(values)
-_marked_collection_values(values::AbstractDict) = Base.values(values)
-_as_marked_predictor_indices(index::Number) = [Int(index)]
-_as_marked_predictor_indices(indices) = collect(Int, vec(indices))
-_marked_float_vector(value::Number) = [Float64(value)]
-_marked_float_vector(values) = collect(Float64, vec(values))
+_subsampling_collection_values(values::Union{AbstractVector,Tuple}) = values
+_subsampling_collection_values(values::NamedTuple) = Base.values(values)
+_subsampling_collection_values(values::AbstractDict) = Base.values(values)
+_as_subsampling_predictor_indices(index::Number) = [Int(index)]
+_as_subsampling_predictor_indices(indices) = collect(Int, vec(indices))
+_subsampling_float_vector(value::Number) = [Float64(value)]
+_subsampling_float_vector(values) = collect(Float64, vec(values))
 
 function build_flow(flow_type::String, prec::AbstractMatrix{Float64}, flow_mean::AbstractVector{Float64};
                     adaptive_scheme::String="diagonal")
@@ -188,14 +193,33 @@ _as_string_vector(x) = String.(x)
 _as_float_matrix(x::Number) = reshape([Float64(x)], 1, 1)
 _as_float_matrix(x) = Matrix{Float64}(x)
 
-function _as_float_sparse_matrix(spec)
-    return SparseMatrixCSC(
-        Int(_rget(spec, :nrow)),
-        Int(_rget(spec, :ncol)),
-        _as_int_vector(_rget(spec, :colptr)),
-        _as_int_vector(_rget(spec, :rowval)),
-        _as_float_vector(_rget(spec, :nzval)),
-    )
+function _as_float_sparse_rows(spec)
+    dims = _as_int_vector(_rget(spec, :dims))
+    length(dims) == 2 || throw(DimensionMismatch("sparse design dims must have length two"))
+    rows = _as_int_vector(_rget(spec, :i))
+    columns = _as_int_vector(_rget(spec, :j))
+    values = _as_float_vector(_rget(spec, :x))
+    length(rows) == length(columns) == length(values) || throw(DimensionMismatch(
+        "sparse design i, j, and x vectors must have equal length"))
+    rowptr = zeros(Int, dims[1] + 1)
+    for row in rows
+        1 <= row <= dims[1] || throw(ArgumentError("sparse design row index is out of bounds"))
+        rowptr[row + 1] += 1
+    end
+    cumsum!(rowptr, rowptr)
+    rowptr .+= 1
+    colidx = Vector{Int}(undef, length(columns))
+    nzval = Vector{Float64}(undef, length(values))
+    nextptr = copy(rowptr)
+    for k in eachindex(rows, columns, values)
+        1 <= columns[k] <= dims[2] || throw(ArgumentError(
+            "sparse design column index is out of bounds"))
+        destination = nextptr[rows[k]]
+        colidx[destination] = columns[k]
+        nzval[destination] = values[k]
+        nextptr[rows[k]] += 1
+    end
+    return dims, rowptr, colidx, nzval
 end
 
 function _slab_type(slab_prior)
@@ -327,18 +351,27 @@ function build_slab_provider(slab_prior, unc_names::AbstractVector{<:AbstractStr
         length(log_base_scales) == 1 &&
             (log_base_scales = fill(log_base_scales[1], length(beta_idx)))
         logscale_idx = _state_indices(_rget(slab_prior, :logscale), unc_names, d, "logscale")
-        sparse_design = _rget(slab_prior, :logscale_design_sparse)
-        design = isnothing(sparse_design) ?
-            _as_float_matrix(_rget(slab_prior, :logscale_design)) :
-            _as_float_sparse_matrix(sparse_design)
-        size(design) == (length(beta_idx), length(logscale_idx)) ||
+        design = _rget(slab_prior, :logscale_design)
+        storage = String(_rget(design, :storage))
+        dims = _as_int_vector(_rget(design, :dims))
+        dims == [length(beta_idx), length(logscale_idx)] ||
             throw(DimensionMismatch("logscale_design must have size (beta dimension, logscale dimension)"))
         isempty(intersect(beta_idx, logscale_idx)) || throw(ArgumentError(
             "loglinear_gaussian_scale_slab logscale coordinates must be disjoint from slab coef coordinates"))
         any(i -> can_stick[i], logscale_idx) && throw(ArgumentError(
             "loglinear_gaussian_scale_slab logscale coordinates must be non-stickable"))
-        return LogLinearGaussianScaleSlab(beta_idx, logscale_idx,
-            log_base_scales, design)
+        if storage == "dense"
+            values = _as_float_vector(_rget(design, :x))
+            length(values) == prod(dims) || throw(DimensionMismatch(
+                "dense logscale_design value count does not match its dimensions"))
+            return LogLinearGaussianScaleSlab(beta_idx, logscale_idx,
+                log_base_scales, reshape(values, dims...))
+        elseif storage == "sparse_rows"
+            _, rowptr, colidx, nzval = _as_float_sparse_rows(design)
+            return LogLinearGaussianScaleSlab(beta_idx, logscale_idx,
+                log_base_scales, rowptr, colidx, nzval)
+        end
+        throw(ArgumentError("unknown logscale_design storage $storage"))
     elseif t == "global_logscale_exchangeable_gaussian"
         logscale_idx = _state_indices(_rget(slab_prior, :logscale), unc_names, d, "logscale")
         length(logscale_idx) == 1 ||
@@ -861,10 +894,10 @@ function extract_stats(chains::PDMPChains)
         "grid_cached_endpoint_reuses" => vals(:grid_cached_endpoint_reuses),
         "grid_acceptance_tests" => vals(:grid_acceptance_tests),
         "grid_acceptance_gradient_calls" => vals(:grid_acceptance_gradient_calls),
-        "marked_cell_roof_proposals" => vals(:marked_cell_roof_proposals),
-        "marked_aggregate_accepts" => vals(:marked_aggregate_accepts),
-        "marked_subset_evaluations" => vals(:marked_subset_evaluations),
-        "marked_final_reflections" => vals(:marked_final_reflections),
+        "subsampling_cell_roof_proposals" => vals(:subsampling_cell_roof_proposals),
+        "subsampling_aggregate_accepts" => vals(:subsampling_aggregate_accepts),
+        "subsampling_subset_evaluations" => vals(:subsampling_subset_evaluations),
+        "subsampling_final_reflections" => vals(:subsampling_final_reflections),
         "grid_horizon_hits" => vals(:grid_horizon_hits),
         "grid_budget_tail_restarts" => vals(:grid_budget_tail_restarts),
         "constant_bound_attempts" => vals(:constant_bound_attempts),
@@ -949,6 +982,7 @@ function r_pdmp_stan(
         algorithm_type::String,
         flow_mean,
         flow_cov;
+        theta0 = nothing,
         c0::Float64 = 1e-2,
         grid_n::Int = 30,
         grid_t_max::Float64 = 2.0,
@@ -1022,7 +1056,9 @@ function r_pdmp_stan(
         min_safe_time = support_boundary_min_safe_time,
     )
 
-    chains = pdmp_sample(x0_vec, flow, sampling_model, alg, t0, T, t_warmup;
+    initial = isnothing(theta0) ? x0_vec :
+        SkeletonPoint(x0_vec, _as_float_vector(theta0))
+    chains = pdmp_sample(initial, flow, sampling_model, alg, t0, T, t_warmup;
                          progress = show_progress, n_chains = n_chains, threaded = threaded,
                          seed = seed,
                          warmup_stop = build_warmup_stop(t_warmup),
@@ -1228,10 +1264,10 @@ function r_constrain_and_write_csv(sm::BridgeStan.StanModel, draws_unc::Matrix{F
     return output_csv
 end
 
-include(joinpath(@__DIR__, "marked_family_provider.jl"))
-include(joinpath(@__DIR__, "marked_stan_provider.jl"))
+include(joinpath(@__DIR__, "family_subsampling_provider.jl"))
+include(joinpath(@__DIR__, "stan_subsampling_provider.jl"))
 
-function _run_marked_brms_subsampled(lib_path_std::String,
+function _run_subsampling_brms_subsampled(lib_path_std::String,
         data_full_file::String, data_prior_file::String,
         N::Int, m::Int, family::Symbol,
         predictor_designs::Vector{Matrix{Float64}},
@@ -1253,7 +1289,7 @@ function _run_marked_brms_subsampled(lib_path_std::String,
 
     algorithm_type in ("GridThinningStrategy", "ThinningStrategy") ||
         throw(ArgumentError(
-            "marked BridgeStan subsampling requires GridThinningStrategy or ThinningStrategy"))
+            "subsampling BridgeStan subsampling requires GridThinningStrategy or ThinningStrategy"))
     all(size(design, 1) == N for design in predictor_designs) ||
         throw(DimensionMismatch("predictor designs must have N rows"))
     length(observation_multipliers) == N || throw(DimensionMismatch(
@@ -1261,19 +1297,19 @@ function _run_marked_brms_subsampled(lib_path_std::String,
 
     fmean = _as_flow_mean(flow_mean, d)
     anchor = copy(fmean)
-    contexts = MarkedBridgeStanContext[]
+    contexts = SubsamplingBridgeStanContext[]
     models = PDMPModel[]
     anchor_adapters = Any[]
-    anchor_managers = Union{Nothing,MarkedBridgeAnchorManager}[]
+    anchor_managers = Union{Nothing,SubsamplingBridgeAnchorManager}[]
     anchor_capacity = use_anchor_bank ? bank_capacity :
         (n_anchor_updates > 0 ? 1 : 0)
     for _ in 1:n_chains
-        ctx = _new_marked_bss_context(lib_path_std,
+        ctx = _new_subsampling_bss_context(lib_path_std,
             data_full_file, data_prior_file, family, predictor_designs,
             predictor_indices, d, offsets, response, known_se,
             observation_multipliers, N, m, anchor; use_hcv)
         push!(contexts, ctx)
-        built = _build_marked_bss_model(ctx; use_fd_hvp, anchor_capacity)
+        built = _build_subsampling_bss_model(ctx; use_fd_hvp, anchor_capacity)
         if anchor_capacity > 0
             model, adapter, manager = built
             adapter.update_dt = n_anchor_updates > 0 ?
@@ -1335,13 +1371,13 @@ function _run_marked_brms_subsampled(lib_path_std::String,
 
     result = _pack_result(chains)
     result["csv_paths"] = csv_paths
-    result["bridge_call_counts"] = [_marked_call_counts(ctx, manager)
+    result["bridge_call_counts"] = [_subsampling_call_counts(ctx, manager)
         for (ctx, manager) in zip(contexts, anchor_managers)]
-    result["marked_subsampling"] = true
+    result["subsampling"] = true
     return result
 end
 
-function r_pdmp_brms_marked(
+function r_pdmp_brms_subsampling(
         stan_file::String,
         data_full_file::String,
         data_prior_file::String,
@@ -1393,12 +1429,12 @@ function r_pdmp_brms_marked(
     N_int = Int(N)
     m = Int(subsample_size)
     designs = Matrix{Float64}[Matrix{Float64}(design)
-        for design in _marked_collection_values(predictor_designs)]
-    indices = Vector{Int}[_as_marked_predictor_indices(active)
-        for active in _marked_collection_values(predictor_indices)]
+        for design in _subsampling_collection_values(predictor_designs)]
+    indices = Vector{Int}[_as_subsampling_predictor_indices(active)
+        for active in _subsampling_collection_values(predictor_indices)]
     d = Int(predictor_dimension)
 
-    return _run_marked_brms_subsampled(
+    return _run_subsampling_brms_subsampled(
         lib_path_std, data_full_file, data_prior_file, N_int, m,
         Symbol(family_name), designs, indices, d,
         Matrix{Float64}(offsets), Matrix{Float64}(response), Vector{Float64}(known_se),

@@ -1,4 +1,4 @@
-#' Compile and configure marked custom-Stan models
+#' Compile and configure subsampling custom-Stan models
 #'
 #' `pdmp_subsample_hpp_path()` returns the installed thread-local subset-hook
 #' header. `compile_pdmp_stan_model()` compiles a Stan source with the required
@@ -6,7 +6,7 @@
 #'
 #' @param path Path to a Stan source file.
 #' @return The header path, or the compiled shared-library path.
-#' @name marked_stan
+#' @name stan_subsampling
 #' @export
 pdmp_subsample_hpp_path <- function() {
   path <- system.file("stan", "pdmp_subsample.hpp", package = "PDMPSamplersR")
@@ -20,7 +20,7 @@ pdmp_subsample_hpp_path <- function() {
   path
 }
 
-#' @rdname marked_stan
+#' @rdname stan_subsampling
 #' @export
 compile_pdmp_stan_model <- function(path) {
   validate_type(path, type = "character", n = 1)
@@ -34,12 +34,12 @@ compile_pdmp_stan_model <- function(path) {
   )
 }
 
-#' Certified residual envelope for a marked Stan likelihood
+#' Certified residual envelope for a subsampling Stan likelihood
 #'
 #' @param weights Nonnegative component-by-observation curvature weights.
 #' @param growth_rates Optional nonnegative growth coefficient per component.
 #' @return A declarative residual-envelope specification.
-#' @rdname marked_stan
+#' @rdname stan_subsampling
 #' @export
 stan_residual_envelope <- function(weights, growth_rates = NULL) {
   if (is.vector(weights)) weights <- matrix(as.numeric(weights), nrow = 1L)
@@ -59,26 +59,20 @@ stan_residual_envelope <- function(weights, growth_rates = NULL) {
   )
 }
 
-#' Exact marked subsampling specification for a custom Stan model
+#' Exact observation-subsampling specification for a custom Stan model
 #'
-#' @param n_observations Total number of marked likelihood contributions.
+#' @param n_observations Total number of subsampling likelihood contributions.
 #' @param subsample_size Number drawn without replacement at each proposal.
 #' @param prior_standata Prior-only data list or JSON path for the same model.
 #' @param residual_envelope A certified object from [stan_residual_envelope()]
 #'   or a recognized package provider such as [omrf_residual_envelope()].
 #' @param anchor Optional unconstrained anchor.
-#' @param n_anchor_updates Number of warmup anchor updates (currently zero for
-#'   generic custom-Stan providers).
-#' @param use_anchor_bank Logical; reserved for analytic providers.
-#' @param bank_capacity Positive anchor-bank capacity.
-#' @return A validated marked-subsampling specification.
-#' @rdname marked_stan
+#' @return A validated observation-subsampling specification.
+#' @rdname stan_subsampling
 #' @export
-stan_marked_subsampling <- function(n_observations, subsample_size,
+stan_subsampling <- function(n_observations, subsample_size,
                                     prior_standata, residual_envelope,
-                                    anchor = NULL, n_anchor_updates = 0L,
-                                    use_anchor_bank = FALSE,
-                                    bank_capacity = 1L) {
+                                    anchor = NULL) {
   if (!rlang::is_integerish(n_observations, n = 1L, finite = TRUE) ||
       n_observations < 2L) {
     cli::cli_abort("Argument {.arg n_observations} must be an integer of at least 2.")
@@ -98,35 +92,14 @@ stan_marked_subsampling <- function(n_observations, subsample_size,
   if (ncol(residual_envelope$weights) != n_observations) {
     cli::cli_abort("Residual-envelope weights must have one column per observation.")
   }
-  if (!rlang::is_integerish(n_anchor_updates, n = 1L, finite = TRUE) ||
-      n_anchor_updates < 0L) {
-    cli::cli_abort("Argument {.arg n_anchor_updates} must be nonnegative.")
-  }
-  n_anchor_updates <- as.integer(n_anchor_updates)
-  if (n_anchor_updates > 0L) {
-    cli::cli_abort("Generic custom-Stan marked sampling currently requires {.arg n_anchor_updates = 0L}.")
-  }
-  if (!is.logical(use_anchor_bank) || length(use_anchor_bank) != 1L || is.na(use_anchor_bank)) {
-    cli::cli_abort("Argument {.arg use_anchor_bank} must be TRUE or FALSE.")
-  }
-  if (isTRUE(use_anchor_bank)) {
-    cli::cli_abort("Generic custom-Stan marked sampling does not use an anchor bank.")
-  }
-  if (!rlang::is_integerish(bank_capacity, n = 1L, finite = TRUE) ||
-      bank_capacity < 1L) {
-    cli::cli_abort("Argument {.arg bank_capacity} must be positive.")
-  }
-  bank_capacity <- as.integer(bank_capacity)
   if (!is.null(anchor) && (!is.numeric(anchor) || any(!is.finite(anchor)))) {
     cli::cli_abort("Argument {.arg anchor} must be NULL or a finite numeric vector.")
   }
   structure(list(
     n_observations = n_observations, subsample_size = subsample_size,
     prior_standata = prior_standata, residual_envelope = residual_envelope,
-    anchor = if (is.null(anchor)) NULL else as.numeric(anchor),
-    n_anchor_updates = n_anchor_updates, use_anchor_bank = use_anchor_bank,
-    bank_capacity = bank_capacity
-  ), class = "stan_marked_subsampling")
+    anchor = if (is.null(anchor)) NULL else as.numeric(anchor)
+  ), class = "stan_subsampling")
 }
 
 #' OMRF person-level residual envelope
@@ -145,17 +118,10 @@ stan_marked_subsampling <- function(n_observations, subsample_size,
 #' @param thresholds Threshold parameter block name.
 #' @param interactions Interaction parameter block name; edge order is the
 #'   upper triangle `(1,2), (1,3), ..., (P-1,P)`.
-#' @param backend Selected-gradient backend. `"stan_header"` is currently
-#'   implemented; `"analytic"` is reserved.
 #' @return A certified Stan residual-envelope specification.
-#' @rdname marked_stan
+#' @rdname stan_subsampling
 #' @export
-omrf_residual_envelope <- function(X, seen, thresholds, interactions,
-                                   backend = c("stan_header", "analytic")) {
-  backend <- match.arg(backend)
-  if (backend == "analytic") {
-    cli::cli_abort("The analytic OMRF selected-gradient backend is not yet enabled; use {.val stan_header}.")
-  }
+omrf_residual_envelope <- function(X, seen, thresholds, interactions) {
   if (!is.matrix(X) || !is.numeric(X) || any(!is.finite(X)) || any(X != floor(X))) {
     cli::cli_abort("Argument {.arg X} must be a finite integer-valued person-by-node matrix.")
   }
@@ -184,8 +150,19 @@ omrf_residual_envelope <- function(X, seen, thresholds, interactions,
     matrix(integer(), nrow = 0L, ncol = 2L)
   }
   d_model <- no_thresholds + nrow(edges)
-  weights <- numeric(nrow(X))
-  for (n in seq_len(nrow(X))) {
+  incidence <- lapply(seq_len(P), function(j) {
+    incident <- which(edges[, 1L] == j | edges[, 2L] == j)
+    list(
+      edges = incident,
+      neighbours = ifelse(edges[incident, 1L] == j,
+                          edges[incident, 2L], edges[incident, 1L])
+    )
+  })
+  row_keys <- apply(X, 1L, paste, collapse = ",")
+  unique_rows <- which(!duplicated(row_keys))
+  unique_weights <- numeric(length(unique_rows))
+  for (key_index in seq_along(unique_rows)) {
+    n <- unique_rows[key_index]
     person_design <- matrix(0, no_thresholds, d_model)
     design_row <- 1L
     for (j in seq_len(P)) {
@@ -194,16 +171,15 @@ omrf_residual_envelope <- function(X, seen, thresholds, interactions,
       B <- matrix(0, q, d_model)
       for (u in seq_len(q)) {
         B[u, threshold_starts[j] + u] <- 1
-        incident <- which(edges[, 1L] == j | edges[, 2L] == j)
-        neighbours <- ifelse(edges[incident, 1L] == j,
-                             edges[incident, 2L], edges[incident, 1L])
-        B[u, no_thresholds + incident] <- u * X[n, neighbours]
+        B[u, no_thresholds + incidence[[j]]$edges] <-
+          u * X[n, incidence[[j]]$neighbours]
       }
       person_design[design_row + seq_len(q) - 1L, ] <- B
       design_row <- design_row + q
     }
-    weights[n] <- 0.5 * norm(person_design, type = "2")^2
+    unique_weights[key_index] <- 0.5 * norm(person_design, type = "2")^2
   }
+  weights <- unique_weights[match(row_keys, row_keys[unique_rows])]
   envelope <- stan_residual_envelope(weights)
   envelope$type <- "omrf"
   envelope$bound_type <- "stacked_person_spectral"
@@ -247,7 +223,7 @@ omrf_residual_envelope <- function(X, seen, thresholds, interactions,
 #' @param standata Named data list or JSON path.
 #' @param parameters Optional unconstrained names, block prefixes, or indices.
 #' @return A data frame with resolved 1-based indices and names.
-#' @rdname marked_stan
+#' @rdname stan_subsampling
 #' @export
 stan_parameter_mapping <- function(path_to_stanmodel, standata,
                                    parameters = NULL) {
@@ -277,44 +253,44 @@ stan_parameter_mapping <- function(path_to_stanmodel, standata,
   data.frame(index = idx, name = unc_names[idx], stringsAsFactors = FALSE)
 }
 
-#' Diagnose a marked custom-Stan gradient and envelope
+#' Diagnose a subsampling custom-Stan gradient and envelope
 #'
 #' Evaluates the persistent full, prior-only, and selected Stan modes at one
 #' position without starting a sampler. The selected likelihood gradient is
 #' unscaled; `selected_scale` reports the `N / m` factor applied by Julia when
-#' forming the marked gradient. The residual event-rate diagnostic uses the
+#' forming the subsampling gradient. The residual event-rate diagnostic uses the
 #' same typed envelope and trajectory geometry as sampling.
 #'
 #' @param path_to_stanmodel Stan source or compiled-library path containing the
 #'   package subset hook.
 #' @param standata Full-likelihood Stan data list or JSON path.
-#' @param marked_subsampling A specification from [stan_marked_subsampling()].
+#' @param subsampling A specification from [stan_subsampling()].
 #' @param position Finite unconstrained parameter vector.
 #' @param subset One-based observation indices, with exactly the configured
 #'   subsample size and no duplicates.
 #' @param velocity Finite diagnostic velocity. Defaults to a vector of ones.
-#' @param flow Supported marked flow used for the rate diagnostic.
+#' @param flow Supported subsampling flow used for the rate diagnostic.
 #' @param flow_mean Optional flow mean.
 #' @param flow_cov Optional flow covariance.
 #' @return A list of gradient-closure, residual-rate, envelope, and construction
 #'   diagnostics.
 #' @export
-stan_marked_diagnostics <- function(path_to_stanmodel, standata,
-                                    marked_subsampling, position, subset,
+stan_subsampling_diagnostics <- function(path_to_stanmodel, standata,
+                                    subsampling, position, subset,
                                     velocity = NULL,
                                     flow = c("ZigZag", "BouncyParticle",
                                              "AdaptiveBoomerang"),
                                     flow_mean = NULL, flow_cov = NULL) {
   validate_type(path_to_stanmodel, type = "character", n = 1)
-  if (!inherits(marked_subsampling, "stan_marked_subsampling")) {
-    cli::cli_abort("Argument {.arg marked_subsampling} must be created by {.fn stan_marked_subsampling}.")
+  if (!inherits(subsampling, "stan_subsampling")) {
+    cli::cli_abort("Argument {.arg subsampling} must be created by {.fn stan_subsampling}.")
   }
   if (!is.numeric(position) || !length(position) || any(!is.finite(position))) {
     cli::cli_abort("Argument {.arg position} must be a nonempty finite numeric vector.")
   }
-  if (!rlang::is_integerish(subset, n = marked_subsampling$subsample_size,
+  if (!rlang::is_integerish(subset, n = subsampling$subsample_size,
                             finite = TRUE) ||
-      any(subset < 1L | subset > marked_subsampling$n_observations) ||
+      any(subset < 1L | subset > subsampling$n_observations) ||
       anyDuplicated(subset)) {
     cli::cli_abort("Argument {.arg subset} must contain exactly m distinct indices in 1:N.")
   }
@@ -337,10 +313,10 @@ stan_marked_diagnostics <- function(path_to_stanmodel, standata,
     path
   }
   full_data <- write_data(standata)
-  prior_data <- write_data(marked_subsampling$prior_standata)
+  prior_data <- write_data(subsampling$prior_standata)
   temporary_data <- c(
     if (is.list(standata)) full_data else character(),
-    if (is.list(marked_subsampling$prior_standata)) prior_data else character()
+    if (is.list(subsampling$prior_standata)) prior_data else character()
   )
   if (length(temporary_data)) on.exit(unlink(temporary_data), add = TRUE)
 
@@ -352,7 +328,7 @@ stan_marked_diagnostics <- function(path_to_stanmodel, standata,
   JuliaCall::julia_assign("_diagnostic_model", model_path)
   JuliaCall::julia_assign("_diagnostic_full_data", full_data)
   JuliaCall::julia_assign("_diagnostic_prior_data", prior_data)
-  JuliaCall::julia_assign("_diagnostic_marked", marked_subsampling)
+  JuliaCall::julia_assign("_diagnostic_subsampling", subsampling)
   JuliaCall::julia_assign("_diagnostic_position", as.numeric(position))
   JuliaCall::julia_assign("_diagnostic_subset", as.integer(subset))
   JuliaCall::julia_assign("_diagnostic_velocity", as.numeric(velocity))
@@ -360,9 +336,9 @@ stan_marked_diagnostics <- function(path_to_stanmodel, standata,
   JuliaCall::julia_assign("_diagnostic_flow_mean", as.numeric(flow_mean))
   JuliaCall::julia_assign("_diagnostic_flow_cov", flow_cov)
   result <- .pdmpsamplers_julia_eval(
-    "PDMPSamplersRBridge.r_stan_marked_diagnostics(
+    "PDMPSamplersRBridge.r_stan_subsampling_diagnostics(
       _diagnostic_model, _diagnostic_full_data, _diagnostic_prior_data,
-      _diagnostic_marked, _diagnostic_position, _diagnostic_subset,
+      _diagnostic_subsampling, _diagnostic_position, _diagnostic_subset,
       _diagnostic_velocity, _diagnostic_flow, _diagnostic_flow_mean,
       _diagnostic_flow_cov
     );"

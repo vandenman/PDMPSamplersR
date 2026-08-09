@@ -34,7 +34,7 @@ A character string containing the generated Stan program.
 }
 \description{
 This is a thin wrapper around [brms::stancode()] using the same model
-arguments accepted by [brm_pdmp()]. Marked subsampling uses the ordinary
+arguments accepted by [brm_pdmp()]. Observation subsampling uses the ordinary
 Stan model plus analytic Julia-side family providers, so no rewritten Stan
 variant is generated.
 }

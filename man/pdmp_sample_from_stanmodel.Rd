@@ -9,7 +9,7 @@ pdmp_sample_from_stanmodel(
   standata,
   prior_stanmodel = NULL,
   prior_standata = NULL,
-  marked_subsampling = NULL,
+  subsampling = NULL,
   flow = c("ZigZag", "BouncyParticle", "Boomerang", "AdaptiveBoomerang",
     "PreconditionedZigZag", "PreconditionedBPS"),
   algorithm = c("ThinningStrategy", "GridThinningStrategy",
@@ -58,14 +58,16 @@ BridgeStan will compile it automatically.}
 or a named list that will be written to a temporary JSON file via
 [write_stan_json()].}
 
-\item{prior_stanmodel}{Deprecated compatibility argument. The full-gradient
-dependent-slab path no longer needs a separate prior model.}
+\item{prior_stanmodel}{Compatibility argument. The full-gradient
+dependent-slab path does not use it. Custom-Stan subsampling accepts only
+the same model as \code{path_to_stanmodel}; use \code{prior_standata} to
+disable likelihood contributions.}
 
 \item{prior_standata}{Optional prior-only Stan data path or named list used
-by \code{marked_subsampling}; it is not needed for full-gradient slabs.}
+by \code{subsampling}; it is not needed for full-gradient slabs.}
 
-\item{marked_subsampling}{Optional exact marked custom-Stan specification
-created by [stan_marked_subsampling()]. The selected Stan branch must add
+\item{subsampling}{Optional exact subsampling custom-Stan specification
+created by [stan_subsampling()]. The selected Stan branch must add
 the unscaled sum of the installed observations; Julia applies `N / m`.}
 
 \item{flow}{Character string specifying the flow type. One of "ZigZag",
@@ -96,7 +98,8 @@ or "RootsPoissonStrategy".}
 
 \item{x0}{Numeric vector of length d, initial position (default: random normal).}
 
-\item{theta0}{Numeric vector of length d, initial velocity (default: random based on the flow).}
+\item{theta0}{Optional initial velocity forwarded to both full-gradient and
+custom-Stan subsampling initialization.}
 
 \item{sticky}{Logical, whether to use sticky sampling (default: FALSE).}
 
@@ -124,7 +127,9 @@ package replaces that slab by its active-face restriction internally.}
 curvature when no exact Hessian-vector product is used.}
 
 \item{curvature_backend}{Character string selecting directional curvature:
-`"exact"` or `"finite_difference"`. Finite differences use
+`"exact"` or `"finite_difference"`. Custom-Stan subsampling has no
+deterministic exact HVP and therefore always requires finite differences.
+Finite differences use
 shifted exact gradients but approximate their directional derivative and
 therefore have step-size and truncation error. `NULL` preserves the
 legacy `use_fd_hvp` mapping.}

@@ -120,13 +120,9 @@ loglinear_gaussian_scale_slab <- function(log_base_sd, logscale,
   if (!is.matrix(logscale_design) && !inherits(logscale_design, "Matrix")) {
     cli::cli_abort("Argument {.arg logscale_design} must be a numeric matrix or sparse Matrix.")
   }
-  design_values <- if (inherits(logscale_design, "sparseMatrix")) {
-    methods::slot(logscale_design, "x")
-  } else if (inherits(logscale_design, "Matrix")) {
-    as.vector(logscale_design)
-  } else {
-    logscale_design
-  }
+  design_values <- if (inherits(logscale_design, "Matrix")) {
+    Matrix::summary(logscale_design)$x
+  } else logscale_design
   if (!is.numeric(design_values) || any(!is.finite(design_values))) {
     cli::cli_abort("Argument {.arg logscale_design} must contain finite numeric values.")
   }
@@ -134,24 +130,29 @@ loglinear_gaussian_scale_slab <- function(log_base_sd, logscale,
     cli::cli_abort("Columns of {.arg logscale_design} must match {.arg logscale}.")
   }
   if (!is.character(logscale)) logscale <- as.integer(logscale)
-  sparse_design <- NULL
-  if (inherits(logscale_design, "sparseMatrix")) {
-    column_design <- methods::as(
-      methods::as(logscale_design, "generalMatrix"), "CsparseMatrix"
+  dims <- as.integer(dim(logscale_design))
+  design <- if (inherits(logscale_design, "Matrix")) {
+    # Adding a declared general sparse zero canonicalizes CSC, triplet,
+    # row-sparse, and symmetric Matrix subclasses to their complete matrix
+    # semantics before extracting the exported triplet summary.
+    general <- Matrix::drop0(logscale_design + Matrix::sparseMatrix(
+      i = integer(), j = integer(), dims = dims
+    ))
+    entries <- Matrix::summary(general)
+    list(
+      storage = "sparse_rows",
+      dims = dims,
+      i = as.integer(entries$i),
+      j = as.integer(entries$j),
+      x = as.numeric(entries$x)
     )
-    sparse_design <- list(
-      nrow = nrow(column_design),
-      ncol = ncol(column_design),
-      colptr = methods::slot(column_design, "p") + 1L,
-      rowval = methods::slot(column_design, "i") + 1L,
-      nzval = as.numeric(methods::slot(column_design, "x"))
-    )
+  } else {
+    list(storage = "dense", dims = dims, x = as.numeric(logscale_design))
   }
   .new_slab_prior(
     "loglinear_gaussian_scale",
     list(log_base_scales = log_base_sd, logscale = logscale,
-         logscale_design = logscale_design,
-         logscale_design_sparse = sparse_design),
+         logscale_design = design),
     coef = coef
   )
 }

@@ -18,12 +18,12 @@
 #'    When subsampling is active and `t_warmup` is 0, it is automatically
 #'   set to 20\% of the sampling time.
 #' @param flow_mean Numeric vector for the flow reference mean, or NULL. For
-#'   marked subsampling this is also the fixed control-variate anchor and
+#'   observation subsampling this is also the fixed control-variate anchor and
 #'   initial position; supplying a posterior mode or other representative point
 #'   can materially tighten the residual envelope.
 #' @param flow_cov Numeric matrix for the flow covariance, or NULL.
 #' @param c0 Numeric thinning bound constant. With `ThinningStrategy` this
-#'   user-configured bound must dominate the deterministic marked component;
+#'   user-configured bound must dominate the deterministic subsampling component;
 #'   violations are detected and stop the sampler.
 #' @param grid_n Integer number of grid points for GridThinningStrategy.
 #' @param grid_t_max Numeric max grid interval for GridThinningStrategy.
@@ -41,15 +41,15 @@
 #' @param subsample_size Integer number of observations per subsample,
 #'   or NULL (default) for full-data gradients. With `GridThinningStrategy`
 #'   or a representable `ThinningStrategy` envelope,
-#'   marked acceleration is selected automatically when affine predictor,
+#'   subsampling acceleration is selected automatically when affine predictor,
 #'   first-batch likelihood, and trajectory providers are all available for
 #'   the requested dynamics. Ineligible models use exact full gradients.
 #' @param n_anchor_updates Integer number of anchor updates during warmup
-#'   (default: 0). For analytic marked sampling, each update prepares a
+#'   (default: 0). For analytic subsampling sampling, each update prepares a
 #'   coherent anchor state containing the full and deterministic anchor
 #'   gradients, cached likelihood predictors, and residual envelope.
 #' @param use_hcv Logical; enable the certified analytic damped Hessian
-#'   control variate for marked affine Bernoulli-logit or binomial-logit
+#'   control variate for subsampling affine Bernoulli-logit or binomial-logit
 #'   sampling (default: FALSE). Its likelihood Hessian and Taylor-remainder
 #'   envelope are prepared with each anchor, with Cauchy damping
 #'   `d / (d + ||x - anchor||^2)` in `d` unconstrained dimensions;
@@ -121,7 +121,7 @@
 #' With a single chain, `Rhat` will report `NA`. Use `n_chains >= 2`
 #' for convergence diagnostics.
 #'
-#' Marked acceleration is enabled when the model has certified affine predictor,
+#' Subsampling acceleration is enabled when the model has certified affine predictor,
 #' likelihood, and dynamics providers. The first provider batch covers weighted
 #' and subsetted Bernoulli/binomial logit models, categorical/multinomial logit,
 #' Poisson log models (including `rate()`), and Gaussian location-scale models
@@ -131,9 +131,9 @@
 #' unconditional custom target additions remain in an opaque deterministic
 #' BridgeStan provider.
 #'
-#' PDMPSamplers.jl applies `N / m`, draws a fresh marked subset per proposal,
+#' PDMPSamplers.jl applies `N / m`, draws a fresh subsampling subset per proposal,
 #' uses dynamics-specific linear or harmonic trajectory bounds, and reuses the
-#' accepted stochastic gradient for the event. Marked subsampling supports
+#' accepted stochastic gradient for the event. Observation subsampling supports
 #' `GridThinningStrategy` generally and `ThinningStrategy` when the residual
 #' envelope has an affine global roof (or the trajectory is periodic).
 #'
@@ -259,7 +259,7 @@ brm_pdmp <- function(
                           sample_prior = sample_prior, ...)
 
   if (subsampled) {
-    eligibility <- marked_subsampling_eligibility(formula, family, stanvars, sdata)
+    eligibility <- subsampling_eligibility(formula, family, stanvars, sdata)
     runtime_supported <- flow %in% c(
       "BouncyParticle", "ZigZag", "PreconditionedBPS",
       "PreconditionedZigZag", "DensePreconditionedBPS",
@@ -285,7 +285,7 @@ brm_pdmp <- function(
         eligibility <- list(
           eligible = FALSE,
           reason = paste0(
-            "the marked fast path requires a dynamics trajectory provider and ",
+            "the subsampling fast path requires a dynamics trajectory provider and ",
             "GridThinningStrategy or ThinningStrategy"
           )
         )
@@ -315,7 +315,7 @@ brm_pdmp <- function(
       }
       if (isTRUE(use_hcv) && !eligibility$family %in% c("bernoulli", "binomial")) {
         cli::cli_abort(paste0(
-          "The analytic marked HCV currently requires an affine Bernoulli-logit ",
+          "The analytic subsampling HCV currently requires an affine Bernoulli-logit ",
           "or binomial-logit likelihood."
         ))
       }
@@ -344,21 +344,21 @@ brm_pdmp <- function(
     write_stan_json(sdata_prior, data_prior_file)
     geometry_error <- NULL
     tryCatch({
-      marked_unc_names <- .pdmpsamplers_julia_call(
+      subsampling_unc_names <- .pdmpsamplers_julia_call(
         "r_get_param_unc_names",
         normalizePath(stan_file, mustWork = TRUE),
         normalizePath(data_full_file, mustWork = TRUE)
       )
-      marked_geometry <- build_marked_predictor_geometry(
-        sdata, marked_unc_names, eligibility
+      subsampling_geometry <- build_subsampling_predictor_geometry(
+        sdata, subsampling_unc_names, eligibility
       )
-      marked_multipliers <- marked_observation_multipliers(
+      subsampling_multipliers <- subsampling_observation_multipliers(
         sdata, eligibility$family
       )
     }, error = function(e) geometry_error <<- conditionMessage(e))
     if (!is.null(geometry_error)) {
       cli::cli_inform(c(
-        "The affine marked geometry could not be certified; using the exact full-gradient sampler.",
+        "The affine subsampling geometry could not be certified; using the exact full-gradient sampler.",
         "i" = geometry_error
       ))
       subsampled <- FALSE
@@ -374,7 +374,7 @@ brm_pdmp <- function(
     } else if (identical(algorithm, "ThinningStrategy") &&
                !flow %in% c("Boomerang", "AdaptiveBoomerang") &&
                identical(eligibility$family, "gaussian") &&
-               length(marked_geometry$designs) > 1L) {
+               length(subsampling_geometry$designs) > 1L) {
       cli::cli_inform(c(
         "Subsampling is not eligible for this model; using the full-gradient sampler.",
         "i" = paste0(
@@ -470,15 +470,15 @@ brm_pdmp <- function(
 
   if (subsampled) {
     jl_result <- .pdmpsamplers_julia_call(
-      "r_pdmp_brms_marked",
+      "r_pdmp_brms_subsampling",
       normalizePath(stan_file, mustWork = TRUE),
       normalizePath(data_full_file, mustWork = TRUE),
       normalizePath(data_prior_file, mustWork = TRUE),
       as.integer(N), subsample_size,
-      eligibility$family, marked_geometry$designs,
-      marked_geometry$design_indices, as.integer(marked_geometry$dimension),
-      marked_geometry$offsets,
-      marked_geometry$response, marked_geometry$se, marked_multipliers,
+      eligibility$family, subsampling_geometry$designs,
+      subsampling_geometry$design_indices, as.integer(subsampling_geometry$dimension),
+      subsampling_geometry$offsets,
+      subsampling_geometry$response, subsampling_geometry$se, subsampling_multipliers,
       flow, algorithm,
       jl_flow_mean, jl_flow_cov,
       csv_file,
@@ -545,7 +545,7 @@ brm_pdmp <- function(
   attr(empty_fit, "sampling_time") <- sampling_time
   attr(empty_fit, "pdmp_stats") <- pdmp_stats
   attr(empty_fit, "bridge_call_counts") <- jl_result$bridge_call_counts
-  attr(empty_fit, "marked_subsampling") <- isTRUE(jl_result$marked_subsampling)
+  attr(empty_fit, "subsampling") <- isTRUE(jl_result$subsampling)
   class(empty_fit) <- unique(c("pdmp_brmsfit", class(empty_fit)))
 
   if (isTRUE(sticky_args$sticky) && !is.null(jl_result$inclusion_probs)) {

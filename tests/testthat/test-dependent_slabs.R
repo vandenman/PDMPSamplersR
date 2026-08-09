@@ -262,8 +262,8 @@ test_that("Julia bridge builds dependent slab concrete types", {
           [\"b.x1\", \"b.x2\", \"b.Intercept\", \"log_lambda\"],
           BitVector([true, true, false, false]), 4
         )
-        occursin(\"SparseMatrixCSC\", string(typeof(provider.logscale_design))) &&
-          count(!iszero, provider.logscale_design) == 3
+        !hasfield(typeof(provider), :logscale_design) &&
+          length(provider.nzval) == 3 && provider.rowptr == [1, 2, 4]
       end
     "))
   }

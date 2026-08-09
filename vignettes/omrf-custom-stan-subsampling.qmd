@@ -1,8 +1,8 @@
 ---
-title: "Marked custom-Stan sampling for an ordinal Markov random field"
+title: "Subsampling custom-Stan sampling for an ordinal Markov random field"
 format: html
 vignette: >
-  %\VignetteIndexEntry{Marked custom-Stan sampling for an ordinal Markov random field}
+  %\VignetteIndexEntry{Subsampling custom-Stan sampling for an ordinal Markov random field}
   %\VignetteEngine{quarto::html}
   %\VignetteEncoding{UTF-8}
 execute:
@@ -16,14 +16,15 @@ library(PDMPSamplersR)
 
 The OMRF pseudolikelihood is a sum over persons. For person (n), each node is
 a categorical-logit conditional whose non-reference logits are affine in the
-threshold and interaction parameters. The marked observation is therefore one
+threshold and interaction parameters. The subsampling observation is therefore one
 person, including all node conditionals for that person.
 
-For node (j), write the affine logit map as (B_{nj}\theta). The
-categorical-logit Hessian has operator norm at most (1/2), so
+Let (B_n) vertically stack all node-specific affine logit maps for person
+(n). The block-diagonal categorical covariance has operator norm at most
+(1/2), so
 
 \[
-w_n = \frac12 \sum_j \lVert B_{nj}\rVert_{op}^2
+w_n = \frac12 \lVert B_n\rVert_{op}^2
 \]
 
 is a global nonnegative curvature coefficient. `omrf_residual_envelope()`
@@ -55,7 +56,7 @@ prior_data <- stan_data
 prior_data$prior_only <- 1L
 
 stan_file <- system.file(
-  "stan", "omrf", "omrf_marked.stan", package = "PDMPSamplersR"
+  "stan", "omrf", "omrf.stan", package = "PDMPSamplersR"
 )
 pdmp_subsample_hpp_path()
 ```
@@ -80,7 +81,7 @@ envelope <- omrf_residual_envelope(
   interactions = "interactions_0"
 )
 anchor <- rep(0, 9L)
-marked <- stan_marked_subsampling(
+subsampling <- stan_subsampling(
   n_observations = stan_data$N,
   subsample_size = 3L,
   prior_standata = prior_data,
@@ -93,12 +94,12 @@ The same generic constructor works for another custom Stan likelihood only
 when it receives a certified residual envelope. The subset hook alone is an
 efficient selected-gradient oracle, not a proof of envelope domination.
 
-## Full and marked fits
+## Full and subsampling fits
 
 The following managed check is disabled during routine vignette builds because
 it compiles Stan and runs replicated posterior chains. Set
 `PDMPSAMPLERSR_RUN_OMRF_VIGNETTE=true` to execute it. The benchmark driver
-`benchmarks/omrf_marked.R` contains the longer (N=200,500),
+`benchmarks/omrf_subsampling.R` contains the longer (N=200,500),
 (P=10,20,30) timing and ESS/second study.
 
 ```{r}
@@ -143,8 +144,8 @@ stopifnot(isTRUE(all.equal(
 )))
 
 subset <- c(2L, 5L, 9L)
-diagnostic <- stan_marked_diagnostics(
-  compiled, stan_data, marked, position = q, subset = subset,
+diagnostic <- stan_subsampling_diagnostics(
+  compiled, stan_data, subsampling, position = q, subset = subset,
   velocity = seq(0.4, 1.2, length.out = 9L), flow = "ZigZag"
 )
 step <- 1e-6
@@ -161,15 +162,15 @@ stopifnot(
                    explicit_selected, tolerance = 2e-7)),
   diagnostic$selected_scale == N / length(subset),
   isTRUE(all.equal(
-    diagnostic$marked_gradient,
+    diagnostic$subsampled_gradient,
     diagnostic$deterministic_gradient +
       diagnostic$selected_scale * diagnostic$residual_gradient,
     tolerance = 1e-12)),
   max(abs(diagnostic$residual_gradient)) > 1e-4
 )
 for (flow in c("ZigZag", "BouncyParticle", "AdaptiveBoomerang")) {
-  flow_check <- stan_marked_diagnostics(
-    compiled, stan_data, marked, position = q, subset = subset,
+  flow_check <- stan_subsampling_diagnostics(
+    compiled, stan_data, subsampling, position = q, subset = subset,
     velocity = diagnostic$residual_gradient, flow = flow)
   stopifnot(
     flow_check$residual_rate > 0,
@@ -178,12 +179,12 @@ for (flow in c("ZigZag", "BouncyParticle", "AdaptiveBoomerang")) {
   )
 }
 
-anchor_check <- stan_marked_diagnostics(
-  compiled, stan_data, marked, position = anchor, subset = subset,
+anchor_check <- stan_subsampling_diagnostics(
+  compiled, stan_data, subsampling, position = anchor, subset = subset,
   velocity = rep(1, 9L), flow = "BouncyParticle"
 )
 stopifnot(isTRUE(all.equal(
-  anchor_check$marked_gradient, anchor_check$full_gradient,
+  anchor_check$subsampled_gradient, anchor_check$full_gradient,
   tolerance = 1e-10
 )))
 
@@ -203,9 +204,9 @@ seeds <- 901:903
 full_fits <- lapply(seeds, function(seed) {
   do.call(pdmp_sample_from_stanmodel, c(common, list(seed = seed)))
 })
-marked_fits <- lapply(seeds, function(seed) {
+subsampling_fits <- lapply(seeds, function(seed) {
   do.call(pdmp_sample_from_stanmodel,
-          c(common, list(marked_subsampling = marked, seed = seed)))
+          c(common, list(subsampling = subsampling, seed = seed)))
 })
 replicated_summary <- function(fits) {
   run_means <- do.call(cbind, lapply(fits, mean))
@@ -221,21 +222,21 @@ replicated_summary <- function(fits) {
   )
 }
 full_summary <- replicated_summary(full_fits)
-marked_summary <- replicated_summary(marked_fits)
-standardized_difference <- abs(full_summary$mean - marked_summary$mean) /
-  sqrt(full_summary$mcse^2 + marked_summary$mcse^2)
+subsampling_summary <- replicated_summary(subsampling_fits)
+standardized_difference <- abs(full_summary$mean - subsampling_summary$mean) /
+  sqrt(full_summary$mcse^2 + subsampling_summary$mcse^2)
 stopifnot(
   full_summary$minimum_ess > 20,
-  marked_summary$minimum_ess > 20,
+  subsampling_summary$minimum_ess > 20,
   all(is.finite(standardized_difference)),
   max(standardized_difference) < 4.5
 )
-for (marked_fit in marked_fits) {
-  counters <- attr(marked_fit, "marked_context_counters")[[1L]]
+for (subsampling_fit in subsampling_fits) {
+  counters <- attr(subsampling_fit, "subsampling_context_counters")[[1L]]
   if (is.environment(counters)) counters <- as.list(counters)
   stopifnot(
     counters$persons_evaluated ==
-      marked$subsample_size * counters$selected_gradient_calls,
+      subsampling$subsample_size * counters$selected_gradient_calls,
     counters$sampling_full_gradient_calls == 0L,
     counters$sampling_model_constructions == 0L,
     counters$sampling_data_constructions == 0L
@@ -243,9 +244,10 @@ for (marked_fit in marked_fits) {
 }
 ```
 
-`selected_gradient_calls` counts both the current-position and anchor
-evaluations needed by each residual call, so `persons_evaluated` is exactly
-`m * selected_gradient_calls`. `initialization_full_gradient_calls` records the
+The fixed-anchor observation-gradient cache removes the repeated anchor Stan
+evaluation, so each residual call performs one current-position selected
+gradient. `persons_evaluated` is exactly `m * selected_gradient_calls`.
+`initialization_full_gradient_calls` records the
 anchor preparation; `sampling_full_gradient_calls` must remain zero. Likewise,
 the initialization model/data construction counts are fixed before sampling,
 and both sampling construction deltas must remain zero.

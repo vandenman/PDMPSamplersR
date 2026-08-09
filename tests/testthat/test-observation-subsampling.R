@@ -1,4 +1,4 @@
-test_that("an enabled marked bank requires anchor updates", {
+test_that("an enabled subsampling bank requires anchor updates", {
   data <- data.frame(y = c(0L, 1L), x = c(-1, 1))
   expect_error(
     PDMPSamplersR::brm_pdmp(
@@ -10,7 +10,7 @@ test_that("an enabled marked bank requires anchor updates", {
   )
 })
 
-test_that("marked integer controls are validated before coercion", {
+test_that("subsampling integer controls are validated before coercion", {
   data <- data.frame(y = c(0L, 1L), x = c(-1, 1))
   for (value in list(0, -1, 0.5, NA_real_, c(1, 2))) {
     expect_error(
@@ -37,7 +37,7 @@ test_that("marked integer controls are validated before coercion", {
   }
 })
 
-test_that("analytic marked HCV rejects uncertified variants", {
+test_that("analytic subsampling HCV rejects uncertified variants", {
   data <- data.frame(y = c(0L, 1L), count = c(1L, 2L), x = c(-1, 1))
   expect_error(
     PDMPSamplersR::brm_pdmp(
@@ -58,14 +58,14 @@ test_that("R thinning c0 remains a global bound", {
   expect_no_match(bridge, "GlobalBounds\\(c0 / d, d\\)")
 })
 
-test_that("marked eligibility is capability based and custom U0 is exact", {
+test_that("subsampling eligibility is capability based and custom U0 is exact", {
   family <- brms::bernoulli(link = "logit")
   accepted <- list(
     y ~ 1, y ~ 0 + x, y ~ x, y ~ x + z,
     y ~ x * z, y ~ factor_group, y ~ x + offset(o)
   )
   for (formula in accepted) {
-    expect_true(PDMPSamplersR:::marked_subsampling_eligibility(
+    expect_true(PDMPSamplersR:::subsampling_eligibility(
       formula, family)$eligible, info = deparse(formula))
   }
 
@@ -74,7 +74,7 @@ test_that("marked eligibility is capability based and custom U0 is exact", {
     subset = y | subset(use) ~ x
   )
   for (name in names(modifiers)) {
-    expect_true(PDMPSamplersR:::marked_subsampling_eligibility(
+    expect_true(PDMPSamplersR:::subsampling_eligibility(
       modifiers[[name]], family)$eligible, info = name)
   }
 
@@ -88,41 +88,41 @@ test_that("marked eligibility is capability based and custom U0 is exact", {
     autocorrelation = y ~ x + ar()
   )
   for (name in names(rejected)) {
-    expect_false(PDMPSamplersR:::marked_subsampling_eligibility(
+    expect_false(PDMPSamplersR:::subsampling_eligibility(
       rejected[[name]], family)$eligible, info = name)
   }
-  expect_true(PDMPSamplersR:::marked_subsampling_eligibility(
+  expect_true(PDMPSamplersR:::subsampling_eligibility(
     y | trials(n) ~ x, brms::brmsfamily("binomial", "logit"))$eligible)
-  expect_true(PDMPSamplersR:::marked_subsampling_eligibility(
+  expect_true(PDMPSamplersR:::subsampling_eligibility(
     y | rate(exposure) ~ x, brms::brmsfamily("poisson", "log"))$eligible)
-  expect_true(PDMPSamplersR:::marked_subsampling_eligibility(
+  expect_true(PDMPSamplersR:::subsampling_eligibility(
     y ~ x, brms::brmsfamily("gaussian", "identity"))$eligible)
 
   nonlinear <- brms::bf(y ~ a * exp(b * x), a + b ~ 1, nl = TRUE)
-  expect_false(PDMPSamplersR:::marked_subsampling_eligibility(
+  expect_false(PDMPSamplersR:::subsampling_eligibility(
     nonlinear, family)$eligible)
-  expect_false(PDMPSamplersR:::marked_subsampling_eligibility(
+  expect_false(PDMPSamplersR:::subsampling_eligibility(
     y | cens(censoring) ~ x, brms::brmsfamily("gaussian", "identity"))$eligible)
-  expect_false(PDMPSamplersR:::marked_subsampling_eligibility(
+  expect_false(PDMPSamplersR:::subsampling_eligibility(
     y | trunc(lb = 0) ~ x, brms::brmsfamily("gaussian", "identity"))$eligible)
   unsupported_family <- brms::custom_family(
     "opaque_family", dpars = "mu", links = "identity",
     type = "real", vars = "vreal1[n]"
   )
-  expect_false(PDMPSamplersR:::marked_subsampling_eligibility(
+  expect_false(PDMPSamplersR:::subsampling_eligibility(
     y ~ x, unsupported_family)$eligible)
 
   observation_code <- brms::stanvar(
     scode = "target += normal_lpdf(Y | rep_vector(0, N), 1);",
     block = "model"
   )
-  expect_true(PDMPSamplersR:::marked_subsampling_eligibility(
+  expect_true(PDMPSamplersR:::subsampling_eligibility(
     y ~ x, family, observation_code)$eligible)
   opaque_global_code <- brms::stanvar(
     scode = "target += normal_lpdf(auxiliary_parameter | 0, 1);",
     block = "model"
   )
-  expect_true(PDMPSamplersR:::marked_subsampling_eligibility(
+  expect_true(PDMPSamplersR:::subsampling_eligibility(
     y ~ x, family, opaque_global_code)$eligible)
 
   custom_observations <- brms::stanvar(1:4, name = "custom_y") +
@@ -130,14 +130,14 @@ test_that("marked eligibility is capability based and custom U0 is exact", {
       scode = "target += normal_lpdf(custom_y | rep_vector(0, N), 1);",
       block = "model"
     )
-  expect_true(PDMPSamplersR:::marked_subsampling_eligibility(
+  expect_true(PDMPSamplersR:::subsampling_eligibility(
     y ~ x, family, custom_observations, list(N = 4L))$eligible)
 
   conditional <- brms::stanvar(
     scode = "if (!prior_only) target += normal_lpdf(b[1] | 0, 0.5);",
     block = "model"
   )
-  result <- PDMPSamplersR:::marked_subsampling_eligibility(
+  result <- PDMPSamplersR:::subsampling_eligibility(
     y ~ x, family, conditional)
   expect_false(result$eligible)
   expect_match(result$reason, "prior_only")
@@ -145,17 +145,17 @@ test_that("marked eligibility is capability based and custom U0 is exact", {
   predictor_change <- brms::stanvar(
     scode = "mu += rep_vector(0.1, N);", block = "model"
   )
-  expect_false(PDMPSamplersR:::marked_subsampling_eligibility(
+  expect_false(PDMPSamplersR:::subsampling_eligibility(
     y ~ x, family, predictor_change)$eligible)
 })
 
 test_that("response modifiers produce exact nonnegative multipliers", {
-  expect_equal(PDMPSamplersR:::marked_observation_multipliers(
+  expect_equal(PDMPSamplersR:::subsampling_observation_multipliers(
     list(N = 3L, weights = c(0.5, 2, 1)), "bernoulli"), c(0.5, 2, 1))
-  expect_equal(PDMPSamplersR:::marked_observation_multipliers(
+  expect_equal(PDMPSamplersR:::subsampling_observation_multipliers(
     list(N = 3L, weights = c(0.5, 2, 1), trials = c(2, 3, 4)),
     "binomial"), c(1, 6, 4))
-  expect_error(PDMPSamplersR:::marked_observation_multipliers(
+  expect_error(PDMPSamplersR:::subsampling_observation_multipliers(
     list(N = 2L, weights = c(1, -1)), "bernoulli"), "nonnegative")
 })
 
@@ -164,7 +164,7 @@ test_that("centered brms design maps to unconstrained coordinates", {
   attr(X, "assign") <- c(0L, 1L, 2L)
   sdata <- list(N = 3L, X = X, means_X = c(1, 1))
   names <- c("b.1", "unused_prior_parameter", "Intercept", "b.2")
-  predictor <- PDMPSamplersR:::build_marked_compact_affine_design(
+  predictor <- PDMPSamplersR:::build_subsampling_compact_affine_design(
     sdata, names, TRUE, "mu"
   )
 
@@ -175,7 +175,7 @@ test_that("centered brms design maps to unconstrained coordinates", {
 
   X_no_intercept <- cbind(x = c(-2, 0, 5), interaction = c(3, 1, -1))
   attr(X_no_intercept, "assign") <- c(1L, 2L)
-  predictor_no_intercept <- PDMPSamplersR:::build_marked_compact_affine_design(
+  predictor_no_intercept <- PDMPSamplersR:::build_subsampling_compact_affine_design(
     list(N = 3L, X = X_no_intercept), c("b.1", "b.2"), FALSE, "mu"
   )
   expect_equal(predictor_no_intercept$indices, c(1L, 2L))
@@ -246,7 +246,7 @@ test_that("generated brms affine predictors close and satisfy the envelope", {
 
   for (name in names(formulas)) {
     formula <- formulas[[name]]
-    eligibility <- PDMPSamplersR:::marked_subsampling_eligibility(
+    eligibility <- PDMPSamplersR:::subsampling_eligibility(
       formula, family
     )
     expect_true(eligibility$eligible, info = name)
@@ -261,13 +261,13 @@ test_that("generated brms affine predictors close and satisfy the envelope", {
     unc_names <- PDMPSamplersR:::.pdmpsamplers_julia_call(
       "r_get_param_unc_names", normalizePath(stan_file), normalizePath(full_file)
     )
-    geometry <- PDMPSamplersR:::build_marked_predictor_geometry(
+    geometry <- PDMPSamplersR:::build_subsampling_predictor_geometry(
       sdata, unc_names, eligibility
     )
     anchor <- seq(-0.15, 0.05, length.out = length(unc_names))
     theta <- seq(0.1, 0.3, length.out = length(unc_names))
     diagnostics <- PDMPSamplersR:::.pdmpsamplers_julia_call(
-      "r_marked_family_closure_diagnostics",
+      "r_subsampling_family_closure_diagnostics",
       normalizePath(stan_file), normalizePath(full_file), normalizePath(prior_file),
       eligibility$family, geometry$designs, geometry$design_indices,
       geometry$dimension, geometry$offsets, geometry$response, geometry$se,
@@ -283,7 +283,7 @@ test_that("generated brms affine predictors close and satisfy the envelope", {
     block = "model"
   )
   formula <- y ~ x
-  eligibility <- PDMPSamplersR:::marked_subsampling_eligibility(
+  eligibility <- PDMPSamplersR:::subsampling_eligibility(
     formula, family, conditional)
   expect_false(eligibility$eligible)
   scode <- brms::stancode(formula, data = data, family = family,
@@ -297,11 +297,11 @@ test_that("generated brms affine predictors close and satisfy the envelope", {
     PDMPSamplersR:::make_opaque_deterministic_standata(sdata), prior_file)
   unc_names <- PDMPSamplersR:::.pdmpsamplers_julia_call(
     "r_get_param_unc_names", normalizePath(stan_file), normalizePath(full_file))
-  predictor <- PDMPSamplersR:::build_marked_compact_affine_design(
+  predictor <- PDMPSamplersR:::build_subsampling_compact_affine_design(
     sdata, unc_names, TRUE, "mu"
   )
   diagnostics <- PDMPSamplersR:::.pdmpsamplers_julia_call(
-    "r_marked_family_closure_diagnostics", normalizePath(stan_file),
+    "r_subsampling_family_closure_diagnostics", normalizePath(stan_file),
     normalizePath(full_file), normalizePath(prior_file), "bernoulli",
     list(predictor$design), list(predictor$indices), length(unc_names),
     matrix(0, nrow(data), 1L), matrix(sdata$Y, nrow(data), 1L), numeric(),
@@ -363,7 +363,7 @@ test_that("first family batch closes against generated brms models", {
     formula <- cases[[name]][[1L]]; family <- cases[[name]][[2L]]
     case_data <- cases[[name]][[3L]]
     sdata <- brms::standata(formula, case_data, family = family)
-    eligibility <- PDMPSamplersR:::marked_subsampling_eligibility(
+    eligibility <- PDMPSamplersR:::subsampling_eligibility(
       formula, family, sdata = sdata)
     expect_true(eligibility$eligible, info = name)
     stan_file <- PDMPSamplersR:::cached_stan_model(
@@ -374,7 +374,7 @@ test_that("first family batch closes against generated brms models", {
       PDMPSamplersR:::make_opaque_deterministic_standata(sdata), prior_file)
     names_unc <- PDMPSamplersR:::.pdmpsamplers_julia_call(
       "r_get_param_unc_names", normalizePath(stan_file), normalizePath(full_file))
-    geometry <- PDMPSamplersR:::build_marked_predictor_geometry(
+    geometry <- PDMPSamplersR:::build_subsampling_predictor_geometry(
       sdata, names_unc, eligibility)
     expect_type(geometry$designs, "list")
     expect_equal(length(geometry$designs), length(geometry$design_indices),
@@ -383,7 +383,7 @@ test_that("first family batch closes against generated brms models", {
       nrow(geometry$designs[[k]]) == sdata$N &&
         ncol(geometry$designs[[k]]) == length(geometry$design_indices[[k]])
     }, logical(1))), info = name)
-    multipliers <- PDMPSamplersR:::marked_observation_multipliers(
+    multipliers <- PDMPSamplersR:::subsampling_observation_multipliers(
       sdata, eligibility$family)
     anchors <- list(
       rep(0, length(names_unc)),
@@ -391,7 +391,7 @@ test_that("first family batch closes against generated brms models", {
     )
     for (anchor in anchors) {
       diagnostics <- PDMPSamplersR:::.pdmpsamplers_julia_call(
-        "r_marked_family_closure_diagnostics", normalizePath(stan_file),
+        "r_subsampling_family_closure_diagnostics", normalizePath(stan_file),
         normalizePath(full_file), normalizePath(prior_file), eligibility$family,
         geometry$designs, geometry$design_indices, as.integer(geometry$dimension),
         geometry$offsets, geometry$response, geometry$se,
@@ -400,7 +400,7 @@ test_that("first family batch closes against generated brms models", {
       expect_lte(diagnostics$max_bound_ratio, 1 + 1e-10)
       if (eligibility$family %in% c("bernoulli", "binomial")) {
         hcv_diagnostics <- PDMPSamplersR:::.pdmpsamplers_julia_call(
-          "r_marked_family_closure_diagnostics", normalizePath(stan_file),
+          "r_subsampling_family_closure_diagnostics", normalizePath(stan_file),
           normalizePath(full_file), normalizePath(prior_file), eligibility$family,
           geometry$designs, geometry$design_indices,
           as.integer(geometry$dimension), geometry$offsets,
@@ -414,7 +414,7 @@ test_that("first family batch closes against generated brms models", {
   }
 })
 
-test_that("weighted Bernoulli models use marked acceleration", {
+test_that("weighted Bernoulli models use subsampling acceleration", {
   skip_on_cran()
   skip_if_not(
     identical(Sys.getenv("PDMPSAMPLERSR_SLOW_TESTS"), "true"),
@@ -432,10 +432,10 @@ test_that("weighted Bernoulli models use marked acceleration", {
     flow = "BouncyParticle", T = 1, t_warmup = 0,
     subsample_size = 2L, show_progress = FALSE, seed = 914
   )
-  expect_true(isTRUE(attr(fit, "marked_subsampling")))
+  expect_true(isTRUE(attr(fit, "subsampling")))
 })
 
-test_that("all brms GridThinning dynamics use the marked provider", {
+test_that("all brms GridThinning dynamics use the subsampling provider", {
   skip_on_cran()
   skip_if_not(identical(Sys.getenv("PDMPSAMPLERSR_SLOW_TESTS"), "true"),
               "Slow production flow tests are disabled")
@@ -455,7 +455,7 @@ test_that("all brms GridThinning dynamics use the marked provider", {
         use_hcv = analytic_hcv,
         show_progress = FALSE, seed = 711
       )
-      expect_true(isTRUE(attr(fit, "marked_subsampling")))
+      expect_true(isTRUE(attr(fit, "subsampling")))
       expect_identical(
         attr(fit, "bridge_call_counts")[[1L]]$analytic_hcv,
         analytic_hcv
@@ -485,7 +485,7 @@ test_that("all brms GridThinning dynamics use the marked provider", {
       sticky = TRUE, model_prior = PDMPSamplersR::bernoulli(0.99),
       show_progress = FALSE, seed = 712 + flow_index
     )
-    expect_true(isTRUE(attr(fit, "marked_subsampling")))
+    expect_true(isTRUE(attr(fit, "subsampling")))
     expect_true(attr(fit, "pdmp_stats")$sticky_freezes >= 1, info = flow)
     expect_true(attr(fit, "pdmp_stats")$sticky_unfreezes >= 1, info = flow)
   }
@@ -498,14 +498,14 @@ test_that("all brms GridThinning dynamics use the marked provider", {
     sticky = TRUE, model_prior = PDMPSamplersR::bernoulli(0.99),
     show_progress = FALSE, seed = 714
   )
-  expect_true(isTRUE(attr(lowrank_fit, "marked_subsampling")))
+  expect_true(isTRUE(attr(lowrank_fit, "subsampling")))
   expect_true(attr(lowrank_fit, "pdmp_stats")$sticky_freezes >= 1,
               info = "AdaptiveBoomerang lowrank")
   expect_true(attr(lowrank_fit, "pdmp_stats")$sticky_unfreezes >= 1,
               info = "AdaptiveBoomerang lowrank")
 })
 
-test_that("all brms ThinningStrategy dynamics use the marked provider", {
+test_that("all brms ThinningStrategy dynamics use the subsampling provider", {
   skip_on_cran()
   skip_if_not(identical(Sys.getenv("PDMPSAMPLERSR_SLOW_TESTS"), "true"),
               "Slow production flow tests are disabled")
@@ -524,7 +524,7 @@ test_that("all brms ThinningStrategy dynamics use the marked provider", {
       n_anchor_updates = 1L, use_anchor_bank = TRUE, bank_capacity = 2L,
       use_hcv = TRUE, show_progress = FALSE, seed = 713
     )
-    expect_true(isTRUE(attr(fit, "marked_subsampling")))
+    expect_true(isTRUE(attr(fit, "subsampling")))
     counts <- attr(fit, "bridge_call_counts")[[1L]]
     expect_true(counts$analytic_hcv)
     expect_equal(counts$full_gradient_calls, 1 + counts$anchor_preparations)
@@ -537,7 +537,7 @@ test_that("all brms ThinningStrategy dynamics use the marked provider", {
     T = 0.1, t_warmup = 0, subsample_size = 5L,
     show_progress = FALSE, seed = 714
   )
-  expect_false(isTRUE(attr(fallback, "marked_subsampling")))
+  expect_false(isTRUE(attr(fallback, "subsampling")))
 
   gaussian_data <- transform(data, y = seq(-1, 1, length.out = nrow(data)),
                              se = rep(0.7, nrow(data)))
@@ -548,7 +548,7 @@ test_that("all brms ThinningStrategy dynamics use the marked provider", {
     T = 0.1, t_warmup = 0, subsample_size = 5L,
     show_progress = FALSE, seed = 715
   )
-  expect_true(isTRUE(attr(fixed_gaussian, "marked_subsampling")))
+  expect_true(isTRUE(attr(fixed_gaussian, "subsampling")))
 
   distributional_gaussian <- PDMPSamplersR::brm_pdmp(
     y ~ x, gaussian_data,
@@ -557,13 +557,13 @@ test_that("all brms ThinningStrategy dynamics use the marked provider", {
     T = 0.1, t_warmup = 0, subsample_size = 5L,
     show_progress = FALSE, seed = 716
   )
-  expect_false(isTRUE(attr(distributional_gaussian, "marked_subsampling")))
+  expect_false(isTRUE(attr(distributional_gaussian, "subsampling")))
 })
 
-test_that("marked anchor banks prepare during warmup and isolate chains", {
+test_that("subsampling anchor banks prepare during warmup and isolate chains", {
   skip_on_cran()
   skip_if_not(identical(Sys.getenv("PDMPSAMPLERSR_SLOW_TESTS"), "true"),
-              "Slow marked anchor-bank tests are disabled")
+              "Slow subsampling anchor-bank tests are disabled")
   skip_if_no_brms_setup()
   set.seed(803)
   data <- data.frame(x = rnorm(100))
@@ -576,7 +576,7 @@ test_that("marked anchor banks prepare during warmup and isolate chains", {
     n_chains = 2L, threaded = TRUE, show_progress = FALSE, seed = 804
   )
   counts <- attr(fit, "bridge_call_counts")
-  expect_true(isTRUE(attr(fit, "marked_subsampling")))
+  expect_true(isTRUE(attr(fit, "subsampling")))
   expect_length(counts, 2L)
   expect_true(all(vapply(counts, `[[`, numeric(1), "anchor_preparations") >= 1))
   expect_true(all(vapply(counts, `[[`, numeric(1), "anchor_activations") >= 1))
@@ -586,10 +586,10 @@ test_that("marked anchor banks prepare during warmup and isolate chains", {
   }, logical(1))))
 })
 
-test_that("single marked anchor updates without enabling a bank", {
+test_that("single subsampling anchor updates without enabling a bank", {
   skip_on_cran()
   skip_if_not(identical(Sys.getenv("PDMPSAMPLERSR_SLOW_TESTS"), "true"),
-              "Slow marked single-anchor tests are disabled")
+              "Slow subsampling single-anchor tests are disabled")
   skip_if_no_brms_setup()
   data <- data.frame(y = rep(c(0L, 1L), 50), x = seq(-2, 2, length.out = 100))
   fit <- PDMPSamplersR::brm_pdmp(
@@ -600,17 +600,17 @@ test_that("single marked anchor updates without enabling a bank", {
     show_progress = FALSE, seed = 806
   )
   counts <- attr(fit, "bridge_call_counts")[[1L]]
-  expect_true(isTRUE(attr(fit, "marked_subsampling")))
+  expect_true(isTRUE(attr(fit, "subsampling")))
   expect_gte(counts$anchor_preparations, 1)
   expect_true(counts$analytic_hcv)
   expect_equal(counts$anchor_bank_entries, 1)
   expect_equal(counts$full_gradient_calls, 1 + counts$anchor_preparations)
 })
 
-test_that("sticky marked sampling supports anchor banks", {
+test_that("sticky subsampling sampling supports anchor banks", {
   skip_on_cran()
   skip_if_not(identical(Sys.getenv("PDMPSAMPLERSR_SLOW_TESTS"), "true"),
-              "Slow sticky marked anchor-bank tests are disabled")
+              "Slow sticky subsampling anchor-bank tests are disabled")
   skip_if_no_brms_setup()
   data <- data.frame(y = rep(c(0L, 1L), 50), x = seq(-2, 2, length.out = 100))
   fit <- PDMPSamplersR::brm_pdmp(
@@ -623,13 +623,13 @@ test_that("sticky marked sampling supports anchor banks", {
     show_progress = FALSE, seed = 807
   )
   counts <- attr(fit, "bridge_call_counts")[[1L]]
-  expect_true(isTRUE(attr(fit, "marked_subsampling")))
+  expect_true(isTRUE(attr(fit, "subsampling")))
   expect_gte(counts$anchor_preparations, 1)
   expect_true(counts$analytic_hcv)
   expect_equal(counts$full_gradient_calls, 1 + counts$anchor_preparations)
 })
 
-test_that("marked and full brms posterior moments agree", {
+test_that("subsampling and full brms posterior moments agree", {
   skip_on_cran()
   skip_if_not(
     identical(Sys.getenv("PDMPSAMPLERSR_SLOW_TESTS"), "true"),
@@ -646,7 +646,7 @@ test_that("marked and full brms posterior moments agree", {
   formula <- y ~ x
   anchor_fit <- glm(formula, data = data, family = binomial())
   anchor_coef <- coef(anchor_fit)
-  marked_anchor <- c(
+  subsampling_anchor <- c(
     unname(anchor_coef[["x"]]),
     unname(anchor_coef[["(Intercept)"]]) + mean(data$x) * anchor_coef[["x"]]
   )
@@ -656,21 +656,21 @@ test_that("marked and full brms posterior moments agree", {
       formula, data = data, family = brms::bernoulli(), flow = flow,
       T = 2500, t_warmup = 500, show_progress = FALSE, seed = 83
     )
-    marked <- PDMPSamplersR::brm_pdmp(
+    subsampling <- PDMPSamplersR::brm_pdmp(
       formula, data = data, family = brms::bernoulli(), flow = flow,
       T = 2500, t_warmup = 500, subsample_size = 25L,
-      flow_mean = marked_anchor,
+      flow_mean = subsampling_anchor,
       n_anchor_updates = 8L, use_anchor_bank = TRUE, bank_capacity = 4L,
       use_hcv = TRUE,
       show_progress = FALSE, seed = 83
     )
     expect_equal(
-      brms::fixef(marked)[, "Estimate"],
+      brms::fixef(subsampling)[, "Estimate"],
       brms::fixef(full)[, "Estimate"],
       tolerance = 0.25
     )
-    expect_true(isTRUE(attr(marked, "marked_subsampling")))
-    counts <- attr(marked, "bridge_call_counts")[[1L]]
+    expect_true(isTRUE(attr(subsampling, "subsampling")))
+    counts <- attr(subsampling, "bridge_call_counts")[[1L]]
     expect_true(counts$analytic_hcv)
     expect_gte(counts$anchor_preparations, 2)
     expect_gte(counts$anchor_main_activations, 2)

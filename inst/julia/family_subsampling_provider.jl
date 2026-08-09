@@ -1,7 +1,7 @@
-# Analytic marked-family BridgeStan provider. Included inside
+# Analytic subsampling-family BridgeStan provider. Included inside
 # PDMPSamplersRBridge after the shared BridgeStan and sampler helpers.
 
-mutable struct MarkedBridgeCallCounts
+mutable struct SubsamplingBridgeCallCounts
     analytic_residual::Int
     prior_gradient::Int
     prior_hvp::Int
@@ -9,9 +9,9 @@ mutable struct MarkedBridgeCallCounts
     anchor_preparations::Int
     anchor_activations::Int
 end
-MarkedBridgeCallCounts() = MarkedBridgeCallCounts(0, 0, 0, 0, 0, 0)
+SubsamplingBridgeCallCounts() = SubsamplingBridgeCallCounts(0, 0, 0, 0, 0, 0)
 
-mutable struct MarkedBridgeStanContext
+mutable struct SubsamplingBridgeStanContext
     sm_full::BridgeStan.StanModel
     sm_prior::BridgeStan.StanModel
     family::Symbol
@@ -39,10 +39,10 @@ mutable struct MarkedBridgeStanContext
     full_anchor::Vector{Float64}
     prior_anchor::Vector{Float64}
     prior_x::Vector{Float64}
-    calls::MarkedBridgeCallCounts
+    calls::SubsamplingBridgeCallCounts
 end
 
-struct MarkedBridgeAnchorState
+struct SubsamplingBridgeAnchorState
     anchor::Vector{Float64}
     anchor_predictors::Matrix{Float64}
     anchor_kernel_values::Matrix{Float64}
@@ -52,21 +52,21 @@ struct MarkedBridgeAnchorState
     likelihood_hessian::Union{Nothing,Matrix{Float64}}
 end
 
-mutable struct MarkedBridgeAnchorEntry
-    state::MarkedBridgeAnchorState
+mutable struct SubsamplingBridgeAnchorEntry
+    state::SubsamplingBridgeAnchorState
     age::Int
 end
 
-mutable struct MarkedBridgeAnchorManager
-    ctx::MarkedBridgeStanContext
-    entries::Vector{MarkedBridgeAnchorEntry}
+mutable struct SubsamplingBridgeAnchorManager
+    ctx::SubsamplingBridgeStanContext
+    entries::Vector{SubsamplingBridgeAnchorEntry}
     active_idx::Int
     capacity::Int
     proposal::Vector{Float64}
     main_activations::Int
 end
 
-function _marked_predictor_operator_norms(
+function _subsampling_predictor_operator_norms(
         designs::Vector{Matrix{Float64}}, indices::Vector{Vector{Int}},
         N::Int, d::Int)
     K = length(designs)
@@ -94,15 +94,15 @@ function _marked_predictor_operator_norms(
     return operator_norms
 end
 
-function _fill_marked_anchor_cache!(ctx::MarkedBridgeStanContext, anchor,
+function _fill_subsampling_anchor_cache!(ctx::SubsamplingBridgeStanContext, anchor,
         predictors::AbstractMatrix, kernels::AbstractMatrix)
     N, K = ctx.N, length(ctx.predictor_designs)
     @inbounds for i in 1:N, k in 1:K
-        predictors[i, k] = _marked_eta(ctx, i, k, anchor)
+        predictors[i, k] = _subsampling_eta(ctx, i, k, anchor)
     end
     if ctx.family in (:bernoulli, :binomial, :independent_bernoulli)
         @inbounds for i in 1:N, k in 1:K
-            kernels[i, k] = _marked_logistic(predictors[i, k])
+            kernels[i, k] = _subsampling_logistic(predictors[i, k])
         end
     elseif ctx.family === :poisson
         @inbounds for i in 1:N
@@ -123,7 +123,7 @@ function _fill_marked_anchor_cache!(ctx::MarkedBridgeStanContext, anchor,
     return nothing
 end
 
-function _new_marked_bss_context(lib_path_std::String,
+function _new_subsampling_bss_context(lib_path_std::String,
         data_full_file::String, data_prior_file::String,
         family::Symbol, predictor_designs::Vector{Matrix{Float64}},
         predictor_indices::Vector{Vector{Int}}, d::Int,
@@ -150,27 +150,31 @@ function _new_marked_bss_context(lib_path_std::String,
         throw(ArgumentError("observation multipliers must be finite and nonnegative"))
     if use_hcv && !(family in (:bernoulli, :binomial) && K == 1)
         throw(ArgumentError(
-            "analytic marked HCV requires a one-predictor Bernoulli or binomial likelihood"))
+            "analytic subsampling HCV requires a one-predictor Bernoulli or binomial likelihood"))
     end
     isfinite(hcv_damping) && hcv_damping > 0 || throw(ArgumentError(
-        "analytic marked HCV damping must be finite and positive"))
-    operator_norms = _marked_predictor_operator_norms(
+        "analytic subsampling HCV damping must be finite and positive"))
+    operator_norms = _subsampling_predictor_operator_norms(
         predictor_designs, predictor_indices, N, d)
-    ctx = MarkedBridgeStanContext(
-        BridgeStan.StanModel(lib_path_std, data_full_file; warn=false),
-        BridgeStan.StanModel(lib_path_std, data_prior_file; warn=false),
+    ctx = SubsamplingBridgeStanContext(
+        lock(_BRIDGESTAN_CALL_LOCK) do
+            BridgeStan.StanModel(lib_path_std, data_full_file; warn=false)
+        end,
+        lock(_BRIDGESTAN_CALL_LOCK) do
+            BridgeStan.StanModel(lib_path_std, data_prior_file; warn=false)
+        end,
         family, predictor_designs, predictor_indices, operator_norms, d,
         offsets, response, known_se,
         observation_multipliers, N, m, copy(anchor),
         zeros(N, K), zeros(N, K), nothing, nothing, use_hcv,
         Float64(hcv_damping), zeros(K), zeros(d), zeros(d), zeros(d),
-        zeros(d), zeros(d), zeros(d), MarkedBridgeCallCounts())
-    initial = _prepare_marked_anchor(ctx, anchor; count_preparation=false)
-    _install_marked_anchor_state!(ctx, initial)
+        zeros(d), zeros(d), zeros(d), SubsamplingBridgeCallCounts())
+    initial = _prepare_subsampling_anchor(ctx, anchor; count_preparation=false)
+    _install_subsampling_anchor_state!(ctx, initial)
     return ctx
 end
 
-@inline function _marked_logistic(x::Float64)
+@inline function _subsampling_logistic(x::Float64)
     if x >= 0
         return inv(1 + exp(-x))
     end
@@ -178,7 +182,7 @@ end
     return ex / (1 + ex)
 end
 
-function _marked_eta(ctx, i, k, x)
+function _subsampling_eta(ctx, i, k, x)
     value = ctx.offsets[i, k]
     design = ctx.predictor_designs[k]
     indices = ctx.predictor_indices[k]
@@ -189,7 +193,7 @@ function _marked_eta(ctx, i, k, x)
 end
 
 
-function _add_marked_predictor!(out, ctx, i, k, value)
+function _add_subsampling_predictor!(out, ctx, i, k, value)
     design = ctx.predictor_designs[k]
     indices = ctx.predictor_indices[k]
     @inbounds for column in eachindex(indices)
@@ -198,7 +202,7 @@ function _add_marked_predictor!(out, ctx, i, k, value)
     return out
 end
 
-function _marked_growth_envelope(weights_by_observation, growth, anchor)
+function _subsampling_growth_envelope(weights_by_observation, growth, anchor)
     N = length(growth)
     positive = findall(i -> growth[i] > 0 && weights_by_observation[i] > 0, 1:N)
     if isempty(positive)
@@ -224,7 +228,7 @@ function _marked_growth_envelope(weights_by_observation, growth, anchor)
     return TrajectoryResidualEnvelope(weights, anchor; growth_rates=edges)
 end
 
-function _marked_family_envelope(ctx::MarkedBridgeStanContext,
+function _subsampling_family_envelope(ctx::SubsamplingBridgeStanContext,
         anchor=ctx.anchor, anchor_predictors=ctx.anchor_predictors)
     designs = ctx.predictor_designs
     N, K = ctx.N, length(designs)
@@ -246,7 +250,7 @@ function _marked_family_envelope(ctx::MarkedBridgeStanContext,
             growth[i] = Bnorm
         elseif ctx.family === :gaussian && K == 1
             isempty(ctx.known_se) && throw(ArgumentError(
-                "fixed-scale Gaussian marked sampling requires known standard errors"))
+                "fixed-scale Gaussian subsampling sampling requires known standard errors"))
             weights[i] = multiplier * Bnorm^2 / ctx.known_se[i]^2
         elseif ctx.family === :gaussian && K == 2
             μa = anchor_predictors[i, 1]
@@ -259,15 +263,15 @@ function _marked_family_envelope(ctx::MarkedBridgeStanContext,
             bs = norm(@view designs[2][i, :])
             growth[i] = 2 * (bμ + bs)
         else
-            throw(ArgumentError("no marked family envelope for $(ctx.family) with $K predictors"))
+            throw(ArgumentError("no subsampling family envelope for $(ctx.family) with $K predictors"))
         end
     end
     ctx.use_hcv && return PDMPSamplers.DampedHCVResidualEnvelope(
         weights, hcv_remainder_weights, anchor; damping=ctx.hcv_damping)
-    return _marked_growth_envelope(weights, growth, anchor)
+    return _subsampling_growth_envelope(weights, growth, anchor)
 end
 
-function _marked_likelihood_hessian(ctx::MarkedBridgeStanContext,
+function _subsampling_likelihood_hessian(ctx::SubsamplingBridgeStanContext,
         anchor_kernels::AbstractMatrix)
     ctx.use_hcv || return nothing
     hessian = zeros(ctx.d, ctx.d)
@@ -284,38 +288,42 @@ function _marked_likelihood_hessian(ctx::MarkedBridgeStanContext,
     return hessian
 end
 
-function _prepare_marked_anchor(ctx::MarkedBridgeStanContext,
+function _prepare_subsampling_anchor(ctx::SubsamplingBridgeStanContext,
         anchor::AbstractVector; count_preparation::Bool=true)
     length(anchor) == ctx.d || throw(DimensionMismatch(
-        "marked anchor has the wrong dimension"))
+        "subsampling anchor has the wrong dimension"))
     requested = similar(ctx.anchor)
     copyto!(requested, anchor)
     K = length(ctx.predictor_designs)
     predictors = zeros(ctx.N, K)
     kernels = zeros(ctx.N, K)
-    _fill_marked_anchor_cache!(ctx, requested, predictors, kernels)
-    likelihood_hessian = _marked_likelihood_hessian(ctx, kernels)
+    _fill_subsampling_anchor_cache!(ctx, requested, predictors, kernels)
+    likelihood_hessian = _subsampling_likelihood_hessian(ctx, kernels)
     full_anchor = zeros(ctx.d)
     prior_anchor = zeros(ctx.d)
-    BridgeStan.log_density_gradient!(ctx.sm_full, requested, full_anchor)
+    lock(_BRIDGESTAN_CALL_LOCK) do
+        BridgeStan.log_density_gradient!(ctx.sm_full, requested, full_anchor)
+    end
     ctx.calls.full_gradient += 1
     full_anchor .*= -1
-    BridgeStan.log_density_gradient!(ctx.sm_prior, requested, prior_anchor)
+    lock(_BRIDGESTAN_CALL_LOCK) do
+        BridgeStan.log_density_gradient!(ctx.sm_prior, requested, prior_anchor)
+    end
     ctx.calls.prior_gradient += 1
-    envelope = _marked_family_envelope(ctx, requested, predictors)
+    envelope = _subsampling_family_envelope(ctx, requested, predictors)
     count_preparation && (ctx.calls.anchor_preparations += 1)
-    return MarkedBridgeAnchorState(requested, predictors, kernels,
+    return SubsamplingBridgeAnchorState(requested, predictors, kernels,
         full_anchor, prior_anchor, envelope, likelihood_hessian)
 end
 
-function _anchor_state_from_context(ctx::MarkedBridgeStanContext)
-    return MarkedBridgeAnchorState(ctx.anchor, ctx.anchor_predictors,
+function _anchor_state_from_context(ctx::SubsamplingBridgeStanContext)
+    return SubsamplingBridgeAnchorState(ctx.anchor, ctx.anchor_predictors,
         ctx.anchor_kernel_values, ctx.full_anchor, ctx.prior_anchor,
         ctx.anchor_envelope, ctx.likelihood_hessian)
 end
 
-function _install_marked_anchor_state!(ctx::MarkedBridgeStanContext,
-        state::MarkedBridgeAnchorState)
+function _install_subsampling_anchor_state!(ctx::SubsamplingBridgeStanContext,
+        state::SubsamplingBridgeAnchorState)
     ctx.anchor = state.anchor
     ctx.anchor_predictors = state.anchor_predictors
     ctx.anchor_kernel_values = state.anchor_kernel_values
@@ -326,8 +334,8 @@ function _install_marked_anchor_state!(ctx::MarkedBridgeStanContext,
     return ctx
 end
 
-@inline function _marked_anchor_distance2(x::AbstractVector,
-        state::MarkedBridgeAnchorState)
+@inline function _subsampling_anchor_distance2(x::AbstractVector,
+        state::SubsamplingBridgeAnchorState)
     distance = zero(eltype(x))
     @inbounds for j in eachindex(x, state.anchor)
         delta = x[j] - state.anchor[j]
@@ -336,59 +344,59 @@ end
     return distance
 end
 
-function _active_marked_anchor(manager::MarkedBridgeAnchorManager)
+function _active_subsampling_anchor(manager::SubsamplingBridgeAnchorManager)
     1 <= manager.active_idx <= length(manager.entries) || throw(ArgumentError(
-        "marked anchor bank has no active entry"))
+        "subsampling anchor bank has no active entry"))
     return manager.entries[manager.active_idx]
 end
 
-function _insert_marked_anchor!(manager::MarkedBridgeAnchorManager,
-        state::MarkedBridgeAnchorState)
+function _insert_subsampling_anchor!(manager::SubsamplingBridgeAnchorManager,
+        state::SubsamplingBridgeAnchorState)
     idx = if length(manager.entries) < manager.capacity
-        push!(manager.entries, MarkedBridgeAnchorEntry(state, 0))
+        push!(manager.entries, SubsamplingBridgeAnchorEntry(state, 0))
         length(manager.entries)
     else
         ages = map(entry -> entry.age, manager.entries)
         replace_idx = argmax(ages)
-        manager.entries[replace_idx] = MarkedBridgeAnchorEntry(state, 0)
+        manager.entries[replace_idx] = SubsamplingBridgeAnchorEntry(state, 0)
         replace_idx
     end
     iszero(manager.active_idx) && (manager.active_idx = idx)
     return idx
 end
 
-function _activate_marked_anchor!(manager::MarkedBridgeAnchorManager,
+function _activate_subsampling_anchor!(manager::SubsamplingBridgeAnchorManager,
         requested::AbstractVector)
-    state = _active_marked_anchor(manager).state
+    state = _active_subsampling_anchor(manager).state
     state.anchor == requested || throw(ArgumentError(
-        "active marked bank entry does not match the requested anchor"))
+        "active subsampling bank entry does not match the requested anchor"))
     ctx = manager.ctx
     # Every operation below is an assignment of already validated, prepared
     # state. No full gradient, observation scan, or envelope construction is
     # performed when an existing bank entry is selected.
-    _install_marked_anchor_state!(ctx, state)
+    _install_subsampling_anchor_state!(ctx, state)
     ctx.calls.anchor_activations += 1
     return state.envelope
 end
 
-function _new_marked_anchor_manager(ctx::MarkedBridgeStanContext,
+function _new_subsampling_anchor_manager(ctx::SubsamplingBridgeStanContext,
         capacity::Integer)
-    capacity >= 1 || throw(ArgumentError("marked anchor-bank capacity must be positive"))
-    manager = MarkedBridgeAnchorManager(ctx, MarkedBridgeAnchorEntry[], 0,
+    capacity >= 1 || throw(ArgumentError("subsampling anchor-bank capacity must be positive"))
+    manager = SubsamplingBridgeAnchorManager(ctx, SubsamplingBridgeAnchorEntry[], 0,
         Int(capacity), zeros(ctx.d), 0)
-    _insert_marked_anchor!(manager, _anchor_state_from_context(ctx))
+    _insert_subsampling_anchor!(manager, _anchor_state_from_context(ctx))
     return manager
 end
 
-function _select_marked_anchor!(manager::MarkedBridgeAnchorManager,
-        cv::MarkedControlVariate, x::AbstractVector; phase::Symbol=:unknown)
+function _select_subsampling_anchor!(manager::SubsamplingBridgeAnchorManager,
+        cv::SubsampledControlVariate, x::AbstractVector; phase::Symbol=:unknown)
     previous = manager.active_idx
     best_idx = 1
     best_distance = Inf
     @inbounds for idx in eachindex(manager.entries)
         entry = manager.entries[idx]
         entry.age += 1
-        distance = _marked_anchor_distance2(x, entry.state)
+        distance = _subsampling_anchor_distance2(x, entry.state)
         if distance < best_distance
             best_distance = distance
             best_idx = idx
@@ -404,19 +412,19 @@ function _select_marked_anchor!(manager::MarkedBridgeAnchorManager,
     return nothing
 end
 
-function _add_marked_anchor!(manager::MarkedBridgeAnchorManager,
-        cv::MarkedControlVariate, trace)
+function _add_subsampling_anchor!(manager::SubsamplingBridgeAnchorManager,
+        cv::SubsampledControlVariate, trace)
     Statistics.mean!(manager.proposal, trace)
-    prepared = _prepare_marked_anchor(manager.ctx, manager.proposal)
-    return _store_prepared_marked_anchor!(manager, cv, prepared)
+    prepared = _prepare_subsampling_anchor(manager.ctx, manager.proposal)
+    return _store_prepared_subsampling_anchor!(manager, cv, prepared)
 end
 
-function _store_prepared_marked_anchor!(manager::MarkedBridgeAnchorManager,
-        cv::MarkedControlVariate, prepared::MarkedBridgeAnchorState)
+function _store_prepared_subsampling_anchor!(manager::SubsamplingBridgeAnchorManager,
+        cv::SubsampledControlVariate, prepared::SubsamplingBridgeAnchorState)
     previous = manager.active_idx
-    idx = _insert_marked_anchor!(manager, prepared)
+    idx = _insert_subsampling_anchor!(manager, prepared)
     # If LRU replacement overwrote the active slot, immediately switch all
-    # marked state to the replacement. Otherwise selection occurs at the next
+    # subsampling state to the replacement. Otherwise selection occurs at the next
     # event boundary.
     if idx == previous
         manager.active_idx = idx
@@ -425,19 +433,21 @@ function _store_prepared_marked_anchor!(manager::MarkedBridgeAnchorManager,
     return idx
 end
 
-function _build_marked_bss_model(ctx::MarkedBridgeStanContext;
+function _build_subsampling_bss_model(ctx::SubsamplingBridgeStanContext;
         use_fd_hvp::Bool=false, anchor_capacity::Integer=0)
     designs = ctx.predictor_designs
     N, d, K = ctx.N, ctx.d, length(designs)
     d == length(ctx.anchor) || throw(DimensionMismatch("likelihood design column count must equal the unconstrained dimension"))
     envelope = ctx.anchor_envelope
     envelope isa SeparableResidualEnvelope || throw(ArgumentError(
-        "marked context has no prepared initial envelope"))
+        "subsampling context has no prepared initial envelope"))
     manager = anchor_capacity > 0 ?
-        _new_marked_anchor_manager(ctx, anchor_capacity) : nothing
+        _new_subsampling_anchor_manager(ctx, anchor_capacity) : nothing
 
     function deterministic_gradient!(out, x)
-        BridgeStan.log_density_gradient!(ctx.sm_prior, x, ctx.prior_x)
+        lock(_BRIDGESTAN_CALL_LOCK) do
+            BridgeStan.log_density_gradient!(ctx.sm_prior, x, ctx.prior_x)
+        end
         ctx.calls.prior_gradient += 1
         @. out = ctx.full_anchor - ctx.prior_x + ctx.prior_anchor
         if ctx.use_hcv
@@ -453,7 +463,9 @@ function _build_marked_bss_model(ctx::MarkedBridgeStanContext;
     end
 
     function deterministic_hvp!(out, x, v)
-        BridgeStan.log_density_hessian_vector_product!(ctx.sm_prior, x, v, out)
+        lock(_BRIDGESTAN_CALL_LOCK) do
+            BridgeStan.log_density_hessian_vector_product!(ctx.sm_prior, x, v, out)
+        end
         ctx.calls.prior_hvp += 1
         out .*= -1
         if ctx.use_hcv
@@ -485,27 +497,27 @@ function _build_marked_bss_model(ctx::MarkedBridgeStanContext;
             if ctx.family in (:bernoulli, :binomial, :independent_bernoulli)
                 predictors = ctx.family === :independent_bernoulli ? (1:K) : (1:1)
                 for k in predictors
-                    Δη = multiplier * (_marked_logistic(_marked_eta(ctx, i, k, x)) -
+                    Δη = multiplier * (_subsampling_logistic(_subsampling_eta(ctx, i, k, x)) -
                         ctx.anchor_kernel_values[i, k])
                     if ctx.use_hcv
-                        predictor_delta = _marked_eta(ctx, i, k, x) -
+                        predictor_delta = _subsampling_eta(ctx, i, k, x) -
                             ctx.anchor_predictors[i, k]
                         p_anchor = ctx.anchor_kernel_values[i, k]
                         Δη -= α * multiplier * p_anchor * (1 - p_anchor) *
                             predictor_delta
                     end
-                    _add_marked_predictor!(out, ctx, i, k, Δη)
+                    _add_subsampling_predictor!(out, ctx, i, k, Δη)
                 end
             elseif ctx.family === :poisson
-                Δη = multiplier * (exp(_marked_eta(ctx, i, 1, x)) -
+                Δη = multiplier * (exp(_subsampling_eta(ctx, i, 1, x)) -
                     ctx.anchor_kernel_values[i, 1])
-                _add_marked_predictor!(out, ctx, i, 1, Δη)
+                _add_subsampling_predictor!(out, ctx, i, 1, Δη)
             elseif ctx.family === :gaussian && K == 1
-                Δη = multiplier * (_marked_eta(ctx, i, 1, x) -
+                Δη = multiplier * (_subsampling_eta(ctx, i, 1, x) -
                     ctx.anchor_predictors[i, 1]) / ctx.known_se[i]^2
-                _add_marked_predictor!(out, ctx, i, 1, Δη)
+                _add_subsampling_predictor!(out, ctx, i, 1, Δη)
             elseif ctx.family === :gaussian && K == 2
-                μx = _marked_eta(ctx, i, 1, x); sx = _marked_eta(ctx, i, 2, x)
+                μx = _subsampling_eta(ctx, i, 1, x); sx = _subsampling_eta(ctx, i, 2, x)
                 μa = ctx.anchor_predictors[i, 1]; sa = ctx.anchor_predictors[i, 2]
                 qx = ctx.response[i, 1] - μx; qa = ctx.response[i, 1] - μa
                 se2 = isempty(ctx.known_se) ? 0.0 : ctx.known_se[i]^2
@@ -515,13 +527,13 @@ function _build_marked_bss_model(ctx::MarkedBridgeStanContext;
                     (μa - ctx.response[i, 1]) / va)
                 Δs = multiplier * ((ex / vx) * (1 - qx^2 / vx) -
                     (ea / va) * (1 - qa^2 / va))
-                _add_marked_predictor!(out, ctx, i, 1, Δμ)
-                _add_marked_predictor!(out, ctx, i, 2, Δs)
+                _add_subsampling_predictor!(out, ctx, i, 1, Δμ)
+                _add_subsampling_predictor!(out, ctx, i, 2, Δs)
             elseif ctx.family in (:categorical, :multinomial)
                 predictor_buffer = ctx.predictor_buffer
                 max_x = 0.0
                 for k in 1:K
-                    predictor_buffer[k] = _marked_eta(ctx, i, k, x)
+                    predictor_buffer[k] = _subsampling_eta(ctx, i, k, x)
                     max_x = max(max_x, predictor_buffer[k])
                 end
                 # Include the reference category's zero logit and normalize
@@ -535,7 +547,7 @@ function _build_marked_bss_model(ctx::MarkedBridgeStanContext;
                     Δp = multiplier * (
                         exp(predictor_buffer[k] - max_x) / denom_x -
                         ctx.anchor_kernel_values[i, k])
-                    _add_marked_predictor!(out, ctx, i, k, Δp)
+                    _add_subsampling_predictor!(out, ctx, i, k, Δp)
                 end
             end
         end
@@ -544,8 +556,8 @@ function _build_marked_bss_model(ctx::MarkedBridgeStanContext;
     end
 
     refresh_callback = manager === nothing ? nothing :
-        (anchor -> _activate_marked_anchor!(manager, anchor))
-    cv = MarkedControlVariate(deterministic_gradient!, residual_oracle!, envelope,
+        (anchor -> _activate_subsampling_anchor!(manager, anchor))
+    cv = SubsampledControlVariate(deterministic_gradient!, residual_oracle!, envelope,
         ctx.anchor, ctx.m;
         deterministic_hvp! = use_fd_hvp ? nothing : deterministic_hvp!,
         refresh_anchor! = refresh_callback)
@@ -553,15 +565,15 @@ function _build_marked_bss_model(ctx::MarkedBridgeStanContext;
     if manager === nothing
         return model
     end
-    adapter = PDMPSamplers.MarkedAnchorBankAdapter(
-        (grad, x, phase) -> _select_marked_anchor!(manager, grad, x; phase),
-        (grad, trace) -> _add_marked_anchor!(manager, grad, trace),
+    adapter = PDMPSamplers.SubsamplingAnchorBankAdapter(
+        (grad, x, phase) -> _select_subsampling_anchor!(manager, grad, x; phase),
+        (grad, trace) -> _add_subsampling_anchor!(manager, grad, trace),
         Inf, 0.0)
     return model, adapter, manager
 end
 
-function _marked_call_counts(ctx::MarkedBridgeStanContext,
-        manager::Union{Nothing,MarkedBridgeAnchorManager}=nothing)
+function _subsampling_call_counts(ctx::SubsamplingBridgeStanContext,
+        manager::Union{Nothing,SubsamplingBridgeAnchorManager}=nothing)
     return Dict(
         "analytic_residual_calls" => ctx.calls.analytic_residual,
         "prior_gradient_calls" => ctx.calls.prior_gradient,
@@ -577,25 +589,25 @@ function _marked_call_counts(ctx::MarkedBridgeStanContext,
     )
 end
 
-function r_marked_family_closure_diagnostics(stan_file::String,
+function r_subsampling_family_closure_diagnostics(stan_file::String,
         data_full_file::String, data_prior_file::String, family_name,
         predictor_designs, predictor_indices, predictor_dimension::Integer,
         offsets, response, known_se, observation_multipliers,
         anchor, theta, use_hcv::Bool=false)
     designs = Matrix{Float64}[Matrix{Float64}(design)
-        for design in _marked_collection_values(predictor_designs)]
-    indices = Vector{Int}[_as_marked_predictor_indices(active)
-        for active in _marked_collection_values(predictor_indices)]
+        for design in _subsampling_collection_values(predictor_designs)]
+    indices = Vector{Int}[_as_subsampling_predictor_indices(active)
+        for active in _subsampling_collection_values(predictor_indices)]
     N = size(first(designs), 1)
     d = Int(predictor_dimension)
-    anchor_vec = _marked_float_vector(anchor)
-    theta_vec = _marked_float_vector(theta)
-    ctx = _new_marked_bss_context(_compile_model(stan_file),
+    anchor_vec = _subsampling_float_vector(anchor)
+    theta_vec = _subsampling_float_vector(theta)
+    ctx = _new_subsampling_bss_context(_compile_model(stan_file),
         data_full_file, data_prior_file, Symbol(family_name), designs, indices, d,
         Matrix{Float64}(offsets), Matrix{Float64}(response),
-        _marked_float_vector(known_se), _marked_float_vector(observation_multipliers),
+        _subsampling_float_vector(known_se), _subsampling_float_vector(observation_multipliers),
         N, 1, anchor_vec; use_hcv)
-    model = _build_marked_bss_model(ctx)
+    model = _build_subsampling_bss_model(ctx)
 
     deterministic = zeros(d)
     residual = zeros(d)
@@ -620,7 +632,9 @@ function r_marked_family_closure_diagnostics(stan_file::String,
     end
 
     full = zeros(d)
-    BridgeStan.log_density_gradient!(ctx.sm_full, theta_vec, full)
+    lock(_BRIDGESTAN_CALL_LOCK) do
+        BridgeStan.log_density_gradient!(ctx.sm_full, theta_vec, full)
+    end
     full .*= -1
     return Dict(
         "closure_error" => maximum(abs, estimate - full),

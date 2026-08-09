@@ -365,7 +365,7 @@ validate_brms_sticky <- function(sticky, can_stick, model_prior, parameter_prior
         return(list(sticky = FALSE, can_stick = NULL, model_prior = NULL, parameter_prior = NULL))
 
     if (isTRUE(subsampled))
-        cli::cli_inform("Using the exact marked-subsampling path with sticky dynamics.")
+        cli::cli_inform("Using exact observation subsampling with sticky dynamics.")
 
     # model_prior is required
     if (is.null(model_prior) || !(is.bernoulli(model_prior) || is.betabernoulli(model_prior)))

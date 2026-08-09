@@ -71,14 +71,14 @@ adaptation: `"diagonal"`, `"fullrank"`, or `"lowrank"`.}
 set to 20\% of the sampling time.}
 
 \item{flow_mean}{Numeric vector for the flow reference mean, or NULL. For
-marked subsampling this is also the fixed control-variate anchor and
+observation subsampling this is also the fixed control-variate anchor and
 initial position; supplying a posterior mode or other representative point
 can materially tighten the residual envelope.}
 
 \item{flow_cov}{Numeric matrix for the flow covariance, or NULL.}
 
 \item{c0}{Numeric thinning bound constant. With `ThinningStrategy` this
-user-configured bound must dominate the deterministic marked component;
+user-configured bound must dominate the deterministic subsampling component;
 violations are detected and stop the sampler.}
 
 \item{grid_n}{Integer number of grid points for GridThinningStrategy.}
@@ -105,17 +105,17 @@ for each sample (default: FALSE). Adds overhead but enables
 \item{subsample_size}{Integer number of observations per subsample,
 or NULL (default) for full-data gradients. With `GridThinningStrategy`
 or a representable `ThinningStrategy` envelope,
-marked acceleration is selected automatically when affine predictor,
+subsampling acceleration is selected automatically when affine predictor,
 first-batch likelihood, and trajectory providers are all available for
 the requested dynamics. Ineligible models use exact full gradients.}
 
 \item{n_anchor_updates}{Integer number of anchor updates during warmup
-(default: 0). For analytic marked sampling, each update prepares a
+(default: 0). For analytic subsampling sampling, each update prepares a
 coherent anchor state containing the full and deterministic anchor
 gradients, cached likelihood predictors, and residual envelope.}
 
 \item{use_hcv}{Logical; enable the certified analytic damped Hessian
-control variate for marked affine Bernoulli-logit or binomial-logit
+control variate for subsampling affine Bernoulli-logit or binomial-logit
 sampling (default: FALSE). Its likelihood Hessian and Taylor-remainder
 envelope are prepared with each anchor, with Cauchy damping
 `d / (d + ||x - anchor||^2)` in `d` unconstrained dimensions;
@@ -204,7 +204,7 @@ parameters, not from `lp__`.
 With a single chain, `Rhat` will report `NA`. Use `n_chains >= 2`
 for convergence diagnostics.
 
-Marked acceleration is enabled when the model has certified affine predictor,
+Subsampling acceleration is enabled when the model has certified affine predictor,
 likelihood, and dynamics providers. The first provider batch covers weighted
 and subsetted Bernoulli/binomial logit models, categorical/multinomial logit,
 Poisson log models (including `rate()`), and Gaussian location-scale models
@@ -214,9 +214,9 @@ falls back to the exact full-gradient sampler. Priors, Jacobians, and
 unconditional custom target additions remain in an opaque deterministic
 BridgeStan provider.
 
-PDMPSamplers.jl applies `N / m`, draws a fresh marked subset per proposal,
+PDMPSamplers.jl applies `N / m`, draws a fresh subsampling subset per proposal,
 uses dynamics-specific linear or harmonic trajectory bounds, and reuses the
-accepted stochastic gradient for the event. Marked subsampling supports
+accepted stochastic gradient for the event. Observation subsampling supports
 `GridThinningStrategy` generally and `ThinningStrategy` when the residual
 envelope has an affine global roof (or the trajectory is periodic).
 }

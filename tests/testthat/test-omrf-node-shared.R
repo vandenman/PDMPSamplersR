@@ -33,53 +33,53 @@ test_that("node-shared OMRF gradient closure retains scale-state priors", {
   skip_if_not_installed("Matrix")
   fixture <- node_shared_omrf_fixture()
   model <- system.file(
-    "stan", "omrf", "omrf_node_shared_marked.stan",
+    "stan", "omrf", "omrf_node_shared.stan",
     package = "PDMPSamplersR")
   if (!nzchar(model)) {
     model <- testthat::test_path(
-      "..", "..", "inst", "stan", "omrf", "omrf_node_shared_marked.stan")
+      "..", "..", "inst", "stan", "omrf", "omrf_node_shared.stan")
   }
   compiled <- compile_pdmp_stan_model(model)
   envelope <- omrf_residual_envelope(
     fixture$data$X, fixture$data$seen, "thresholds_0", "interactions_0")
   anchor <- rep(0, 10L)
-  marked <- stan_marked_subsampling(
+  subsampling <- stan_subsampling(
     fixture$data$N, 2L, fixture$prior, envelope, anchor = anchor)
   position <- seq(-0.18, 0.27, length.out = 10L)
   subsets <- combn(fixture$data$N, 2L, simplify = FALSE)
   diagnostics <- lapply(subsets, function(subset) {
-    stan_marked_diagnostics(
-      compiled, fixture$data, marked, position, subset,
+    stan_subsampling_diagnostics(
+      compiled, fixture$data, subsampling, position, subset,
       velocity = seq(0.3, 1.2, length.out = 10L), flow = "ZigZag")
   })
-  mean_marked <- Reduce(`+`, lapply(diagnostics, `[[`, "marked_gradient")) /
+  mean_subsampling <- Reduce(`+`, lapply(diagnostics, `[[`, "subsampled_gradient")) /
     length(diagnostics)
-  expect_equal(mean_marked, diagnostics[[1L]]$full_gradient, tolerance = 2e-9)
+  expect_equal(mean_subsampling, diagnostics[[1L]]$full_gradient, tolerance = 2e-9)
   scale_indices <- 7:10
   expect_gt(max(abs(diagnostics[[1L]]$prior_gradient[scale_indices])), 0.05)
   expect_equal(
     diagnostics[[1L]]$selected_likelihood_gradient[scale_indices],
     rep(0, length(scale_indices)), tolerance = 1e-10)
-  expect_s4_class(fixture$slab$logscale_design, "sparseMatrix")
-  expect_equal(length(fixture$slab$logscale_design_sparse$nzval), 9L)
+  expect_identical(fixture$slab$logscale_design$storage, "sparse_rows")
+  expect_equal(length(fixture$slab$logscale_design$x), 9L)
 })
 
-test_that("public node-shared OMRF samples full and marked with ZigZag and BPS", {
+test_that("public node-shared OMRF samples full and subsampling with ZigZag and BPS", {
   skip_on_cran()
   skip_if_no_pdmp_julia_backend()
   skip_if_not_installed("Matrix")
   fixture <- node_shared_omrf_fixture()
   model <- system.file(
-    "stan", "omrf", "omrf_node_shared_marked.stan",
+    "stan", "omrf", "omrf_node_shared.stan",
     package = "PDMPSamplersR")
   if (!nzchar(model)) {
     model <- testthat::test_path(
-      "..", "..", "inst", "stan", "omrf", "omrf_node_shared_marked.stan")
+      "..", "..", "inst", "stan", "omrf", "omrf_node_shared.stan")
   }
   compiled <- compile_pdmp_stan_model(model)
   envelope <- omrf_residual_envelope(
     fixture$data$X, fixture$data$seen, "thresholds_0", "interactions_0")
-  marked <- stan_marked_subsampling(
+  subsampling <- stan_subsampling(
     fixture$data$N, 2L, fixture$prior, envelope, anchor = rep(0, 10L))
   common <- list(
     path_to_stanmodel = compiled, standata = fixture$data,
@@ -95,24 +95,24 @@ test_that("public node-shared OMRF samples full and marked with ZigZag and BPS",
   for (flow in c("ZigZag", "BouncyParticle")) {
     full_fit <- do.call(pdmp_sample_from_stanmodel, c(
       common, list(flow = flow, seed = if (flow == "ZigZag") 1801L else 1802L)))
-    marked_fit <- do.call(pdmp_sample_from_stanmodel, c(
-      common, list(flow = flow, marked_subsampling = marked,
+    subsampling_fit <- do.call(pdmp_sample_from_stanmodel, c(
+      common, list(flow = flow, subsampling = subsampling,
                    seed = if (flow == "ZigZag") 1811L else 1812L)))
     expect_s3_class(full_fit, "pdmp_result")
-    expect_s3_class(marked_fit, "pdmp_result")
+    expect_s3_class(subsampling_fit, "pdmp_result")
     expect_gt(full_fit$stats$sticky_events[[1L]], 0)
-    expect_gt(marked_fit$stats$sticky_events[[1L]], 0)
-    counters <- attr(marked_fit, "marked_context_counters")[[1L]]
+    expect_gt(subsampling_fit$stats$sticky_events[[1L]], 0)
+    counters <- attr(subsampling_fit, "subsampling_context_counters")[[1L]]
     if (is.environment(counters)) counters <- as.list(counters)
     expect_equal(
       counters$persons_evaluated,
-      marked$subsample_size * counters$selected_gradient_calls)
+      subsampling$subsample_size * counters$selected_gradient_calls)
     expect_equal(
       counters$selected_gradient_calls,
-      2 * marked_fit$stats$residual_oracle_calls[[1L]])
+      subsampling_fit$stats$residual_oracle_calls[[1L]])
     expect_lte(
-      marked_fit$stats$marked_final_reflections[[1L]],
-      marked_fit$stats$marked_subset_evaluations[[1L]])
+      subsampling_fit$stats$subsampling_final_reflections[[1L]],
+      subsampling_fit$stats$subsampling_subset_evaluations[[1L]])
     expect_equal(counters$sampling_full_gradient_calls, 0L)
     expect_equal(counters$sampling_model_constructions, 0L)
     expect_equal(counters$sampling_data_constructions, 0L)

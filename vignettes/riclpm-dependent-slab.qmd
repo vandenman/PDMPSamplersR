@@ -71,10 +71,12 @@ random-intercept covariance, initial within-person covariance, innovation
 covariance, and lag matrix. Its multivariate-normal likelihood depends on the
 rows only through `N`, `z_sum`, and `z_crossprod`.
 
-## Short ZigZag and BPS checks
+## ZigZag, BPS, and Adaptive Boomerang checks
 
 Stan compilation is intentionally opt-in during vignette builds. Set
-`PDMPSAMPLERSR_RUN_RICLPM_VIGNETTE=true` to run the two short sampling checks.
+`PDMPSAMPLERSR_RUN_RICLPM_VIGNETTE=true` to run the short sampling checks.
+Adaptive Boomerang uses the same dependent slab and grid-thinning path, but
+needs a positive warmup interval to learn its reference mean and precision.
 
 ```{r}
 run_checks <- identical(
@@ -92,13 +94,18 @@ common <- list(
   model_prior = betabernoulli(1, 2), slab_prior = slab,
   show_progress = FALSE, materialize = FALSE
 )
-fits <- lapply(c("ZigZag", "BouncyParticle"), function(flow) {
+flows <- c("ZigZag", "BouncyParticle", "AdaptiveBoomerang")
+fits <- lapply(flows, function(flow) {
   do.call(pdmp_sample_from_stanmodel, c(common, list(
-    flow = flow, seed = if (flow == "ZigZag") 611L else 612L
+    flow = flow,
+    t_warmup = if (flow == "AdaptiveBoomerang") 0.4 else 0,
+    seed = 610L + match(flow, flows)
   )))
 })
-names(fits) <- c("ZigZag", "BouncyParticle")
+names(fits) <- flows
 stopifnot(all(vapply(fits, function(fit) fit$d > 0L, logical(1))))
+stopifnot(fits$AdaptiveBoomerang$stats$warmup_events > 0)
+stopifnot(fits$AdaptiveBoomerang$stats$main_events > 0)
 ```
 
 Long posterior comparisons belong in project analyses, not routine package

@@ -74,7 +74,9 @@ the unscaled sum of the installed observations; Julia applies `N / m`.}
 "BouncyParticle", "Boomerang", "AdaptiveBoomerang", "PreconditionedZigZag",
 or "PreconditionedBPS".
 The `"AdaptiveBoomerang"` flow learns its reference (mean and precision)
-during warmup and requires a grid-like algorithm.
+during warmup and requires a grid-like algorithm. It is supported with
+dependent slabs when `GridThinningStrategy` is selected; provide positive
+`t_warmup`, or let the sampler choose its 20% default.
 The `"PreconditionedZigZag"` and `"PreconditionedBPS"` flows learn a
 diagonal preconditioner during warmup and also require
 a grid-like algorithm.}

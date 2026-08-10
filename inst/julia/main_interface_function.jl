@@ -415,15 +415,23 @@ function build_slab_provider(slab_prior, unc_names::AbstractVector{<:AbstractStr
     end
 end
 
+"""
+Wrap a dependent-slab sampler using the concrete constructed dynamics.
+
+Clock selection is flow-aware: in particular, Boomerang-family dynamics with
+global-logscale slabs require the Fourier residual clock. Passing an R flow
+name here would discard preconditioning and adaptive-dynamics information.
+"""
 function wrap_dependent_sticky(alg::PDMPSamplers.PoissonTimeStrategy, sticky::Bool,
-        model_prior, slab_prior, can_stick, flow_type::String,
+        model_prior, slab_prior, can_stick,
+        flow::PDMPSamplers.ContinuousDynamics,
         unc_names::AbstractVector{<:AbstractString}=String[])
     sticky || throw(ArgumentError("wrap_dependent_sticky requires sticky=true"))
     isnothing(slab_prior) && throw(ArgumentError("wrap_dependent_sticky requires slab_prior"))
     d = length(can_stick)
     provider = build_slab_provider(slab_prior, unc_names, can_stick, d)
     odds = build_model_prior_odds(model_prior, PDMPSamplers.beta_indices(provider), d)
-    clock = default_aggregate_unstick_clock(provider, odds)
+    clock = default_aggregate_unstick_clock(provider, odds, flow)
     return AggregateSticky(alg, clock, BitVector(can_stick))
 end
 
@@ -1042,7 +1050,7 @@ function r_pdmp_stan(
         lazy_max_rejections)
     alg = isnothing(slab_prior) ?
         wrap_sticky(alg0, sticky, model_prior, parameter_prior_vec, can_stick_vec) :
-        wrap_dependent_sticky(alg0, sticky, model_prior, slab_prior, can_stick_vec, flow_type, unc_names_vec)
+        wrap_dependent_sticky(alg0, sticky, model_prior, slab_prior, can_stick_vec, flow, unc_names_vec)
 
     sbopts = SupportBoundaryOptions(;
         detect_boundaries = support_boundary_mode != "error",
@@ -1147,7 +1155,7 @@ function r_pdmp_custom(
         linear_area_threshold, linear_min_area_gain)
     alg = isnothing(slab_prior) ?
         wrap_sticky(alg0, sticky, model_prior, parameter_prior_vec, can_stick_vec) :
-        wrap_dependent_sticky(alg0, sticky, model_prior, slab_prior, can_stick_vec, flow_type)
+        wrap_dependent_sticky(alg0, sticky, model_prior, slab_prior, can_stick_vec, flow)
 
     sbopts = SupportBoundaryOptions(;
         detect_boundaries = support_boundary_mode != "error",
@@ -1507,7 +1515,7 @@ function r_pdmp_stan_for_brms(
         linear_min_area_gain)
     alg = isnothing(slab_prior) ?
         wrap_sticky(alg0, sticky, model_prior, parameter_prior_vec, can_stick_vec) :
-        wrap_dependent_sticky(alg0, sticky, model_prior, slab_prior, can_stick_vec, flow_type, unc_names_vec)
+        wrap_dependent_sticky(alg0, sticky, model_prior, slab_prior, can_stick_vec, flow, unc_names_vec)
 
     chains = pdmp_sample(d, flow, model, alg, t0, T, t_warmup;
                          progress = show_progress, n_chains, threaded, seed,

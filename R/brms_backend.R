@@ -86,9 +86,8 @@
 #'   must match the number of supported coefficients. If omitted, all
 #'   non-intercept population-level coefficients are candidates.
 #' @param model_prior A [bernoulli()] or [betabernoulli()] object specifying
-#'   the prior on model space for the currently supported legacy sticky path.
-#'   [exchangeable_model_size_prior()] is reserved for the pending dependent
-#'   slab path.
+#'   the prior on model space. Dependent slabs also accept
+#'   [exchangeable_model_size_prior()].
 #' @param kappa Optional numeric vector of slab densities at zero for each
 #'   stickable coordinate (kappa in the sticky PDMP literature). If omitted,
 #'   derived automatically from the brms prior specification (only
@@ -99,7 +98,9 @@
 #'   [independent_slab_density()], [gaussian_scale_mixture_slab()], or
 #'   [arbitrary_slab_boundary()]. Mutually exclusive with `kappa`. Full-data
 #'   dependent slabs use the brms prior-only data as the base prior target;
-#'   subsampled brms dependent slabs are not yet supported.
+#'   subsampled brms dependent slabs are not yet supported. Adaptive Boomerang
+#'   is supported with `GridThinningStrategy` and requires positive warmup
+#'   (automatically set to one fifth of the sampling time when omitted).
 #' @param stanvars Optional `stanvar` object for custom Stan code.
 #' @param sample_prior Currently only `"no"` is supported.
 #' @param save_model Optional file path to save the generated Stan code.
@@ -182,8 +183,8 @@ brm_pdmp <- function(
     if (!isTRUE(sticky)) {
       cli::cli_abort("Argument {.arg slab_prior} requires {.arg sticky} to be {.code TRUE}.")
     }
-    if (!flow %in% c("ZigZag", "BouncyParticle") || algorithm != "GridThinningStrategy") {
-      cli::cli_abort("Dependent {.arg slab_prior} sticky sampling currently requires ZigZag or BouncyParticle with {.val GridThinningStrategy}.")
+    if (algorithm != "GridThinningStrategy") {
+      cli::cli_abort("Dependent {.arg slab_prior} sticky sampling currently requires {.val GridThinningStrategy}.")
     }
   }
   if (!is.null(seed)) {

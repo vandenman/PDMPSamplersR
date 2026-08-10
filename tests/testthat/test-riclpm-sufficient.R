@@ -32,18 +32,33 @@ test_that("bundled RI-CLPM exposes the complete cross-lagged Gaussian slab", {
 
   slab <- dense_gaussian_slab(
     data$slab_mean, data$slab_cov, coef = "cross_lagged")
-  for (flow in c("ZigZag", "BouncyParticle")) {
+  for (flow in c("ZigZag", "BouncyParticle", "AdaptiveBoomerang")) {
+    adaptive <- identical(flow, "AdaptiveBoomerang")
     fit <- pdmp_sample_from_stanmodel(
       model, data, flow = flow, algorithm = "GridThinningStrategy",
-      T = 0.2, grid_n = 4L, grid_t_max = 0.05,
+      T = if (adaptive) 10 else 0.2,
+      t_warmup = if (adaptive) 2 else 0,
+      grid_n = 4L, grid_t_max = if (adaptive) 0.1 else 0.05,
       sticky = TRUE, can_stick = "cross_lagged",
       model_prior = betabernoulli(1, 2), slab_prior = slab,
       show_progress = FALSE, materialize = FALSE,
-      seed = if (flow == "ZigZag") 1701L else 1702L
+      seed = match(flow, c("ZigZag", "BouncyParticle",
+        "AdaptiveBoomerang")) + 1700L
     )
     expect_s3_class(fit, "pdmp_result")
     expect_equal(fit$d, 19L)
     expect_true(all(is.finite(fit$stats$elapsed_time)))
     expect_true(all(fit$stats$main_events >= 0))
+    inclusion <- inclusion_probs(fit)
+    expect_length(inclusion, fit$d)
+    expect_true(all(is.finite(inclusion)))
+    if (adaptive) {
+      expect_true(all(fit$stats$warmup_events > 0))
+      expect_true(all(fit$stats$main_events > 0))
+      expect_true(all(is.finite(fit$stats$final_lambda_ref)))
+      expect_true(all(abs(fit$stats$final_lambda_ref - 0.1) > 1e-8))
+      expect_true(all(fit$stats$sticky_freezes > 0))
+      expect_true(all(fit$stats$sticky_unfreezes > 0))
+    }
   }
 })

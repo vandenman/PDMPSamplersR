@@ -184,9 +184,6 @@ validate_pdmp_params <- function(d, flow, algorithm, T, t0 = 0.0, t_warmup = 0.0
 
       validate_type(parameter_prior, type = "double", n = d, positive = TRUE)
     } else {
-      if (!flow %in% c("ZigZag", "BouncyParticle")) {
-        cli::cli_abort("Dependent {.arg slab_prior} sticky sampling currently supports only ZigZag and BouncyParticle flows.")
-      }
       if (algorithm != "GridThinningStrategy") {
         cli::cli_abort("Dependent {.arg slab_prior} sticky sampling currently requires {.val GridThinningStrategy}.")
       }
@@ -385,9 +382,6 @@ validate_pdmp_params <- function(d, flow, algorithm, T, t0 = 0.0, t_warmup = 0.0
   if (is.null(model_prior) || !is.model_prior(model_prior)) {
     cli::cli_abort("Argument {.arg model_prior} must be provided when {.arg sticky} is {.code TRUE}.")
   }
-  if (!flow %in% c("ZigZag", "BouncyParticle")) {
-    cli::cli_abort("Dependent {.arg slab_prior} sticky sampling currently supports only ZigZag and BouncyParticle flows.")
-  }
   if (algorithm != "GridThinningStrategy") {
     cli::cli_abort("Dependent {.arg slab_prior} sticky sampling currently requires {.val GridThinningStrategy}.")
   }
@@ -511,7 +505,9 @@ validate_support_boundary_control <- function(support_boundary) {
 #'   "BouncyParticle", "Boomerang", "AdaptiveBoomerang", "PreconditionedZigZag",
 #'   or "PreconditionedBPS".
 #'   The `"AdaptiveBoomerang"` flow learns its reference (mean and precision)
-#'   during warmup and requires a grid-like algorithm.
+#'   during warmup and requires a grid-like algorithm. It is supported with
+#'   dependent slabs when `GridThinningStrategy` is selected; provide positive
+#'   `t_warmup`, or let the sampler choose its 20% default.
 #'   The `"PreconditionedZigZag"` and `"PreconditionedBPS"` flows learn a
 #'   diagonal preconditioner during warmup and also require
 #'   a grid-like algorithm.

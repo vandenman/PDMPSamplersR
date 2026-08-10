@@ -400,7 +400,7 @@ function r_pdmp_stan_subsampling(prepared, subsampling, x0, flow_type::String,
             isnothing(parameter_prior) ? nothing : _as_float_vector(parameter_prior),
             can_stick_vec) :
         wrap_dependent_sticky(alg0, sticky, model_prior, slab_prior,
-            can_stick_vec, flow_type, unc_names)
+            can_stick_vec, flow, unc_names)
     sbopts = SupportBoundaryOptions(;
         detect_boundaries = support_boundary_mode != "error",
         mode = Symbol(support_boundary_mode),

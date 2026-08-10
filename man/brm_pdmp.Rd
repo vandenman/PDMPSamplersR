@@ -159,9 +159,8 @@ must match the number of supported coefficients. If omitted, all
 non-intercept population-level coefficients are candidates.}
 
 \item{model_prior}{A [bernoulli()] or [betabernoulli()] object specifying
-the prior on model space for the currently supported legacy sticky path.
-[exchangeable_model_size_prior()] is reserved for the pending dependent
-slab path.}
+the prior on model space. Dependent slabs also accept
+[exchangeable_model_size_prior()].}
 
 \item{kappa}{Optional numeric vector of slab densities at zero for each
 stickable coordinate (kappa in the sticky PDMP literature). If omitted,
@@ -174,7 +173,9 @@ derivation).}
 [independent_slab_density()], [gaussian_scale_mixture_slab()], or
 [arbitrary_slab_boundary()]. Mutually exclusive with `kappa`. Full-data
 dependent slabs use the brms prior-only data as the base prior target;
-subsampled brms dependent slabs are not yet supported.}
+subsampled brms dependent slabs are not yet supported. Adaptive Boomerang
+is supported with `GridThinningStrategy` and requires positive warmup
+(automatically set to one fifth of the sampling time when omitted).}
 
 \item{stanvars}{Optional `stanvar` object for custom Stan code.}
 

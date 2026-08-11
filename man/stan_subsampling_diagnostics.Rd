@@ -13,7 +13,8 @@ stan_subsampling_diagnostics(
   velocity = NULL,
   flow = c("ZigZag", "BouncyParticle", "AdaptiveBoomerang"),
   flow_mean = NULL,
-  flow_cov = NULL
+  flow_cov = NULL,
+  phase = c("main", "warmup")
 )
 }
 \arguments{
@@ -36,6 +37,9 @@ subsample size and no duplicates.}
 \item{flow_mean}{Optional flow mean.}
 
 \item{flow_cov}{Optional flow covariance.}
+
+\item{phase}{Diagnostic sampling phase. For staged HCV specifications,
+`"main"` activates HCV and `"warmup"` uses the first-order fallback.}
 }
 \value{
 A list of gradient-closure, residual-rate, envelope, and construction

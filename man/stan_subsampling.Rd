@@ -23,7 +23,20 @@ stan_subsampling(
   anchor = NULL
 )
 
-omrf_residual_envelope(X, seen, thresholds, interactions)
+omrf_residual_envelope(
+  X,
+  seen,
+  thresholds,
+  interactions,
+  backend = c("analytic", "stan"),
+  use_hcv = FALSE,
+  hcv_damping = NULL,
+  hcv_warmup = c("hcv", "first_order"),
+  factorization = c("person", "person_node"),
+  factor_sampling = c("size_biased", "node_stratified"),
+  prior_backend = c("stan", "analytic"),
+  geometry = c("norm_local", "covariate_local", "pattern_local")
+)
 
 stan_parameter_mapping(path_to_stanmodel, standata, parameters = NULL)
 }
@@ -54,6 +67,41 @@ or a recognized package provider such as [omrf_residual_envelope()].}
 \item{interactions}{Interaction parameter block name; edge order is the
 upper triangle `(1,2), (1,3), ..., (P-1,P)`.}
 
+\item{backend}{Residual-gradient backend. The default `"analytic"` evaluates
+the exact OMRF likelihood residual without invoking Stan autodiff.
+`"stan"` retains the selected-likelihood Stan path for validation.}
+
+\item{use_hcv}{Whether to use the analytic categorical Hessian control
+variate. This requires `backend = "analytic"` and retains a certified
+first-order fallback through damping.}
+
+\item{hcv_damping}{Positive damping scale. By default this is the number of
+OMRF likelihood coordinates.}
+
+\item{hcv_warmup}{HCV policy during warmup. `"hcv"` preserves the existing
+behavior. Experimental `"first_order"` uses the certified first-order
+residual bound during warmup and activates HCV at the main-phase boundary.}
+
+\item{factorization}{Experimental likelihood contribution layout. `"person"`
+retains one contribution per person. `"person_node"` exposes each
+person-node conditional as a separate sparse contribution.}
+
+\item{factor_sampling}{Factor-subset design. `"size_biased"` uses the
+generic contribution design; `"node_stratified"` draws an equal number
+from every node while retaining exact size-biased proposal mixing.}
+
+\item{prior_backend}{Deterministic prior-gradient backend. `"stan"` supports
+arbitrary custom priors. `"analytic"` recognizes the package OMRF
+independent Gaussian and Cauchy prior contracts from `prior_standata`.}
+
+\item{geometry}{Certified residual-rate geometry. `"norm_local"` uses a
+compact covariate-norm decomposition. `"covariate_local"` retains
+empirical neighbour covariates in threshold, edge, and edge-pair terms
+while sharing trajectory scales across people. `"pattern_local"` groups
+identical node-neighbour patterns and retains their signed directional
+logit geometry, which is especially tighter for scalar BPS/Boomerang
+rates but is more expensive to construct.}
+
 \item{path_to_stanmodel}{Stan source or compiled-library path.}
 
 \item{standata}{Named data list or JSON path.}
@@ -82,6 +130,12 @@ diagonal categorical covariance has operator norm at most `1/2`, hence the
 complete person Hessian is bounded by
 `0.5 * opnorm(B_n)^2`. This is no larger than summing the separate node
 spectral bounds and preserves a global, anchor-independent certificate.
+The analytic backend uses a tighter low-rank node-local certificate. For
+each node it expands the product of threshold and interaction terms against
+the Euclidean norm of that person's neighbour-category vector. This needs
+only three envelope components per node while retaining covariate magnitude
+and preventing thresholds or nonincident interactions from inflating the
+bound.
 Threshold and interaction arguments are Stan unconstrained block names and
 are resolved at sampler initialization.
 }

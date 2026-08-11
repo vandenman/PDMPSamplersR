@@ -70,14 +70,37 @@ test_that("OMRF provider uses persons and finite categorical curvature weights",
     interactions = "interactions_0"
   )
   expect_s3_class(envelope, "omrf_residual_envelope")
+  expect_identical(envelope$backend, "analytic")
   expect_equal(ncol(envelope$weights), nrow(X))
   expect_true(all(is.finite(envelope$weights)))
   expect_true(all(envelope$weights >= 0))
+  expect_equal(dim(envelope$node_weights), c(ncol(X), nrow(X)))
+  expect_true(all(is.finite(envelope$node_weights)))
+  expect_true(all(envelope$node_weights >= 0))
+  expect_true(all(envelope$weights <= colSums(envelope$node_weights) + 1e-12))
+  full_gradient <- omrf_full_gradient(
+    X, seen = c(3, 3, 3),
+    thresholds = "thresholds_0", interactions = "interactions_0")
+  expect_s3_class(full_gradient, "omrf_full_gradient")
+  expect_identical(full_gradient$spec$prior_backend, "analytic")
+  expect_identical(full_gradient$spec$factorization, "person")
+  expect_identical(
+    omrf_residual_envelope(
+      X, c(3, 3, 3), "a", "b", geometry = "pattern_local")$bound_type,
+    "pattern_local_range")
   expect_equal(unname(envelope$edge_order),
                rbind(c(1L, 2L), c(1L, 3L), c(2L, 3L)))
   expect_error(
     omrf_residual_envelope(X, c(2, 3, 3), "a", "b"),
     "encoded"
+  )
+  expect_identical(
+    omrf_residual_envelope(X, c(3, 3, 3), "a", "b", backend = "stan")$backend,
+    "stan"
+  )
+  expect_error(
+    omrf_residual_envelope(X, c(3, 3, 3), "a", "b", backend = "invalid"),
+    "arg"
   )
 })
 
@@ -93,6 +116,37 @@ test_that("parameter blocks resolve to ordered unconstrained coordinates", {
     PDMPSamplersR:::.resolve_unconstrained_spec(
       c("thresholds_0", "thresholds_0.1"), names),
     "duplicates"
+  )
+})
+
+test_that("custom-Stan anchor-bank controls validate before backend setup", {
+  expect_error(
+    pdmp_sample_from_stanmodel(
+      "missing.stan", list(), subsampling_anchor_updates = 1L,
+      t_warmup = 1),
+    "require.*subsampling"
+  )
+  expect_error(
+    pdmp_sample_from_stanmodel(
+      "missing.stan", list(), subsampling_use_anchor_bank = TRUE),
+    "requires positive"
+  )
+  expect_error(
+    pdmp_sample_from_stanmodel(
+      "missing.stan", list(), subsampling_anchor_bank_capacity = 0L),
+    "positive integer"
+  )
+  expect_error(
+    pdmp_sample_from_stanmodel(
+      "missing.stan", list(),
+      subsampling_main_anchor_refresh_distance = 0),
+    "positive or Inf"
+  )
+  expect_error(
+    pdmp_sample_from_stanmodel(
+      "missing.stan", list(),
+      subsampling_main_anchor_refresh_distance = 0.5),
+    "requires.*anchor_bank"
   )
 })
 

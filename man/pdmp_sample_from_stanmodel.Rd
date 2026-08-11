@@ -10,6 +10,12 @@ pdmp_sample_from_stanmodel(
   prior_stanmodel = NULL,
   prior_standata = NULL,
   subsampling = NULL,
+  full_gradient = NULL,
+  subsampling_warmup = c("subsampled", "full"),
+  subsampling_anchor_updates = 0L,
+  subsampling_use_anchor_bank = FALSE,
+  subsampling_anchor_bank_capacity = 8L,
+  subsampling_main_anchor_refresh_distance = Inf,
   flow = c("ZigZag", "BouncyParticle", "Boomerang", "AdaptiveBoomerang",
     "PreconditionedZigZag", "PreconditionedBPS"),
   algorithm = c("ThinningStrategy", "GridThinningStrategy",
@@ -69,6 +75,32 @@ by \code{subsampling}; it is not needed for full-gradient slabs.}
 \item{subsampling}{Optional exact subsampling custom-Stan specification
 created by [stan_subsampling()]. The selected Stan branch must add
 the unscaled sum of the installed observations; Julia applies `N / m`.}
+
+\item{full_gradient}{Optional non-factorized native full-gradient backend.
+Currently [omrf_full_gradient()] supports independent-prior OMRF models
+and provides an exact native Hessian-vector product for Boomerang-family
+and other full samplers.}
+
+\item{subsampling_warmup}{Warmup gradient backend for subsampling runs.
+`"subsampled"` preserves the existing behavior. `"full"` uses the exact
+native OMRF full gradient and HVP during warmup, then switches to the
+configured subsampling model for retained sampling.}
+
+\item{subsampling_anchor_updates}{Number of prepared OMRF anchors added from
+continuous-time warmup means. With full-gradient subsampling warmup, zero
+prepares only the exact terminal warmup anchor.}
+
+\item{subsampling_use_anchor_bank}{Retain prepared OMRF anchors and select
+the nearest entry at event boundaries. If false, updates replace the
+active anchor. Full-gradient subsampling warmup can enable the bank with
+zero scheduled updates because it prepares a terminal anchor.}
+
+\item{subsampling_anchor_bank_capacity}{Maximum prepared OMRF anchors kept
+per chain.}
+
+\item{subsampling_main_anchor_refresh_distance}{Positive Euclidean distance
+from the nearest prepared anchor that triggers a new exact OMRF anchor
+during main sampling. The default `Inf` disables main-phase preparation.}
 
 \item{flow}{Character string specifying the flow type. One of "ZigZag",
 "BouncyParticle", "Boomerang", "AdaptiveBoomerang", "PreconditionedZigZag",

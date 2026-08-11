@@ -956,8 +956,35 @@ function extract_stats(chains::PDMPChains)
         "main_grid_points_evaluated" => vals(:main_grid_points_evaluated),
         "warmup_grid_endpoint_derivative_points_loaded" => vals(:warmup_grid_endpoint_derivative_points_loaded),
         "main_grid_endpoint_derivative_points_loaded" => vals(:main_grid_endpoint_derivative_points_loaded),
+        "warmup_subsampling_cell_roof_proposals" =>
+            vals(:warmup_subsampling_cell_roof_proposals),
+        "main_subsampling_cell_roof_proposals" =>
+            vals(:main_subsampling_cell_roof_proposals),
+        "warmup_subsampling_aggregate_accepts" =>
+            vals(:warmup_subsampling_aggregate_accepts),
+        "main_subsampling_aggregate_accepts" =>
+            vals(:main_subsampling_aggregate_accepts),
+        "warmup_subsampling_subset_evaluations" =>
+            vals(:warmup_subsampling_subset_evaluations),
+        "main_subsampling_subset_evaluations" =>
+            vals(:main_subsampling_subset_evaluations),
+        "warmup_subsampling_final_reflections" =>
+            vals(:warmup_subsampling_final_reflections),
+        "main_subsampling_final_reflections" =>
+            vals(:main_subsampling_final_reflections),
         "warmup_elapsed_time" => vals(:warmup_elapsed_time),
         "main_elapsed_time" => vals(:main_elapsed_time),
+        "initialization_elapsed_time" => vals(:initialization_elapsed_time),
+        "warmup_phase_elapsed_time" => vals(:warmup_phase_elapsed_time),
+        "main_phase_elapsed_time" => vals(:main_phase_elapsed_time),
+        "transition_elapsed_time" => vals(:transition_elapsed_time),
+        "warmup_adapter_finish_elapsed_time" =>
+            vals(:warmup_adapter_finish_elapsed_time),
+        "main_sampler_initialization_elapsed_time" =>
+            vals(:main_sampler_initialization_elapsed_time),
+        "algorithm_warmup_finish_elapsed_time" =>
+            vals(:algorithm_warmup_finish_elapsed_time),
+        "finalization_elapsed_time" => vals(:finalization_elapsed_time),
         "boomerang_interference_events" => vals(:boomerang_interference_events),
         "boomerang_target_c_share_sum" => vals(:boomerang_target_c_share_sum),
         "boomerang_target_d_share_sum" => vals(:boomerang_target_d_share_sum),

@@ -95,11 +95,47 @@ stan_subsampling <- function(n_observations, subsample_size,
   if (!is.null(anchor) && (!is.numeric(anchor) || any(!is.finite(anchor)))) {
     cli::cli_abort("Argument {.arg anchor} must be NULL or a finite numeric vector.")
   }
+  if (inherits(residual_envelope, "omrf_residual_envelope") &&
+      identical(residual_envelope$prior_backend, "analytic")) {
+    residual_envelope <- .attach_omrf_analytic_prior(
+      residual_envelope, prior_standata, "prior_standata")
+  }
   structure(list(
     n_observations = n_observations, subsample_size = subsample_size,
     prior_standata = prior_standata, residual_envelope = residual_envelope,
     anchor = if (is.null(anchor)) NULL else as.numeric(anchor)
   ), class = "stan_subsampling")
+}
+
+.attach_omrf_analytic_prior <- function(spec, standata, argument = "standata") {
+  if (!is.list(standata)) {
+    cli::cli_abort("Analytic OMRF priors require {.arg {argument}} as a named list.")
+  }
+  required <- c("prior_threshold_alpha", "prior_threshold_beta")
+  if (!all(required %in% names(standata))) {
+    cli::cli_abort("Analytic OMRF priors require threshold alpha and beta data.")
+  }
+  interaction <- if (!is.null(standata$prior_cauchy_scale)) {
+    list(type = "cauchy", scale = standata$prior_cauchy_scale)
+  } else if (!is.null(standata$prior_interaction_sd)) {
+    list(type = "gaussian", scale = standata$prior_interaction_sd)
+  } else {
+    cli::cli_abort(paste0(
+      "The requested analytic OMRF prior is not an independent Cauchy or ",
+      "Gaussian prior."))
+  }
+  values <- c(standata[required], interaction$scale)
+  if (any(!vapply(values, function(value) {
+    is.numeric(value) && length(value) == 1L && is.finite(value) && value > 0
+  }, logical(1)))) {
+    cli::cli_abort("Analytic OMRF prior parameters must be finite and positive.")
+  }
+  spec$analytic_prior <- list(
+    type = interaction$type,
+    threshold_alpha = standata$prior_threshold_alpha,
+    threshold_beta = standata$prior_threshold_beta,
+    interaction_scale = interaction$scale)
+  spec
 }
 
 #' OMRF person-level residual envelope
@@ -110,6 +146,12 @@ stan_subsampling <- function(n_observations, subsample_size,
 #' complete person Hessian is bounded by
 #' `0.5 * opnorm(B_n)^2`. This is no larger than summing the separate node
 #' spectral bounds and preserves a global, anchor-independent certificate.
+#' The analytic backend uses a tighter low-rank node-local certificate. For
+#' each node it expands the product of threshold and interaction terms against
+#' the Euclidean norm of that person's neighbour-category vector. This needs
+#' only three envelope components per node while retaining covariate magnitude
+#' and preventing thresholds or nonincident interactions from inflating the
+#' bound.
 #' Threshold and interaction arguments are Stan unconstrained block names and
 #' are resolved at sampler initialization.
 #'
@@ -118,10 +160,63 @@ stan_subsampling <- function(n_observations, subsample_size,
 #' @param thresholds Threshold parameter block name.
 #' @param interactions Interaction parameter block name; edge order is the
 #'   upper triangle `(1,2), (1,3), ..., (P-1,P)`.
+#' @param backend Residual-gradient backend. The default `"analytic"` evaluates
+#'   the exact OMRF likelihood residual without invoking Stan autodiff.
+#'   `"stan"` retains the selected-likelihood Stan path for validation.
+#' @param use_hcv Whether to use the analytic categorical Hessian control
+#'   variate. This requires `backend = "analytic"` and retains a certified
+#'   first-order fallback through damping.
+#' @param hcv_damping Positive damping scale. By default this is the number of
+#'   OMRF likelihood coordinates.
+#' @param hcv_warmup HCV policy during warmup. `"hcv"` preserves the existing
+#'   behavior. Experimental `"first_order"` uses the certified first-order
+#'   residual bound during warmup and activates HCV at the main-phase boundary.
+#' @param factorization Experimental likelihood contribution layout. `"person"`
+#'   retains one contribution per person. `"person_node"` exposes each
+#'   person-node conditional as a separate sparse contribution.
+#' @param factor_sampling Factor-subset design. `"size_biased"` uses the
+#'   generic contribution design; `"node_stratified"` draws an equal number
+#'   from every node while retaining exact size-biased proposal mixing.
+#' @param prior_backend Deterministic prior-gradient backend. `"stan"` supports
+#'   arbitrary custom priors. `"analytic"` recognizes the package OMRF
+#'   independent Gaussian and Cauchy prior contracts from `prior_standata`.
+#' @param geometry Certified residual-rate geometry. `"norm_local"` uses a
+#'   compact covariate-norm decomposition. `"covariate_local"` retains
+#'   empirical neighbour covariates in threshold, edge, and edge-pair terms
+#'   while sharing trajectory scales across people. `"pattern_local"` groups
+#'   identical node-neighbour patterns and retains their signed directional
+#'   logit geometry, which is especially tighter for scalar BPS/Boomerang
+#'   rates but is more expensive to construct.
 #' @return A certified Stan residual-envelope specification.
 #' @rdname stan_subsampling
 #' @export
-omrf_residual_envelope <- function(X, seen, thresholds, interactions) {
+omrf_residual_envelope <- function(X, seen, thresholds, interactions,
+                                   backend = c("analytic", "stan"),
+                                   use_hcv = FALSE, hcv_damping = NULL,
+                                   hcv_warmup = c("hcv", "first_order"),
+                                   factorization = c("person", "person_node"),
+                                   factor_sampling = c("size_biased", "node_stratified"),
+                                   prior_backend = c("stan", "analytic"),
+                                   geometry = c("norm_local", "covariate_local",
+                                                "pattern_local")) {
+  backend <- match.arg(backend)
+  hcv_warmup <- match.arg(hcv_warmup)
+  factorization <- match.arg(factorization)
+  factor_sampling <- match.arg(factor_sampling)
+  prior_backend <- match.arg(prior_backend)
+  geometry <- match.arg(geometry)
+  if (!is.logical(use_hcv) || length(use_hcv) != 1L || is.na(use_hcv)) {
+    cli::cli_abort("Argument {.arg use_hcv} must be TRUE or FALSE.")
+  }
+  if (isTRUE(use_hcv) && backend != "analytic") {
+    cli::cli_abort("OMRF Hessian control variates require {.arg backend = \"analytic\"}.")
+  }
+  if (factorization == "person_node" && backend != "analytic") {
+    cli::cli_abort("Person-node OMRF factorization requires {.arg backend = \"analytic\"}.")
+  }
+  if (factorization == "person" && factor_sampling != "size_biased") {
+    cli::cli_abort("Node-stratified sampling requires {.arg factorization = \"person_node\"}.")
+  }
   if (!is.matrix(X) || !is.numeric(X) || any(!is.finite(X)) || any(X != floor(X))) {
     cli::cli_abort("Argument {.arg X} must be a finite integer-valued person-by-node matrix.")
   }
@@ -150,6 +245,11 @@ omrf_residual_envelope <- function(X, seen, thresholds, interactions) {
     matrix(integer(), nrow = 0L, ncol = 2L)
   }
   d_model <- no_thresholds + nrow(edges)
+  if (is.null(hcv_damping)) hcv_damping <- d_model
+  if (!is.numeric(hcv_damping) || length(hcv_damping) != 1L ||
+      !is.finite(hcv_damping) || hcv_damping <= 0) {
+    cli::cli_abort("Argument {.arg hcv_damping} must be one finite positive number.")
+  }
   incidence <- lapply(seq_len(P), function(j) {
     incident <- which(edges[, 1L] == j | edges[, 2L] == j)
     list(
@@ -161,6 +261,8 @@ omrf_residual_envelope <- function(X, seen, thresholds, interactions) {
   row_keys <- apply(X, 1L, paste, collapse = ",")
   unique_rows <- which(!duplicated(row_keys))
   unique_weights <- numeric(length(unique_rows))
+  unique_node_weights <- matrix(0, nrow = P, ncol = length(unique_rows))
+  unique_hcv_remainder_weights <- matrix(0, nrow = P, ncol = length(unique_rows))
   for (key_index in seq_along(unique_rows)) {
     n <- unique_rows[key_index]
     person_design <- matrix(0, no_thresholds, d_model)
@@ -174,22 +276,189 @@ omrf_residual_envelope <- function(X, seen, thresholds, interactions) {
         B[u, no_thresholds + incidence[[j]]$edges] <-
           u * X[n, incidence[[j]]$neighbours]
       }
+      Bnorm <- norm(B, type = "2")
+      unique_node_weights[j, key_index] <- 0.5 * Bnorm^2
+      # For p = softmax(z), C(p) = diag(p) - p p'. The identities
+      # ||C(p)|| <= 1/2 and
+      # ||C(p)-C(q)|| <= 3 ||p-q|| <= 3/2 ||z-w||
+      # give the integrated categorical Taylor remainder
+      # ||B'(p(Bx)-p(Ba))-B'C(p(Ba))B(x-a)||
+      # <= (3/4) ||B||^3 ||x-a||^2.
+      unique_hcv_remainder_weights[j, key_index] <- 0.75 * Bnorm^3
       person_design[design_row + seq_len(q) - 1L, ] <- B
       design_row <- design_row + q
     }
     unique_weights[key_index] <- 0.5 * norm(person_design, type = "2")^2
   }
   weights <- unique_weights[match(row_keys, row_keys[unique_rows])]
-  envelope <- stan_residual_envelope(weights)
+  node_weights <- unique_node_weights[, match(row_keys, row_keys[unique_rows]),
+                                      drop = FALSE]
+  hcv_remainder_weights <- unique_hcv_remainder_weights[
+    , match(row_keys, row_keys[unique_rows]), drop = FALSE]
+  neighbour_norms <- matrix(0, nrow = P, ncol = nrow(X))
+  for (node in seq_len(P)) {
+    neighbours <- incidence[[node]]$neighbours
+    if (length(neighbours)) {
+      neighbour_norms[node, ] <- sqrt(rowSums(
+        X[, neighbours, drop = FALSE]^2))
+    }
+  }
+  norm_weights <- matrix(0, nrow = 3L * P,
+                         ncol = if (factorization == "person_node") nrow(X) * P else nrow(X))
+  if (factorization == "person_node") {
+    for (node in seq_len(P)) {
+      columns <- (node - 1L) * nrow(X) + seq_len(nrow(X))
+      norm_weights[node, columns] <- 1
+      norm_weights[P + node, columns] <- neighbour_norms[node, ]
+      norm_weights[2L * P + node, columns] <- neighbour_norms[node, ]^2
+    }
+  } else {
+    norm_weights[seq_len(P), ] <- 1
+    norm_weights[P + seq_len(P), ] <- neighbour_norms
+    norm_weights[2L * P + seq_len(P), ] <- neighbour_norms^2
+  }
+  if (geometry == "covariate_local" && factorization != "person") {
+    cli::cli_abort("Covariate-local geometry currently requires person factorization.")
+  }
+  covariate_weights <- matrix(numeric(), nrow = 0L, ncol = nrow(X))
+  if (factorization == "person") {
+    for (node in seq_len(P)) {
+      neighbours <- incidence[[node]]$neighbours
+      node_covariates <- X[, neighbours, drop = FALSE]
+      node_rows <- matrix(1, nrow = 1L, ncol = nrow(X))
+      if (length(neighbours)) {
+        node_rows <- rbind(node_rows, t(node_covariates), t(node_covariates))
+        for (left_edge in seq_along(neighbours)) {
+          for (right_edge in seq_along(neighbours)) {
+            node_rows <- rbind(node_rows,
+              node_covariates[, left_edge] * node_covariates[, right_edge])
+          }
+        }
+      }
+      covariate_weights <- rbind(covariate_weights, node_rows)
+    }
+  }
+  # The structural envelope groups factors that have the same node-local
+  # neighbour configuration.  Its Julia scale callback uses the exact range
+  # of the displaced categorical logits, rather than collapsing the design to
+  # one spectral norm.  A factor belongs to exactly one component.
+  component_nodes <- integer()
+  component_covariates <- matrix(integer(), nrow = 0L, ncol = P)
+  component_membership <- vector("list", P)
+  for (node in seq_len(P)) {
+    neighbours <- incidence[[node]]$neighbours
+    keys <- if (length(neighbours)) {
+      apply(X[, neighbours, drop = FALSE], 1L, paste, collapse = ",")
+    } else {
+      rep.int("", nrow(X))
+    }
+    unique_keys <- unique(keys)
+    membership <- match(keys, unique_keys)
+    component_membership[[node]] <- membership
+    for (pattern in seq_along(unique_keys)) {
+      representative <- which(membership == pattern)[1L]
+      component_nodes <- c(component_nodes, node)
+      component_covariates <- rbind(component_covariates, X[representative, ])
+    }
+  }
+  component_offsets <- cumsum(c(0L, vapply(component_membership,
+                                            max, integer(1L))))
+  n_components <- tail(component_offsets, 1L)
+  structural_groups <- if (factorization == "person_node") {
+    matrix(integer(nrow(X) * P), nrow = 1L)
+  } else {
+    matrix(integer(P * nrow(X)), nrow = P)
+  }
+  for (node in seq_len(P)) {
+    rows <- component_offsets[node] + component_membership[[node]]
+    columns <- if (factorization == "person_node") {
+      (node - 1L) * nrow(X) + seq_len(nrow(X))
+    } else {
+      seq_len(nrow(X))
+    }
+    if (factorization == "person_node") {
+      structural_groups[1L, columns] <- rows
+    } else {
+      structural_groups[node, columns] <- rows
+    }
+  }
+  if (factorization == "person_node") {
+    factor_weights <- matrix(0, nrow = P, ncol = nrow(X) * P)
+    factor_hcv_weights <- matrix(0, nrow = P, ncol = nrow(X) * P)
+    for (node in seq_len(P)) {
+      columns <- (node - 1L) * nrow(X) + seq_len(nrow(X))
+      factor_weights[node, columns] <- node_weights[node, ]
+      factor_hcv_weights[node, columns] <- hcv_remainder_weights[node, ]
+    }
+    envelope <- stan_residual_envelope(factor_weights)
+    node_weights <- factor_weights
+    hcv_remainder_weights <- factor_hcv_weights
+  } else {
+    envelope <- stan_residual_envelope(weights)
+  }
   envelope$type <- "omrf"
-  envelope$bound_type <- "stacked_person_spectral"
+  envelope$bound_type <- if (backend == "analytic" && !use_hcv &&
+                             geometry == "pattern_local") {
+    "pattern_local_range"
+  } else if (backend == "analytic" && !use_hcv &&
+             geometry == "covariate_local") {
+    "covariate_local_expansion"
+  } else if (backend == "analytic" && !use_hcv) {
+    "node_local_norm_low_rank"
+  } else {
+    "stacked_person_spectral"
+  }
   envelope$X <- X
   envelope$seen <- seen
   envelope$thresholds <- thresholds
   envelope$interactions <- interactions
+  envelope$backend <- backend
+  envelope$factorization <- factorization
+  envelope$factor_sampling <- factor_sampling
+  envelope$prior_backend <- prior_backend
+  envelope$n_persons <- nrow(X)
+  envelope$n_nodes <- P
   envelope$edge_order <- edges
+  envelope$node_weights <- unname(node_weights)
+  envelope$norm_weights <- unname(norm_weights)
+  envelope$covariate_weights <- unname(covariate_weights)
+  envelope$structural_groups <- unname(structural_groups)
+  envelope$n_structural_components <- n_components
+  envelope$component_nodes <- component_nodes
+  envelope$component_covariates <- unname(component_covariates)
+  envelope$use_hcv <- isTRUE(use_hcv)
+  envelope$hcv_after_warmup <- isTRUE(use_hcv) &&
+    identical(hcv_warmup, "first_order")
+  envelope$hcv_damping <- as.numeric(hcv_damping)
+  envelope$hcv_remainder_weights <- unname(hcv_remainder_weights)
   class(envelope) <- c("omrf_residual_envelope", "stan_residual_envelope")
   envelope
+}
+
+#' Native full-gradient backend for an independent-prior OMRF
+#'
+#' Constructs a native Julia backend for the complete, non-factorized OMRF
+#' negative gradient and Hessian-vector product. It is intended for full
+#' Adaptive Boomerang, Boomerang, BPS, and Zig-Zag samplers; it does not change
+#' the sampler into factorized dynamics. The Stan model is still used for
+#' unconstrained parameter metadata and output conversion.
+#'
+#' The model data passed to [pdmp_sample_from_stanmodel()] must contain the
+#' independent threshold-prior parameters and either `prior_cauchy_scale` or
+#' `prior_interaction_sd`. Threshold and interaction blocks must cover the
+#' complete unconstrained state.
+#'
+#' @inheritParams omrf_residual_envelope
+#' @return An OMRF full-gradient backend specification for the
+#'   `full_gradient` argument of [pdmp_sample_from_stanmodel()].
+#' @export
+omrf_full_gradient <- function(X, seen, thresholds, interactions) {
+  spec <- omrf_residual_envelope(
+    X, seen, thresholds, interactions,
+    backend = "analytic", use_hcv = FALSE,
+    factorization = "person", factor_sampling = "size_biased",
+    prior_backend = "analytic")
+  structure(list(spec = spec), class = "omrf_full_gradient")
 }
 
 .resolve_unconstrained_spec <- function(spec, unc_names, arg = "parameters") {
@@ -272,6 +541,8 @@ stan_parameter_mapping <- function(path_to_stanmodel, standata,
 #' @param flow Supported subsampling flow used for the rate diagnostic.
 #' @param flow_mean Optional flow mean.
 #' @param flow_cov Optional flow covariance.
+#' @param phase Diagnostic sampling phase. For staged HCV specifications,
+#'   `"main"` activates HCV and `"warmup"` uses the first-order fallback.
 #' @return A list of gradient-closure, residual-rate, envelope, and construction
 #'   diagnostics.
 #' @export
@@ -280,7 +551,8 @@ stan_subsampling_diagnostics <- function(path_to_stanmodel, standata,
                                     velocity = NULL,
                                     flow = c("ZigZag", "BouncyParticle",
                                              "AdaptiveBoomerang"),
-                                    flow_mean = NULL, flow_cov = NULL) {
+                                    flow_mean = NULL, flow_cov = NULL,
+                                    phase = c("main", "warmup")) {
   validate_type(path_to_stanmodel, type = "character", n = 1)
   if (!inherits(subsampling, "stan_subsampling")) {
     cli::cli_abort("Argument {.arg subsampling} must be created by {.fn stan_subsampling}.")
@@ -300,6 +572,7 @@ stan_subsampling_diagnostics <- function(path_to_stanmodel, standata,
     cli::cli_abort("Argument {.arg velocity} must be finite and match {.arg position}.")
   }
   flow <- match.arg(flow)
+  phase <- match.arg(phase)
   if (is.null(flow_mean)) flow_mean <- rep(0, length(position))
   if (is.null(flow_cov)) flow_cov <- diag(length(position))
 
@@ -335,12 +608,13 @@ stan_subsampling_diagnostics <- function(path_to_stanmodel, standata,
   JuliaCall::julia_assign("_diagnostic_flow", flow)
   JuliaCall::julia_assign("_diagnostic_flow_mean", as.numeric(flow_mean))
   JuliaCall::julia_assign("_diagnostic_flow_cov", flow_cov)
+  JuliaCall::julia_assign("_diagnostic_phase", phase)
   result <- .pdmpsamplers_julia_eval(
     "PDMPSamplersRBridge.r_stan_subsampling_diagnostics(
       _diagnostic_model, _diagnostic_full_data, _diagnostic_prior_data,
       _diagnostic_subsampling, _diagnostic_position, _diagnostic_subset,
       _diagnostic_velocity, _diagnostic_flow, _diagnostic_flow_mean,
-      _diagnostic_flow_cov
+      _diagnostic_flow_cov, _diagnostic_phase
     );"
   )
   if (is.environment(result)) result <- as.list(result)

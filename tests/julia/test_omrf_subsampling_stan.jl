@@ -42,12 +42,117 @@ function finite_difference_person_neggrad(q, x)
     return result
 end
 
-function omrf_curvature_weights(X, seen; legacy_node_sum=false)
+function omrf_person_loglik_variable(q, x, seen)
+    P = length(seen)
+    no_thresholds = sum(seen .- 1)
+    threshold_starts = cumsum(vcat(1, seen[1:(end - 1)] .- 1))
+    edges = [(left, right) for left in 1:(P - 1) for right in (left + 1):P]
+    result = 0.0
+    for node in 1:P
+        field = 0.0
+        for (edge, (left, right)) in enumerate(edges)
+            if left == node
+                field += x[right] * q[no_thresholds + edge]
+            elseif right == node
+                field += x[left] * q[no_thresholds + edge]
+            end
+        end
+        start = threshold_starts[node]
+        x[node] > 0 && (result += q[start + x[node] - 1])
+        logits = [0.0; [q[start + u - 1] + u * field
+            for u in 1:(seen[node] - 1)]]
+        maximum_logit = maximum(logits)
+        result -= maximum_logit +
+            log(sum(exp(value - maximum_logit) for value in logits))
+    end
+    for (edge, (left, right)) in enumerate(edges)
+        result += 2q[no_thresholds + edge] * x[left] * x[right]
+    end
+    return result
+end
+
+function finite_difference_person_neggrad_variable(q, x, seen)
+    result = similar(q)
+    step = 1e-6
+    plus = copy(q)
+    minus = copy(q)
+    for j in eachindex(q)
+        plus[j] += step
+        minus[j] -= step
+        result[j] = -(omrf_person_loglik_variable(plus, x, seen) -
+            omrf_person_loglik_variable(minus, x, seen)) / (2step)
+        plus[j] = minus[j] = q[j]
+    end
+    return result
+end
+
+@testset "OMRF analytic residual supports variable category counts" begin
+    seen = [2, 3, 4]
+    X = [0 1 3; 1 2 0]
+    no_thresholds = sum(seen .- 1)
+    no_edges = 3
+    d = no_thresholds + no_edges + 2
+    names = vcat(
+        ["thresholds_0.$j" for j in 1:no_thresholds],
+        ["interactions_0.$j" for j in 1:no_edges],
+        ["global_scale", "node_scale.1"])
+    envelope_spec = Dict{String,Any}(
+        "X" => X,
+        "seen" => seen,
+        "thresholds" => "thresholds_0",
+        "interactions" => "interactions_0")
+    counts = PDMPSamplersRBridge.StanSubsamplingCallCounts()
+    anchor = collect(range(-0.22, 0.19; length=d))
+    position = collect(range(0.31, -0.27; length=d))
+    context = PDMPSamplersRBridge._omrf_residual_context(
+        envelope_spec, names, anchor, counts)
+    residual = zeros(d)
+    for person in axes(X, 1)
+        PDMPSamplersRBridge.omrf_residual!(
+            context, residual, position, [person])
+        expected = finite_difference_person_neggrad_variable(
+            position[1:(no_thresholds + no_edges)], view(X, person, :), seen) -
+            finite_difference_person_neggrad_variable(
+                anchor[1:(no_thresholds + no_edges)], view(X, person, :), seen)
+        @test residual[1:(no_thresholds + no_edges)] ≈ expected atol=2e-9
+        @test residual[(no_thresholds + no_edges + 1):end] == zeros(2)
+    end
+
+    person_sum = zeros(d)
+    PDMPSamplersRBridge.omrf_residual!(
+        context, person_sum, position, collect(axes(X, 1)))
+    factor_spec = copy(envelope_spec)
+    factor_spec["factorization"] = "person_node"
+    factor_context = PDMPSamplersRBridge._omrf_residual_context(
+        factor_spec, names, anchor,
+        PDMPSamplersRBridge.StanSubsamplingCallCounts())
+    factor_sum = zeros(d)
+    PDMPSamplersRBridge.omrf_residual!(factor_context, factor_sum, position,
+        collect(1:(size(X, 1) * size(X, 2))))
+    @test factor_sum ≈ person_sum atol=2e-14 rtol=2e-14
+    supports = PDMPSamplersRBridge._omrf_node_supports(factor_context)
+    factor_residual = zeros(d)
+    for factor in 1:(size(X, 1) * size(X, 2))
+        PDMPSamplersRBridge.omrf_residual!(
+            factor_context, factor_residual, position, [factor])
+        node = cld(factor, size(X, 1))
+        outside = setdiff(1:d, supports[node])
+        @test factor_residual[outside] == zeros(length(outside))
+    end
+    @test factor_context.counts.analytic_factors ==
+        2 * size(X, 1) * size(X, 2)
+    @test factor_context.counts.analytic_node_conditionals ==
+        2 * size(X, 1) * size(X, 2)
+end
+
+function omrf_curvature_weights(X, seen; legacy_node_sum=false,
+        node_local=false)
     N, P = size(X)
     threshold_starts = cumsum(vcat(0, seen[1:(end - 1)] .- 1))
     no_thresholds = sum(seen .- 1)
     edges = [(j, k) for j in 1:(P - 1) for k in (j + 1):P]
     weights = zeros(N)
+    node_weights = zeros(P, N)
     for n in 1:N
         person_design = zeros(no_thresholds, no_thresholds + length(edges))
         design_row = 1
@@ -65,6 +170,7 @@ function omrf_curvature_weights(X, seen; legacy_node_sum=false)
                     end
                 end
             end
+            node_weights[j, n] = 0.5 * opnorm(B)^2
             if legacy_node_sum
                 weights[n] += 0.5 * opnorm(B)^2
             else
@@ -74,7 +180,7 @@ function omrf_curvature_weights(X, seen; legacy_node_sum=false)
         end
         legacy_node_sum || (weights[n] = 0.5 * opnorm(person_design)^2)
     end
-    return weights
+    return node_local ? node_weights : weights
 end
 
 function multivariate_normal_logdensity(x, mean, covariance)
@@ -110,6 +216,489 @@ end
     PDMPSamplersRBridge._clear_gradient!(ctx, :prior, prior_gradient, q)
     @test full_gradient - prior_gradient ≈ direct_sum atol=2e-8
     @test ctx.counts.persons_evaluated == 3
+
+    anchor = collect(range(-0.12, 0.16; length=9))
+    position = collect(range(0.21, -0.17; length=9))
+    envelope_spec = Dict{String,Any}(
+        "type" => "omrf",
+        "backend" => "analytic",
+        "X" => [0 1 2; 2 0 1; 1 2 0],
+        "seen" => [3, 3, 3],
+        "thresholds" => "thresholds_0",
+        "interactions" => "interactions_0",
+        "weights" => reshape(omrf_curvature_weights(
+            [0 1 2; 2 0 1; 1 2 0], [3, 3, 3]), 1, :),
+        "node_weights" => omrf_curvature_weights(
+            [0 1 2; 2 0 1; 1 2 0], [3, 3, 3]; node_local=true),
+        "growth_rates" => [0.0])
+    analytic = PDMPSamplersRBridge.OMRFAnalyticSubsamplingOracle(
+        ctx, envelope_spec, names, anchor)
+    analytic_residual = zeros(9)
+    selected_position = zeros(9)
+    selected_anchor = zeros(9)
+    prior_position = zeros(9)
+    prior_anchor = zeros(9)
+    for subset in ([1], [2], [3])
+        analytic(analytic_residual, position, subset, anchor)
+        PDMPSamplersRBridge._stan_subset_gradient!(ctx,
+            selected_position, position, subset;
+            require_configured_size=false)
+        PDMPSamplersRBridge._stan_subset_gradient!(ctx,
+            selected_anchor, anchor, subset;
+            require_configured_size=false)
+        PDMPSamplersRBridge._clear_gradient!(ctx, :prior,
+            prior_position, position)
+        PDMPSamplersRBridge._clear_gradient!(ctx, :prior,
+            prior_anchor, anchor)
+        @test analytic_residual ≈
+            (selected_position - prior_position) -
+            (selected_anchor - prior_anchor) atol=3e-10 rtol=3e-10
+    end
+    analytic(analytic_residual, anchor, [1], anchor)
+    @test iszero(norm(analytic_residual))
+    @test ctx.counts.analytic_residual == 4
+    @test ctx.counts.analytic_persons == 4
+    allocation_subset = [2]
+    analytic(analytic_residual, position, allocation_subset, anchor)
+    @test @allocated(analytic(
+        analytic_residual, position, allocation_subset, anchor)) == 0
+
+    analytic_prior_spec = copy(envelope_spec)
+    analytic_prior_spec["analytic_prior"] = Dict{String,Any}(
+        "type" => "gaussian", "threshold_alpha" => 1.0,
+        "threshold_beta" => 1.0, "interaction_scale" => 1.0)
+    analytic_prior_ctx, analytic_prior_names =
+        PDMPSamplersRBridge._new_stan_subsampling_context(
+            lib, full, prior, 1)
+    analytic_prior_oracle =
+        PDMPSamplersRBridge.OMRFAnalyticSubsamplingOracle(
+            analytic_prior_ctx, analytic_prior_spec,
+            analytic_prior_names, anchor)
+    analytic_prior_gradient = copy(
+        PDMPSamplersRBridge._prior_gradient_at_x!(
+            analytic_prior_oracle, position))
+    stan_prior_gradient = zeros(9)
+    PDMPSamplersRBridge._clear_gradient!(
+        analytic_prior_ctx, :prior, stan_prior_gradient, position)
+    @test analytic_prior_gradient ≈ stan_prior_gradient atol=2e-12 rtol=2e-12
+    @test analytic_prior_oracle.analytic_prior !== nothing
+
+    full_native_model = PDMPSamplersRBridge.build_omrf_full_model(
+        analytic_prior_spec, analytic_prior_names, 9)
+    native_gradient = zeros(9)
+    compute_gradient!(full_native_model.grad, position, native_gradient)
+    stan_full_gradient = zeros(9)
+    PDMPSamplersRBridge._clear_gradient!(
+        analytic_prior_ctx, :full, stan_full_gradient, position)
+    @test native_gradient ≈ stan_full_gradient atol=3e-10 rtol=3e-10
+
+    direction = collect(range(-0.3, 0.4; length=9))
+    native_hvp = copy(full_native_model.hvp(position, direction))
+    step = 2e-6
+    gradient_plus = zeros(9)
+    gradient_minus = zeros(9)
+    compute_gradient!(full_native_model.grad,
+        position .+ step .* direction, gradient_plus)
+    compute_gradient!(full_native_model.grad,
+        position .- step .* direction, gradient_minus)
+    @test native_hvp ≈
+        (gradient_plus - gradient_minus) / (2step) atol=2e-9 rtol=2e-9
+    compute_gradient!(full_native_model.grad, position, native_gradient)
+    @test @allocated(compute_gradient!(
+        full_native_model.grad, position, native_gradient)) == 0
+    full_native_model.hvp(position, direction)
+    @test @allocated(full_native_model.hvp(position, direction)) == 0
+
+    cauchy_spec = copy(analytic_prior_spec)
+    cauchy_spec["analytic_prior"] = Dict{String,Any}(
+        "type" => "cauchy", "threshold_alpha" => 1.7,
+        "threshold_beta" => 2.3, "interaction_scale" => 0.45)
+    cauchy_model = PDMPSamplersRBridge.build_omrf_full_model(
+        cauchy_spec, analytic_prior_names, 9)
+    cauchy_hvp = copy(cauchy_model.hvp(position, direction))
+    compute_gradient!(cauchy_model.grad,
+        position .+ step .* direction, gradient_plus)
+    compute_gradient!(cauchy_model.grad,
+        position .- step .* direction, gradient_minus)
+    @test cauchy_hvp ≈
+        (gradient_plus - gradient_minus) / (2step) atol=2e-9 rtol=2e-9
+
+    unsupported_spec = copy(analytic_prior_spec)
+    unsupported_names = [analytic_prior_names; "nuisance"]
+    @test_throws ArgumentError PDMPSamplersRBridge.build_omrf_full_model(
+        unsupported_spec, unsupported_names, 10)
+
+    model_ctx, model_names = PDMPSamplersRBridge._new_stan_subsampling_context(
+        lib, full, prior, 1)
+    subsampling = Dict{String,Any}(
+        "n_observations" => 3,
+        "subsample_size" => 1,
+        "residual_envelope" => envelope_spec)
+    model, _, _ = PDMPSamplersRBridge._build_stan_subsampling_model(
+        model_ctx, model_names, subsampling, anchor, nothing, falses(9))
+    @test model.grad.residual_oracle isa
+        PDMPSamplersRBridge.OMRFAnalyticSubsamplingOracle
+    @test model.grad.envelope.component_scales! isa
+        PDMPSamplersRBridge.OMRFNodeLocalScales
+    @test size(model.grad.envelope.weights) == (3, 3)
+    @test model_ctx.counts.selected_gradient == 0
+    @test model_ctx.counts.anchor_cache_gradient == 0
+
+    factor_spec = copy(envelope_spec)
+    factor_spec["factorization"] = "person_node"
+    factor_weights = zeros(3, 9)
+    for person in 1:3, node in 1:3
+        factor_weights[node, (node - 1) * 3 + person] =
+            envelope_spec["node_weights"][node, person]
+    end
+    factor_spec["weights"] = factor_weights
+    factor_spec["node_weights"] = factor_weights
+    factor_subsampling = Dict{String,Any}(
+        "n_observations" => 9,
+        "subsample_size" => 3,
+        "residual_envelope" => factor_spec)
+    factor_ctx, factor_names =
+        PDMPSamplersRBridge._new_stan_subsampling_context(
+            lib, full, prior, 3)
+    factor_model, _, _ = PDMPSamplersRBridge._build_stan_subsampling_model(
+        factor_ctx, factor_names, factor_subsampling, anchor, nothing, falses(9))
+    @test factor_model.grad.residual_oracle.residual_context.factorization ===
+        :person_node
+    @test size(factor_model.grad.envelope.weights) == (3, 9)
+    factor_deterministic = zeros(9)
+    factor_residual_sum = zeros(9)
+    factor_residual = zeros(9)
+    factor_model.grad.residual_oracle(factor_deterministic, position)
+    for factor in 1:9
+        factor_model.grad.residual_oracle(
+            factor_residual, position, [factor], anchor)
+        factor_residual_sum .+= factor_residual
+    end
+    exact_factor_full = zeros(9)
+    PDMPSamplersRBridge._clear_gradient!(
+        factor_ctx, :full, exact_factor_full, position)
+    @test factor_deterministic + factor_residual_sum ≈
+        exact_factor_full atol=3e-10 rtol=3e-10
+    factor_model.grad.residual_oracle(
+        factor_residual, position, [1], anchor)
+    sparse_gradient = copy(factor_deterministic)
+    expected_sparse_gradient = factor_deterministic + 9 .* factor_residual
+    sparse_state = PDMPState(0.0,
+        SkeletonPoint(copy(position), fill(1.0, 9)))
+    deterministic_rate = PDMPSamplers.λ(
+        sparse_state, factor_deterministic, ZigZag(9))
+    sparse_rate = PDMPSamplers.subsampling_candidate_rate!(
+        factor_model.grad.residual_oracle, sparse_state, sparse_gradient,
+        factor_residual, 9.0, ZigZag(9), deterministic_rate, [1])
+    @test sparse_gradient ≈ expected_sparse_gradient atol=2e-14 rtol=2e-14
+    @test sparse_rate ≈ PDMPSamplers.λ(
+        sparse_state, expected_sparse_gradient, ZigZag(9)) atol=2e-14 rtol=2e-14
+
+    hcv_spec = copy(envelope_spec)
+    hcv_spec["use_hcv"] = true
+    hcv_spec["hcv_damping"] = 9.0
+    hcv_spec["hcv_remainder_weights"] =
+        0.75 .* (2 .* hcv_spec["node_weights"]) .^ 1.5
+    hcv_ctx, hcv_names = PDMPSamplersRBridge._new_stan_subsampling_context(
+        lib, full, prior, 1)
+    hcv_oracle = PDMPSamplersRBridge.OMRFAnalyticSubsamplingOracle(
+        hcv_ctx, hcv_spec, hcv_names, anchor)
+    hcv_envelope = PDMPSamplersRBridge._build_stan_residual_envelope(
+        hcv_spec, anchor, hcv_oracle)
+    @test hcv_envelope.component_scales! isa
+        PDMPSamplersRBridge.OMRFDampedHCVNodeLocalScales
+    @test size(hcv_envelope.weights) == (6, 3)
+    @test hcv_oracle.residual_context.likelihood_hessian !== nothing
+    hcv_deterministic = zeros(9)
+    hcv_residual_sum = zeros(9)
+    hcv_residual = zeros(9)
+    hcv_oracle(hcv_deterministic, position)
+    for person in 1:3
+        hcv_oracle(hcv_residual, position, [person], anchor)
+        hcv_residual_sum .+= hcv_residual
+    end
+    exact_full = zeros(9)
+    PDMPSamplersRBridge._clear_gradient!(hcv_ctx, :full, exact_full, position)
+    @test hcv_deterministic + hcv_residual_sum ≈ exact_full atol=3e-10 rtol=3e-10
+    hcv_oracle(hcv_residual, anchor, [1], anchor)
+    @test iszero(norm(hcv_residual))
+
+    staged_spec = copy(hcv_spec)
+    staged_spec["hcv_after_warmup"] = true
+    staged_subsampling = Dict{String,Any}(
+        "n_observations" => 3,
+        "subsample_size" => 1,
+        "residual_envelope" => staged_spec)
+    staged_ctx, staged_names =
+        PDMPSamplersRBridge._new_stan_subsampling_context(
+            lib, full, prior, 1)
+    staged_model, _, _, staged_adapter, staged_manager =
+        PDMPSamplersRBridge._build_stan_subsampling_model(
+            staged_ctx, staged_names, staged_subsampling, anchor, nothing,
+            falses(9); anchor_capacity=2)
+    @test !staged_model.grad.residual_oracle.residual_context.hcv_active
+    staged_anchor = position .+ 0.001
+    staged_prepared = PDMPSamplersRBridge._prepare_omrf_anchor(
+        staged_manager, staged_anchor)
+    PDMPSamplersRBridge._insert_omrf_anchor!(
+        staged_manager, staged_prepared)
+    staged_scales = zeros(6)
+    staged_state = PDMPState(0.0,
+        SkeletonPoint(copy(position), fill(1.0, 9)))
+    staged_model.grad.envelope.component_scales!(
+        staged_scales, staged_state, BouncyParticle(9, 0.0), 0.0)
+    @test all(iszero, staged_scales[4:6])
+    staged_deterministic = zeros(9)
+    staged_residual_sum = zeros(9)
+    staged_residual = zeros(9)
+    staged_model.grad.residual_oracle(staged_deterministic, position)
+    for person in 1:3
+        staged_model.grad.residual_oracle(
+            staged_residual, position, [person], anchor)
+        staged_residual_sum .+= staged_residual
+    end
+    @test staged_deterministic + staged_residual_sum ≈
+        exact_full atol=3e-10 rtol=3e-10
+    @test PDMPSamplers.finish_warmup!(staged_adapter, staged_state,
+        BouncyParticle(9, 0.0), staged_model.grad, nothing, nothing)
+    @test staged_model.grad.residual_oracle.residual_context.hcv_active
+    @test staged_manager.hcv_active
+    @test staged_model.grad.residual_oracle.anchor == staged_anchor
+    staged_model.grad.envelope.component_scales!(
+        staged_scales, staged_state, BouncyParticle(9, 0.0), 0.0)
+    @test any(!iszero, staged_scales[4:6])
+    fill!(staged_residual_sum, 0.0)
+    staged_model.grad.residual_oracle(staged_deterministic, position)
+    for person in 1:3
+        staged_model.grad.residual_oracle(
+            staged_residual, position, [person], anchor)
+        staged_residual_sum .+= staged_residual
+    end
+    @test staged_deterministic + staged_residual_sum ≈
+        exact_full atol=3e-10 rtol=3e-10
+
+    bank_ctx, bank_names = PDMPSamplersRBridge._new_stan_subsampling_context(
+        lib, full, prior, 1)
+    managed_model, _, _, _, manager =
+        PDMPSamplersRBridge._build_stan_subsampling_model(
+            bank_ctx, bank_names, subsampling, anchor, nothing, falses(9);
+            anchor_capacity=2)
+    new_anchor = anchor .+ collect(range(-0.04, 0.05; length=9))
+    prepared_anchor = PDMPSamplersRBridge._prepare_omrf_anchor(
+        manager, new_anchor)
+    new_idx = PDMPSamplersRBridge._insert_omrf_anchor!(
+        manager, prepared_anchor)
+    manager.active_idx = new_idx
+    full_calls_before_activation = bank_ctx.counts.full_gradient
+    prior_calls_before_activation = bank_ctx.counts.prior_gradient
+    PDMPSamplers.refresh_anchor!(managed_model.grad, new_anchor)
+    @test manager.oracle.anchor == new_anchor
+    @test manager.activations == 1
+    @test manager.preparations == 1
+    @test manager.preparation_seconds > 0
+    @test length(manager.entries) == 2
+    @test bank_ctx.counts.full_gradient == full_calls_before_activation
+    @test bank_ctx.counts.prior_gradient == prior_calls_before_activation
+    @test managed_model.grad.envelope.component_scales!.anchor ===
+        manager.oracle.anchor
+    manager.oracle(analytic_residual, new_anchor, [1], new_anchor)
+    @test iszero(norm(analytic_residual))
+    refresh_position = new_anchor .+ 0.1
+    manager.main_refresh_distance = 0.01
+    preparations_before_main = manager.preparations
+    PDMPSamplersRBridge._select_omrf_anchor!(
+        manager, managed_model.grad, refresh_position; phase=:main)
+    @test manager.preparations == preparations_before_main + 1
+    @test manager.main_refreshes == 1
+    @test manager.main_activations == 1
+    @test manager.oracle.anchor == refresh_position
+    @test managed_model.grad.anchor == refresh_position
+
+    node_weights = envelope_spec["node_weights"]
+    pattern_spec = copy(envelope_spec)
+    pattern_spec["bound_type"] = "pattern_local_range"
+    pattern_spec["structural_groups"] =
+        permutedims(reshape(collect(1:9), 3, 3))
+    pattern_spec["n_structural_components"] = 9
+    pattern_spec["component_nodes"] = repeat(collect(1:3); inner=3)
+    pattern_spec["component_covariates"] = repeat(
+        [0 1 2; 2 0 1; 1 2 0], 3, 1)
+    pattern_envelope = PDMPSamplersRBridge._build_omrf_residual_envelope(
+        pattern_spec, anchor, analytic.residual_context)
+    @test pattern_envelope isa PDMPSamplers.GroupedResidualEnvelope
+    covariate_spec = copy(envelope_spec)
+    covariate_spec["bound_type"] = "covariate_local_expansion"
+    covariate_weights = zeros(27, 3)
+    destination = 1
+    for node in 1:3
+        neighbours = analytic.residual_context.incident_neighbours[node]
+        for person in 1:3
+            covariate_weights[destination, person] = 1.0
+            for block in 0:1, k in eachindex(neighbours)
+                covariate_weights[destination + block * length(neighbours) + k,
+                    person] = analytic.residual_context.X[
+                        person, neighbours[k]]
+            end
+            cross_start = destination + 2length(neighbours) + 1
+            for k in eachindex(neighbours), l in eachindex(neighbours)
+                covariate_weights[cross_start +
+                    (k - 1) * length(neighbours) + l - 1, person] =
+                    analytic.residual_context.X[person, neighbours[k]] *
+                    analytic.residual_context.X[person, neighbours[l]]
+            end
+        end
+        destination += (length(neighbours) + 1)^2
+    end
+    covariate_spec["covariate_weights"] = covariate_weights
+    covariate_envelope = PDMPSamplersRBridge._build_omrf_residual_envelope(
+        covariate_spec, anchor, analytic.residual_context)
+    @test covariate_envelope.component_scales! isa
+        PDMPSamplersRBridge.OMRFCovariateLocalScales
+    covariate_subsampling = Dict{String,Any}(
+        "n_observations" => 3,
+        "subsample_size" => 1,
+        "residual_envelope" => covariate_spec)
+    covariate_bank_ctx, covariate_bank_names =
+        PDMPSamplersRBridge._new_stan_subsampling_context(
+            lib, full, prior, 1)
+    covariate_model, _, _, _, covariate_manager =
+        PDMPSamplersRBridge._build_stan_subsampling_model(
+            covariate_bank_ctx, covariate_bank_names,
+            covariate_subsampling, anchor, nothing, falses(9);
+            anchor_capacity=2)
+    covariate_prepared = PDMPSamplersRBridge._prepare_omrf_anchor(
+        covariate_manager, anchor .+ 0.01)
+    @test covariate_prepared.envelope.weights ===
+        covariate_model.grad.envelope.weights
+    @test length(covariate_prepared.envelope.component_scales!.
+        coordinate_offsets) == length(anchor)
+    covariate_hcv_spec = copy(covariate_spec)
+    covariate_hcv_spec["use_hcv"] = true
+    covariate_hcv_spec["hcv_damping"] = 9.0
+    covariate_hcv_spec["hcv_remainder_weights"] =
+        0.75 .* (2 .* covariate_hcv_spec["node_weights"]) .^ 1.5
+    covariate_hcv_subsampling = copy(covariate_subsampling)
+    covariate_hcv_subsampling["residual_envelope"] = covariate_hcv_spec
+    covariate_hcv_ctx, covariate_hcv_names =
+        PDMPSamplersRBridge._new_stan_subsampling_context(
+            lib, full, prior, 1)
+    _, _, _, _, covariate_hcv_manager =
+        PDMPSamplersRBridge._build_stan_subsampling_model(
+            covariate_hcv_ctx, covariate_hcv_names,
+            covariate_hcv_subsampling, anchor, nothing, falses(9);
+            anchor_capacity=2)
+    covariate_hcv_prepared =
+        PDMPSamplersRBridge._prepare_omrf_anchor(
+            covariate_hcv_manager, anchor .+ 0.01)
+    @test covariate_hcv_prepared.envelope.component_scales! isa
+        PDMPSamplersRBridge.OMRFDampedHCVNodeLocalScales
+    velocity = collect(range(-0.75, 0.85; length=9))
+    for flow in (ZigZag(9), BouncyParticle(9, 0.2), Boomerang(9))
+        state = PDMPState(0.0,
+            SkeletonPoint(copy(position), copy(velocity)))
+        PDMPSamplers.initialize_flow_state!(state, flow)
+        cell_scales = similar(model.grad.envelope.cell_scales)
+        PDMPSamplers.component_cell_scales!(cell_scales,
+            model.grad.envelope, state, flow, 0.05, 0.35)
+        pattern_cell_scales = similar(pattern_envelope.cell_scales)
+        PDMPSamplers.component_cell_scales!(pattern_cell_scales,
+            pattern_envelope, state, flow, 0.05, 0.35)
+        covariate_cell_scales = similar(covariate_envelope.cell_scales)
+        PDMPSamplers.component_cell_scales!(covariate_cell_scales,
+            covariate_envelope, state, flow, 0.05, 0.35)
+        for person in 1:3, t in range(0.05, 0.35; length=9)
+            candidate = move_forward_time(state, t, flow)
+            residual_at_t = finite_difference_person_neggrad(
+                candidate.ξ.x, X[person]) -
+                finite_difference_person_neggrad(anchor, X[person])
+            actual = PDMPSamplers.λ(candidate, residual_at_t, flow) +
+                PDMPSamplers.λ(candidate, -residual_at_t, flow)
+            bound = dot(cell_scales, @view node_weights[:, person])
+            @test actual <= bound * (1 + 2e-7) + 2e-8
+            pattern_bound = sum(partition -> pattern_cell_scales[
+                    pattern_envelope.groups[partition, person]],
+                axes(pattern_envelope.groups, 1))
+            @test actual <= pattern_bound * (1 + 2e-7) + 2e-8
+            covariate_bound = dot(covariate_cell_scales,
+                @view covariate_weights[:, person])
+            @test actual <= covariate_bound * (1 + 2e-7) + 2e-8
+
+            factor_node = mod1(person + 1, 3)
+            factor = (factor_node - 1) * 3 + person
+            factor_model.grad.residual_oracle(
+                factor_residual, candidate.ξ.x, [factor], anchor)
+            factor_bound = dot(cell_scales,
+                @view factor_model.grad.envelope.weights[:, factor])
+            factor_actual = PDMPSamplers.λ(candidate, factor_residual, flow) +
+                PDMPSamplers.λ(candidate, -factor_residual, flow)
+            @test factor_actual <= factor_bound * (1 + 2e-7) + 2e-8
+
+            hcv_oracle(hcv_residual, candidate.ξ.x, [person], anchor)
+            hcv_cell_scales = similar(hcv_envelope.cell_scales)
+            PDMPSamplers.component_cell_scales!(hcv_cell_scales,
+                hcv_envelope, state, flow, 0.05, 0.35)
+            hcv_actual = PDMPSamplers.λ(candidate, hcv_residual, flow) +
+                PDMPSamplers.λ(candidate, -hcv_residual, flow)
+            hcv_bound = dot(hcv_cell_scales,
+                @view hcv_envelope.weights[:, person])
+            @test hcv_actual <= hcv_bound * (1 + 2e-7) + 2e-8
+        end
+        PDMPSamplers.component_cell_scales!(pattern_cell_scales,
+            pattern_envelope, state, flow, 0.05, 0.35)
+        @test @allocated(PDMPSamplers.component_cell_scales!(
+            pattern_cell_scales, pattern_envelope, state, flow,
+            0.05, 0.35)) == 0
+        covariate_workspace = covariate_envelope.component_scales!
+        workspace_ids = objectid.((covariate_workspace.coordinate_offsets,
+            covariate_workspace.coordinate_cosines,
+            covariate_workspace.coordinate_sines))
+        PDMPSamplers.component_scales!(covariate_envelope.scales,
+            covariate_envelope, state, flow, 0.2)
+        PDMPSamplers.component_cell_scales!(covariate_cell_scales,
+            covariate_envelope, state, flow, 0.05, 0.35)
+        @test objectid.((covariate_workspace.coordinate_offsets,
+            covariate_workspace.coordinate_cosines,
+            covariate_workspace.coordinate_sines)) == workspace_ids
+        @test @allocated(PDMPSamplers.component_scales!(
+            covariate_envelope.scales, covariate_envelope,
+            state, flow, 0.2)) == 0
+        @test @allocated(PDMPSamplers.component_cell_scales!(
+            covariate_cell_scales, covariate_envelope, state, flow,
+            0.05, 0.35)) == 0
+        if flow isa Union{BouncyParticle,PDMPSamplers.AnyBoomerang}
+            candidate = move_forward_time(state, 0.2, flow)
+            PDMPSamplers.component_scales!(model.grad.envelope.scales,
+                model.grad.envelope, candidate, flow, 0.0)
+            PDMPSamplers.component_scales!(pattern_envelope.scales,
+                pattern_envelope, candidate, flow, 0.0)
+            for person in 1:3
+                norm_bound = PDMPSamplers.observation_residual_bound(
+                    model.grad.envelope, person)
+                pattern_bound =
+                    PDMPSamplersRBridge._omrf_person_pattern_bound_at(
+                        analytic.residual_context, anchor, candidate, flow,
+                        person, 0.0)
+                @test pattern_bound ≈
+                    PDMPSamplers.observation_residual_bound(
+                        pattern_envelope, person) atol=2e-14 rtol=2e-14
+                @test pattern_bound <= norm_bound * (1 + 2e-14) + 2e-14
+                wrapped = PDMPSamplers.WithResidualStats(analytic, nothing)
+                tightened = PDMPSamplers.subsampling_residual_subset_bound(
+                    wrapped, candidate, flow, 0.0, norm_bound,
+                    [person], 1.0)
+                @test tightened ≈ pattern_bound atol=2e-14 rtol=2e-14
+            end
+            one_person = [1]
+            wrapped = PDMPSamplers.WithResidualStats(analytic, nothing)
+            norm_bound = PDMPSamplers.observation_residual_bound(
+                model.grad.envelope, 1)
+            PDMPSamplers.subsampling_residual_subset_bound(wrapped, candidate,
+                flow, 0.0, norm_bound, one_person, 1.0)
+            @test PDMPSamplers.subsampling_residual_subset_bound(
+                wrapped, candidate, flow, 0.0, norm_bound,
+                one_person, 1.0) <= norm_bound
+        end
+    end
 end
 
 @testset "OMRF envelope domination for initially supported flows" begin

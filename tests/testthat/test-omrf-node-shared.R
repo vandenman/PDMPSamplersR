@@ -55,11 +55,19 @@ test_that("node-shared OMRF gradient closure retains scale-state priors", {
   mean_subsampling <- Reduce(`+`, lapply(diagnostics, `[[`, "subsampled_gradient")) /
     length(diagnostics)
   expect_equal(mean_subsampling, diagnostics[[1L]]$full_gradient, tolerance = 2e-9)
+  expect_equal(
+    diagnostics[[1L]]$residual_gradient,
+    diagnostics[[1L]]$selected_likelihood_gradient -
+      diagnostics[[1L]]$selected_anchor_likelihood_gradient,
+    tolerance = 2e-10)
   scale_indices <- 7:10
   expect_gt(max(abs(diagnostics[[1L]]$prior_gradient[scale_indices])), 0.05)
   expect_equal(
     diagnostics[[1L]]$selected_likelihood_gradient[scale_indices],
     rep(0, length(scale_indices)), tolerance = 1e-10)
+  expect_equal(
+    diagnostics[[1L]]$residual_gradient[scale_indices],
+    rep(0, length(scale_indices)), tolerance = 1e-12)
   expect_identical(fixture$slab$logscale_design$storage, "sparse_rows")
   expect_equal(length(fixture$slab$logscale_design$x), 9L)
 })
@@ -106,10 +114,12 @@ test_that("public node-shared OMRF samples full and subsampling with ZigZag and 
     if (is.environment(counters)) counters <- as.list(counters)
     expect_equal(
       counters$persons_evaluated,
-      subsampling$subsample_size * counters$selected_gradient_calls)
+      subsampling$subsample_size * counters$analytic_residual_calls)
     expect_equal(
-      counters$selected_gradient_calls,
+      counters$analytic_residual_calls,
       subsampling_fit$stats$residual_oracle_calls[[1L]])
+    expect_equal(counters$selected_gradient_calls, 0L)
+    expect_equal(counters$anchor_cache_gradient_calls, 0L)
     expect_lte(
       subsampling_fit$stats$subsampling_final_reflections[[1L]],
       subsampling_fit$stats$subsampling_subset_evaluations[[1L]])

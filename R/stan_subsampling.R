@@ -317,27 +317,28 @@ omrf_residual_envelope <- function(X, seen, thresholds, interactions,
     norm_weights[P + seq_len(P), ] <- neighbour_norms
     norm_weights[2L * P + seq_len(P), ] <- neighbour_norms^2
   }
-  if (geometry == "covariate_local" && factorization != "person") {
-    cli::cli_abort("Covariate-local geometry currently requires person factorization.")
-  }
-  covariate_weights <- matrix(numeric(), nrow = 0L, ncol = nrow(X))
-  if (factorization == "person") {
-    for (node in seq_len(P)) {
-      neighbours <- incidence[[node]]$neighbours
-      node_covariates <- X[, neighbours, drop = FALSE]
-      node_rows <- matrix(1, nrow = 1L, ncol = nrow(X))
-      if (length(neighbours)) {
-        node_rows <- rbind(node_rows, t(node_covariates), t(node_covariates))
-        for (left_edge in seq_along(neighbours)) {
-          for (right_edge in seq_along(neighbours)) {
-            node_rows <- rbind(node_rows,
-              node_covariates[, left_edge] * node_covariates[, right_edge])
-          }
+  covariate_blocks <- vector("list", P)
+  for (node in seq_len(P)) {
+    neighbours <- incidence[[node]]$neighbours
+    node_covariates <- X[, neighbours, drop = FALSE]
+    node_rows <- matrix(1, nrow = 1L, ncol = nrow(X))
+    if (length(neighbours)) {
+      node_rows <- rbind(node_rows, t(node_covariates), t(node_covariates))
+      for (left_edge in seq_along(neighbours)) {
+        for (right_edge in seq_along(neighbours)) {
+          node_rows <- rbind(node_rows,
+            node_covariates[, left_edge] * node_covariates[, right_edge])
         }
       }
-      covariate_weights <- rbind(covariate_weights, node_rows)
     }
+    covariate_blocks[[node]] <- node_rows
   }
+  # Person-node factors form a block-diagonal conceptual matrix. Store only
+  # its N local columns; Julia combines these weights with the row-to-node map
+  # below, avoiding P-fold structural-zero storage and alias tables.
+  covariate_weights <- do.call(rbind, covariate_blocks)
+  covariate_component_blocks <- rep.int(
+    seq_len(P), vapply(covariate_blocks, nrow, integer(1L)))
   # The structural envelope groups factors that have the same node-local
   # neighbour configuration.  Its Julia scale callback uses the exact range
   # of the displaced categorical logits, rather than collapsing the design to
@@ -422,6 +423,7 @@ omrf_residual_envelope <- function(X, seen, thresholds, interactions,
   envelope$node_weights <- unname(node_weights)
   envelope$norm_weights <- unname(norm_weights)
   envelope$covariate_weights <- unname(covariate_weights)
+  envelope$covariate_component_blocks <- covariate_component_blocks
   envelope$structural_groups <- unname(structural_groups)
   envelope$n_structural_components <- n_components
   envelope$component_nodes <- component_nodes

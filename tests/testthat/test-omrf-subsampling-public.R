@@ -103,10 +103,21 @@ test_that("public OMRF diagnostics verify explicit persons and single N/m scalin
   covariate_envelope <- omrf_residual_envelope(
     X, full$seen, "thresholds_0", "interactions_0",
     geometry = "covariate_local")
+  factor_covariate_envelope <- omrf_residual_envelope(
+    X, full$seen, "thresholds_0", "interactions_0",
+    factorization = "person_node", geometry = "covariate_local")
   expect_identical(pattern_envelope$bound_type, "pattern_local_range")
   expect_identical(
     covariate_envelope$bound_type, "covariate_local_expansion")
   expect_equal(ncol(covariate_envelope$covariate_weights), nrow(X))
+  expect_identical(
+    factor_covariate_envelope$bound_type, "covariate_local_expansion")
+  expect_equal(dim(factor_covariate_envelope$covariate_weights), c(27L, 3L))
+  expect_equal(factor_covariate_envelope$covariate_weights,
+               covariate_envelope$covariate_weights)
+  expect_identical(
+    factor_covariate_envelope$covariate_component_blocks,
+    rep.int(seq_len(3L), rep.int(9L, 3L)))
   expect_true(all(drop(envelope$weights) <= legacy_weights * (1 + 1e-12)))
   expect_true(any(drop(envelope$weights) < legacy_weights * (1 - 1e-8)))
   anchor <- rep(0, 9L)

@@ -1153,6 +1153,70 @@ function (scales::OMRFCovariateLocalScales)(out, state,
     return out
 end
 
+function PDMPSamplers.screening_residual_bound(
+        envelope::PDMPSamplers.BlockSeparableResidualEnvelope{F}, state,
+        flow::Union{ZigZag,BouncyParticle}, t) where
+        {F<:OMRFCovariateLocalScales}
+    scales = envelope.component_scales!
+    context = scales.context
+    _cache_omrf_pattern_point_coordinates!(scales, state, flow, t)
+    totals = envelope.totals
+    destination = 1
+    result = 0.0
+    @inbounds for node in eachindex(context.seen)
+        q = context.seen[node] - 1
+        minimum_displacement = 0.0
+        maximum_displacement = 0.0
+        minimum_velocity = 0.0
+        maximum_velocity = 0.0
+        threshold_start = context.threshold_starts[node]
+        for u in 1:q
+            index = context.threshold_indices[threshold_start + u - 1]
+            displacement = scales.coordinate_offsets[index]
+            velocity = scales.coordinate_cosines[index]
+            minimum_displacement = min(minimum_displacement, displacement)
+            maximum_displacement = max(maximum_displacement, displacement)
+            minimum_velocity = min(minimum_velocity, velocity)
+            maximum_velocity = max(maximum_velocity, velocity)
+        end
+        A = maximum_displacement - minimum_displacement
+        C = maximum_velocity - minimum_velocity
+        result += 0.25 * A * C * totals[destination]
+        destination += 1
+        edges = context.incident_edges[node]
+        degree = length(edges)
+        edge_displacements = scales.edge_displacements
+        edge_velocities = scales.edge_velocities
+        for k in 1:degree
+            index = context.interaction_indices[edges[k]]
+            edge_displacements[k] = abs(scales.coordinate_offsets[index])
+            edge_velocities[k] = abs(scales.coordinate_cosines[index])
+            result += 0.25 * q * C * edge_displacements[k] *
+                totals[destination]
+            destination += 1
+        end
+        for k in 1:degree
+            result += 0.25 * q * A * edge_velocities[k] *
+                totals[destination]
+            destination += 1
+        end
+        for k in 1:degree, l in 1:degree
+            result += 0.25 * q^2 * edge_displacements[k] *
+                edge_velocities[l] * totals[destination]
+            destination += 1
+        end
+    end
+    return nextfloat(result)
+end
+
+function PDMPSamplers.prepare_residual_sampling!(
+        envelope::PDMPSamplers.BlockSeparableResidualEnvelope{F}, state,
+        flow::Union{ZigZag,BouncyParticle}, t) where
+        {F<:OMRFCovariateLocalScales}
+    PDMPSamplers.total_residual_bound(envelope, state, flow, t)
+    return nothing
+end
+
 function (scales::OMRFCovariateLocalScales)(out, state,
         flow::PDMPSamplers.AnyBoomerang, left, right)
     context = scales.context
@@ -1398,10 +1462,76 @@ end
     return bound
 end
 
+@inline function _omrf_person_node_pattern_bound_at(
+        context::OMRFResidualContext, anchor, state, flow,
+        person::Int, node::Int, t)
+    q = context.seen[node] - 1
+    iszero(q) && return 0.0
+    field_displacement = 0.0
+    field_velocity = 0.0
+    weighted_edge_velocity = 0.0
+    @inbounds for k in eachindex(context.incident_edges[node])
+        covariate = context.X[
+            person, context.incident_neighbours[node][k]]
+        iszero(covariate) && continue
+        edge_index = context.interaction_indices[
+            context.incident_edges[node][k]]
+        displacement, velocity = _omrf_coordinate_at(
+            state, flow, anchor, edge_index, t)
+        field_displacement += covariate * displacement
+        field_velocity += covariate * velocity
+        weighted_edge_velocity += covariate * abs(velocity)
+    end
+    minimum_logit = 0.0
+    maximum_logit = 0.0
+    minimum_logit_velocity = 0.0
+    maximum_logit_velocity = 0.0
+    threshold_velocity = 0.0
+    threshold_start = context.threshold_starts[node]
+    @inbounds for u in 1:q
+        index = context.threshold_indices[threshold_start + u - 1]
+        displacement, velocity = _omrf_coordinate_at(
+            state, flow, anchor, index, t)
+        logit = displacement + u * field_displacement
+        minimum_logit = min(minimum_logit, logit)
+        maximum_logit = max(maximum_logit, logit)
+        logit_velocity = velocity + u * field_velocity
+        minimum_logit_velocity = min(
+            minimum_logit_velocity, logit_velocity)
+        maximum_logit_velocity = max(
+            maximum_logit_velocity, logit_velocity)
+        threshold_velocity += abs(velocity)
+    end
+    zigzag_dynamics = flow isa ZigZag ||
+        (flow isa PDMPSamplers.PreconditionedDynamics &&
+         flow.dynamics isa ZigZag)
+    velocity_range = zigzag_dynamics ?
+        threshold_velocity + q * weighted_edge_velocity :
+        maximum_logit_velocity - minimum_logit_velocity
+    return 0.25 * (maximum_logit - minimum_logit) *
+        velocity_range
+end
+
 function PDMPSamplers.subsampling_residual_subset_bound(
         oracle::OMRFAnalyticSubsamplingOracle, state, flow,
         D, M, subset, scale)
     context = oracle.residual_context
+    factor_pattern_dynamics = flow isa Union{ZigZag,BouncyParticle} ||
+        (flow isa PDMPSamplers.PreconditionedDynamics &&
+         flow.dynamics isa Union{ZigZag,BouncyParticle})
+    if factor_pattern_dynamics && context.factorization === :person_node &&
+            !context.use_hcv
+        N = size(context.X, 1)
+        pattern_bound = 0.0
+        @inbounds for factor in subset
+            node0, person0 = divrem(factor - 1, N)
+            pattern_bound += _omrf_person_node_pattern_bound_at(
+                context, oracle.anchor, state, flow,
+                person0 + 1, node0 + 1, 0.0)
+        end
+        residual_bound = min(max(0.0, M - D), scale * pattern_bound)
+        return D + residual_bound
+    end
     scalar_dynamics = flow isa Union{BouncyParticle,PDMPSamplers.AnyBoomerang} ||
         (flow isa PDMPSamplers.PreconditionedDynamics &&
          flow.dynamics isa Union{BouncyParticle,PDMPSamplers.AnyBoomerang})
@@ -1813,6 +1943,13 @@ function _build_omrf_residual_envelope(envelope_spec, anchor,
             scales = OMRFCovariateLocalScales(anchor, residual_context,
                 zeros(max_degree), zeros(max_degree), zeros(length(anchor)),
                 zeros(length(anchor)), zeros(length(anchor)))
+            if residual_context.factorization === :person_node
+                component_blocks = _as_int_vector(
+                    _rget(envelope_spec, :covariate_component_blocks))
+                return PDMPSamplers.BlockSeparableResidualEnvelope(
+                    weights, component_blocks, size(residual_context.X, 2),
+                    scales; component_cell_scales! = scales)
+            end
             return SeparableResidualEnvelope(weights, scales;
                 component_cell_scales! = scales)
         end
@@ -1899,7 +2036,8 @@ function _prepare_omrf_anchor_envelope(manager::OMRFAnchorManager,
     if bound_type == "covariate_local_expansion" &&
             !residual_context.use_hcv && !isempty(manager.entries)
         template = manager.entries[1].state.envelope
-        if template isa SeparableResidualEnvelope
+        if template isa Union{SeparableResidualEnvelope,
+                PDMPSamplers.BlockSeparableResidualEnvelope}
             max_degree = maximum(length,
                 residual_context.incident_edges; init=0)
             scales = OMRFCovariateLocalScales(requested, residual_context,
@@ -1908,6 +2046,15 @@ function _prepare_omrf_anchor_envelope(manager::OMRFAnchorManager,
             # Weights, totals, and alias tables depend only on the observed
             # covariates. Anchor-bank entries share them; only trajectory
             # callbacks and their workspaces are anchor-specific.
+            if template isa PDMPSamplers.BlockSeparableResidualEnvelope
+                return PDMPSamplers.BlockSeparableResidualEnvelope(
+                    template.weights, template.component_blocks,
+                    template.block_components, template.n_blocks, scales,
+                    scales, template.totals, template.alias_tables,
+                    zeros(length(template.scales)),
+                    zeros(length(template.cell_scales)),
+                    zeros(length(template.cumulative_masses)))
+            end
             return SeparableResidualEnvelope(template.weights, scales, scales,
                 template.totals, template.alias_tables,
                 zeros(length(template.scales)),
@@ -1925,7 +2072,8 @@ function _prepare_omrf_anchor(manager::OMRFAnchorManager,
     recycled = manager.recycled_state
     if recycled !== nothing && oracle.analytic_prior !== nothing &&
             !manager.hcv_active && !recycled.residual_context.use_hcv &&
-            recycled.envelope isa SeparableResidualEnvelope &&
+            recycled.envelope isa Union{SeparableResidualEnvelope,
+                PDMPSamplers.BlockSeparableResidualEnvelope} &&
             recycled.envelope.component_scales! isa OMRFCovariateLocalScales
         # The recycled state is not installed in the bank, so it can be
         # mutated without exposing a partially prepared anchor. Its envelope

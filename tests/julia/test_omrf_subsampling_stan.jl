@@ -132,17 +132,34 @@ end
     @test factor_sum ≈ person_sum atol=2e-14 rtol=2e-14
     supports = PDMPSamplersRBridge._omrf_node_supports(factor_context)
     factor_residual = zeros(d)
-    for factor in 1:(size(X, 1) * size(X, 2))
-        PDMPSamplersRBridge.omrf_residual!(
-            factor_context, factor_residual, position, [factor])
-        node = cld(factor, size(X, 1))
-        outside = setdiff(1:d, supports[node])
-        @test factor_residual[outside] == zeros(length(outside))
+    velocity = collect(range(-1.1, 0.9; length=d))
+    for factor_flow in (ZigZag(d), BouncyParticle(d, 0.1))
+        factor_state = PDMPState(
+            0.0, SkeletonPoint(copy(position), copy(velocity)))
+        for t in (0.0, 0.07, 0.31)
+            point = position + t * velocity
+            for factor in 1:(size(X, 1) * size(X, 2))
+                PDMPSamplersRBridge.omrf_residual!(
+                    factor_context, factor_residual, point, [factor])
+                node = cld(factor, size(X, 1))
+                person = mod1(factor, size(X, 1))
+                outside = setdiff(1:d, supports[node])
+                @test factor_residual[outside] == zeros(length(outside))
+                pattern_bound =
+                    PDMPSamplersRBridge._omrf_person_node_pattern_bound_at(
+                        factor_context, anchor, factor_state, factor_flow,
+                        person, node, t)
+                exact_rate = factor_flow isa ZigZag ?
+                    sum(abs.(velocity .* factor_residual)) :
+                    abs(dot(velocity, factor_residual))
+                @test exact_rate <= pattern_bound + 2e-13
+            end
+        end
     end
     @test factor_context.counts.analytic_factors ==
-        2 * size(X, 1) * size(X, 2)
+        7 * size(X, 1) * size(X, 2)
     @test factor_context.counts.analytic_node_conditionals ==
-        2 * size(X, 1) * size(X, 2)
+        7 * size(X, 1) * size(X, 2)
 end
 
 function omrf_curvature_weights(X, seen; legacy_node_sum=false,
@@ -561,6 +578,35 @@ end
     covariate_bank_ctx, covariate_bank_names =
         PDMPSamplersRBridge._new_stan_subsampling_context(
             lib, full, prior, 1)
+    factor_covariate_spec = copy(covariate_spec)
+    factor_covariate_spec["factorization"] = "person_node"
+    factor_covariate_spec["covariate_component_blocks"] =
+        repeat(collect(1:3); inner=9)
+    factor_covariate_context = PDMPSamplersRBridge._omrf_residual_context(
+        factor_covariate_spec, covariate_bank_names, anchor,
+        covariate_bank_ctx.counts)
+    factor_covariate_envelope =
+        PDMPSamplersRBridge._build_omrf_residual_envelope(
+            factor_covariate_spec, anchor, factor_covariate_context)
+    @test factor_covariate_envelope isa
+        PDMPSamplers.BlockSeparableResidualEnvelope
+    @test size(factor_covariate_envelope.weights) == (27, 3)
+    @test PDMPSamplers.n_observations(factor_covariate_envelope) == 9
+    factor_state = PDMPState(
+        0.0, SkeletonPoint(copy(position), fill(1.0, length(position))))
+    factor_flow = ZigZag(length(position))
+    for t in (0.0, 0.03, 0.2)
+        screening_bound = PDMPSamplers.screening_residual_bound(
+            factor_covariate_envelope, factor_state, factor_flow, t)
+        materialized_bound = PDMPSamplers.total_residual_bound(
+            factor_covariate_envelope, factor_state, factor_flow, t)
+        @test screening_bound >= materialized_bound
+        @test screening_bound ≈ materialized_bound atol=2e-12 rtol=2e-14
+    end
+    fill!(factor_covariate_envelope.cumulative_masses, 0.0)
+    PDMPSamplers.prepare_residual_sampling!(
+        factor_covariate_envelope, factor_state, factor_flow, 0.03)
+    @test factor_covariate_envelope.cumulative_masses[end] > 0
     covariate_model, _, _, _, covariate_manager =
         PDMPSamplersRBridge._build_stan_subsampling_model(
             covariate_bank_ctx, covariate_bank_names,

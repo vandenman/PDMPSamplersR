@@ -35,3 +35,16 @@ test_that("is.bernoulli and is.betabernoulli work on arbitrary objects", {
   expect_false(is.bernoulli(42))
   expect_false(is.betabernoulli(42))
 })
+
+test_that("exchangeable_model_size_prior normalizes positive weights", {
+  prior <- exchangeable_model_size_prior(c(1, 2, 1))
+  expect_true(PDMPSamplersR:::is.exchangeable_model_size_prior(prior))
+  expect_equal(sum(prior$omega), 1)
+  expect_equal(prior$omega, c(0.25, 0.5, 0.25))
+})
+
+test_that("exchangeable_model_size_prior validates inputs", {
+  expect_error(exchangeable_model_size_prior(1), "0:p")
+  expect_error(exchangeable_model_size_prior(c(1, 0)), "positive")
+  expect_error(exchangeable_model_size_prior(c(1, NA_real_)), "missing")
+})

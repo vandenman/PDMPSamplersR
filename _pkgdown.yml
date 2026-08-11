@@ -27,11 +27,15 @@ reference:
   - title: Sampling
     contents:
       - pdmp_sample
-      - pdmp_sample_subsampled
       - pdmp_sample_from_stanmodel
       - support_boundary_control
       - write_stan_json
+      - stan_subsampling
+      - stan_residual_envelope
+      - omrf_residual_envelope
+      - compile_pdmp_stan_model
       - pdmp_subsample_hpp_path
+      - stan_parameter_mapping
   - title: Results
     contents:
       - materialize
@@ -59,14 +63,13 @@ reference:
     contents:
       - bernoulli
       - betabernoulli
+      - independent_slab_density
+      - loglinear_gaussian_scale_slab
   - title: brms interface
     contents:
       - brm_pdmp
       - brm_stancode
       - brm_standata
-      - log_lik_subsampled
-      - posterior_epred_subsampled
-      - posterior_predict_subsampled
   - title: Variable selection
     contents:
       - model_averaged_mean

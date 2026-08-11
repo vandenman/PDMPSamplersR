@@ -7,12 +7,24 @@
 pdmp_sample_from_stanmodel(
   path_to_stanmodel,
   standata,
+  prior_stanmodel = NULL,
+  prior_standata = NULL,
+  subsampling = NULL,
+  full_gradient = NULL,
+  subsampling_warmup = c("subsampled", "full"),
+  subsampling_anchor_updates = 0L,
+  subsampling_use_anchor_bank = FALSE,
+  subsampling_anchor_bank_capacity = 8L,
+  subsampling_main_anchor_refresh_distance = Inf,
   flow = c("ZigZag", "BouncyParticle", "Boomerang", "AdaptiveBoomerang",
     "PreconditionedZigZag", "PreconditionedBPS"),
-  algorithm = c("ThinningStrategy", "GridThinningStrategy", "RootsPoissonStrategy"),
+  algorithm = c("ThinningStrategy", "GridThinningStrategy",
+    "PositiveVariationGridThinningStrategy", "VectorVariationThinningStrategy",
+    "RootsPoissonStrategy"),
   T = 50000,
   t0 = 0,
   t_warmup = 0,
+  warmup_adaptation_interval = NULL,
   flow_mean = NULL,
   flow_cov = NULL,
   c0 = 0.01,
@@ -22,17 +34,26 @@ pdmp_sample_from_stanmodel(
   can_stick = NULL,
   model_prior = NULL,
   parameter_prior = NULL,
+  slab_prior = NULL,
   grid_n = 30,
   grid_t_max = 2,
+  use_fd_hvp = FALSE,
+  curvature_backend = NULL,
   post_warmup_simplify = FALSE,
+  grid_bound = c("constant", "flat", "linear", "auto", "value_quadratic", "shared_node"),
+  grid_curvature_bound = NULL,
+  linear_area_threshold = 0.95,
+  linear_min_area_gain = 0,
+  lazy_low_tightness_threshold = 0.1,
+  lazy_max_low_tightness_rejections = 3L,
+  lazy_max_rejections = 0L,
   show_progress = TRUE,
   n_chains = 1L,
   threaded = FALSE,
   seed = NULL,
   adaptive_scheme = c("diagonal", "fullrank"),
   materialize = TRUE,
-  support_boundary = support_boundary_control(),
-  subsample = NULL
+  support_boundary = support_boundary_control()
 )
 }
 \arguments{
@@ -44,23 +65,70 @@ BridgeStan will compile it automatically.}
 or a named list that will be written to a temporary JSON file via
 [write_stan_json()].}
 
+\item{prior_stanmodel}{Compatibility argument. The full-gradient
+dependent-slab path does not use it. Custom-Stan subsampling accepts only
+the same model as \code{path_to_stanmodel}; use \code{prior_standata} to
+disable likelihood contributions.}
+
+\item{prior_standata}{Optional prior-only Stan data path or named list used
+by \code{subsampling}; it is not needed for full-gradient slabs.}
+
+\item{subsampling}{Optional exact subsampling custom-Stan specification
+created by [stan_subsampling()]. The selected Stan branch must add
+the unscaled sum of the installed observations; Julia applies `N / m`.}
+
+\item{full_gradient}{Optional non-factorized native full-gradient backend.
+Currently [omrf_full_gradient()] supports independent-prior OMRF models
+and provides an exact native Hessian-vector product for Boomerang-family
+and other full samplers.}
+
+\item{subsampling_warmup}{Warmup gradient backend for subsampling runs.
+`"subsampled"` preserves the existing behavior. `"full"` uses the exact
+native OMRF full gradient and HVP during warmup, then switches to the
+configured subsampling model for retained sampling.}
+
+\item{subsampling_anchor_updates}{Number of prepared OMRF anchors added from
+continuous-time warmup means. With full-gradient subsampling warmup, zero
+prepares only the exact terminal warmup anchor.}
+
+\item{subsampling_use_anchor_bank}{Retain prepared OMRF anchors and select
+the nearest entry at event boundaries. If false, updates replace the
+active anchor. Full-gradient subsampling warmup can enable the bank with
+zero scheduled updates because it prepares a terminal anchor.}
+
+\item{subsampling_anchor_bank_capacity}{Maximum prepared OMRF anchors kept
+per chain.}
+
+\item{subsampling_main_anchor_refresh_distance}{Positive Euclidean distance
+from the nearest prepared anchor that triggers a new exact OMRF anchor
+during main sampling. The default `Inf` disables main-phase preparation.}
+
 \item{flow}{Character string specifying the flow type. One of "ZigZag",
 "BouncyParticle", "Boomerang", "AdaptiveBoomerang", "PreconditionedZigZag",
 or "PreconditionedBPS".
 The `"AdaptiveBoomerang"` flow learns its reference (mean and precision)
-during warmup and requires `"GridThinningStrategy"` as the algorithm.
+during warmup and requires a grid-like algorithm. It is supported with
+dependent slabs when `GridThinningStrategy` is selected; provide positive
+`t_warmup`, or let the sampler choose its 20% default.
 The `"PreconditionedZigZag"` and `"PreconditionedBPS"` flows learn a
 diagonal preconditioner during warmup and also require
-`"GridThinningStrategy"` as the algorithm.}
+a grid-like algorithm.}
 
 \item{algorithm}{Character string specifying the algorithm. One of
-"ThinningStrategy", "GridThinningStrategy", or "RootsPoissonStrategy".}
+"ThinningStrategy", "GridThinningStrategy",
+"PositiveVariationGridThinningStrategy", "VectorVariationThinningStrategy",
+or "RootsPoissonStrategy".}
 
 \item{T}{Numeric, total sampling time (default: 50000).}
 
 \item{t0}{Numeric, initial time (default: 0.0).}
 
 \item{t_warmup}{Numeric, warmup time (default: 0.0). Events during warmup are discarded.}
+
+\item{warmup_adaptation_interval}{Nonnegative time between dynamics
+adaptation attempts during warmup. `NULL` uses ten equally spaced warmup
+windows (`t_warmup / 10`); zero attempts adaptation at every event. The
+same interval is used by full-gradient and subsampling runs.}
 
 \item{flow_mean}{Numeric vector of length d, mean vector for the flow (default: zero vector).}
 
@@ -70,24 +138,71 @@ diagonal preconditioner during warmup and also require
 
 \item{x0}{Numeric vector of length d, initial position (default: random normal).}
 
-\item{theta0}{Numeric vector of length d, initial velocity (default: random based on the flow).}
+\item{theta0}{Optional initial velocity forwarded to both full-gradient and
+custom-Stan subsampling initialization.}
 
 \item{sticky}{Logical, whether to use sticky sampling (default: FALSE).}
 
 \item{can_stick}{Logical vector of length d, which coordinates can stick (default: all FALSE).}
 
-\item{model_prior}{Prior distribution object for model selection. Should be of class
-'bernoulli' or 'beta-bernoulli' (default: NULL).}
+\item{model_prior}{Prior distribution object for model selection. Legacy
+sticky sampling accepts \code{bernoulli()} or \code{betabernoulli()}.
+Dependent-slab sampling also accepts \code{exchangeable_model_size_prior()}.}
 
 \item{parameter_prior}{Numeric vector of length d, prior parameters for sticky sampling (default: NULL).}
+
+\item{slab_prior}{Optional dependent slab prior created by
+\code{dense_gaussian_slab()}, \code{exchangeable_gaussian_slab()},
+\code{independent_slab_density()}, \code{gaussian_scale_mixture_slab()},
+or \code{arbitrary_slab_boundary()}. Mutually exclusive with
+\code{parameter_prior}. The full target supplied through \code{f} must
+contain the complete coherent slab represented by \code{slab_prior}; the
+package replaces that slab by its active-face restriction internally.}
 
 \item{grid_n}{Integer, number of grid points for GridThinningStrategy (default: 30).}
 
 \item{grid_t_max}{Numeric, maximum time for grid in GridThinningStrategy (default: 2.0).}
 
+\item{use_fd_hvp}{Logical compatibility switch selecting finite-difference
+curvature when no exact Hessian-vector product is used.}
+
+\item{curvature_backend}{Character string selecting directional curvature:
+`"exact"` or `"finite_difference"`. Custom-Stan subsampling has no
+deterministic exact HVP and therefore always requires finite differences.
+Finite differences use
+shifted exact gradients but approximate their directional derivative and
+therefore have step-size and truncation error. `NULL` preserves the
+legacy `use_fd_hvp` mapping.}
+
 \item{post_warmup_simplify}{Logical. If \code{TRUE}, the grid-thinning
 strategy may switch to a constant bound after warmup, reducing
 gradient calls during the main sampling phase.}
+
+\item{grid_bound}{Character string selecting the GridThinning proposal
+envelope. \code{"constant"} preserves the historical behavior.
+\code{"flat"}, \code{"linear"}, and \code{"auto"} expose signed-rate
+affine envelope machinery when supported by the chosen flow and derivative
+provider. \code{"shared_node"} is an experimental numerical clock using
+consecutive rate nodes and secant-disagreement inflation; it is not a
+mathematically certified thinning envelope.}
+
+\item{grid_curvature_bound}{Optional nonnegative curvature bound required by
+the experimental `"shared_node"` grid bound.}
+
+\item{linear_area_threshold}{Numeric gate for \code{grid_bound = "linear"}
+or \code{"auto"}; affine cells are skipped when their relative area gain is
+too small.}
+
+\item{linear_min_area_gain}{Numeric absolute area-gain gate for affine cells.}
+
+\item{lazy_low_tightness_threshold}{Nonnegative threshold used by lazy grid
+refinement diagnostics.}
+
+\item{lazy_max_low_tightness_rejections}{Nonnegative number of consecutive
+low-tightness rejections allowed before refinement.}
+
+\item{lazy_max_rejections}{Nonnegative total lazy-rejection limit; zero uses
+the package default behavior.}
 
 \item{show_progress}{Logical, whether to show progress bar (default: TRUE).}
 
@@ -111,13 +226,6 @@ This can save time and memory if you don't need to save the result or if you pla
 
 \item{support_boundary}{A list created by \code{support_boundary_control()} that
 controls support-boundary diagnostics and heuristic event/refresh recovery.}
-
-\item{subsample}{NULL (default) for full-data sampling, or a named list with
-at least `size` and `prior_standata`. Optional entries include
-`path_to_stanmodel` (the external-C++ subsampled Stan model; defaults to
-`path_to_stanmodel`), `hpp_path`, `n_anchor_updates`, `hvp_mode`,
-`use_hcv`, `use_anchor_bank`, `use_fd_hvp`, `compute_lp`, and
-`resample_dt`.}
 }
 \value{
 A \code{pdmp_result} object. Use \code{mean}, \code{var},

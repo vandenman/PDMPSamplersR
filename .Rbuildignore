@@ -2,7 +2,16 @@
 ^renv\.lock$
 ^.*\.Rproj$
 ^\.Rproj\.user$
-^examples$
+^examples/mvnormal_cmdstan0\.R$
+^examples/omrf\.R$
+^gradient_test_helper\.jl$
+^playground$
+^inst/julia/cv_gradient_diagnostics\.jl$
+^inst/julia/cv_gradient_diagnostics_v2\.jl$
+^inst/julia/cv_interactive_diagnostics\.jl$
+^tests/testthat/run_single_exhaustive\.R$
+^benchmarks/omrf_subsampling_pilot_2026-08-08.*\.csv$
+^benchmarks/omrf_subsampling_(provenance|feasibility|pilot_stacked|preflight).*2026-08-08.*\.csv$
 ^doc$
 ^Meta$
 ^\.github$

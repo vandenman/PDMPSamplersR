@@ -14,4 +14,10 @@ stan/omrf
 # for vignettes, exclude everything and then use a negative pattern to include only the source .qmd file(s)
 vignettes/*
 !vignettes/stan-examples.qmd
+!vignettes/omrf-custom-stan-subsampling.qmd
+!vignettes/riclpm-dependent-slab.qmd
 .positai
+/results
+/scripts
+benchmarks
+tests/testthat/run_single_exhaustive.R

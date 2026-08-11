@@ -25,10 +25,19 @@ validate_pdmp_params <- function(d, flow, algorithm, T, t0 = 0.0, t_warmup = 0.0
                                 flow_mean = NULL, flow_cov = NULL, c0 = 1e-2,
                                 x0 = NULL, theta0 = NULL, show_progress = TRUE,
                                 sticky = FALSE, can_stick = NULL, model_prior = NULL, parameter_prior = NULL,
+                                slab_prior = NULL,
                                 grid_n = 30, grid_t_max = 2.0,
                                 post_warmup_simplify = FALSE,
+                                grid_bound = "constant",
+                                grid_curvature_bound = NULL,
+                                linear_area_threshold = 0.95,
+                                linear_min_area_gain = 0.0,
                                 n_chains = 1L, threaded = FALSE, seed = NULL,
-                                adaptive_scheme = "diagonal") {
+                                adaptive_scheme = "diagonal",
+                                unc_names = NULL,
+                                lazy_low_tightness_threshold = 0.1,
+                                lazy_max_low_tightness_rejections = 3L,
+                                lazy_max_rejections = 0L) {
 
   # Validate basic parameters
   d <- cast_integer(d, n = 1)
@@ -43,13 +52,16 @@ validate_pdmp_params <- function(d, flow, algorithm, T, t0 = 0.0, t_warmup = 0.0
     cli::cli_abort("Argument {.arg t_warmup} ({t_warmup}) must be less than {.code T - t0} ({T - t0}).")
 
   flow <- match.arg(flow, c("ZigZag", "BouncyParticle", "Boomerang", "AdaptiveBoomerang", "PreconditionedZigZag", "PreconditionedBPS"))
-  algorithm <- match.arg(algorithm, c("ThinningStrategy", "GridThinningStrategy", "RootsPoissonStrategy"))
+  grid_like_algorithms <- c("GridThinningStrategy", "PositiveVariationGridThinningStrategy",
+                            "VectorVariationThinningStrategy")
+  algorithm <- match.arg(algorithm, c("ThinningStrategy", grid_like_algorithms, "RootsPoissonStrategy"))
   adaptive_scheme <- match.arg(adaptive_scheme, c("diagonal", "fullrank"))
+  grid_bound <- match.arg(grid_bound, c("constant", "flat", "linear", "auto", "value_quadratic", "shared_node"))
 
   # AdaptiveBoomerang requires GridThinningStrategy and a warmup period
   if (flow == "AdaptiveBoomerang") {
-    if (algorithm != "GridThinningStrategy")
-      cli::cli_abort("{.val AdaptiveBoomerang} requires {.val GridThinningStrategy} as the algorithm.")
+    if (!algorithm %in% grid_like_algorithms)
+      cli::cli_abort("{.val AdaptiveBoomerang} requires a grid-like algorithm.")
     if (t_warmup == 0) {
       t_warmup <- (T - t0) / 5
       cli::cli_inform("Setting {.arg t_warmup} to {t_warmup} (20% of sampling time) for {.val AdaptiveBoomerang}.")
@@ -58,8 +70,8 @@ validate_pdmp_params <- function(d, flow, algorithm, T, t0 = 0.0, t_warmup = 0.0
 
   # PreconditionedZigZag and PreconditionedBPS require GridThinningStrategy and a warmup period
   if (flow %in% c("PreconditionedZigZag", "PreconditionedBPS")) {
-    if (algorithm != "GridThinningStrategy")
-      cli::cli_abort("{.val {flow}} requires {.val GridThinningStrategy} as the algorithm.")
+    if (!algorithm %in% grid_like_algorithms)
+      cli::cli_abort("{.val {flow}} requires a grid-like algorithm.")
     if (t_warmup == 0) {
       t_warmup <- (T - t0) / 5
       cli::cli_inform("Setting {.arg t_warmup} to {t_warmup} (20% of sampling time) for {.val {flow}}.")
@@ -73,7 +85,7 @@ validate_pdmp_params <- function(d, flow, algorithm, T, t0 = 0.0, t_warmup = 0.0
   validate_type(n_chains, type = "integer", n = 1, positive = TRUE)
   validate_type(threaded, type = "logical", n = 1)
 
-  if (threaded && rlang::is_false(.pdmpsamplers_julia_eval("r_threading_available()"))) {
+  if (threaded && rlang::is_false(.pdmpsamplers_julia_eval("PDMPSamplersRBridge.r_threading_available()"))) {
     cli::cli_warn("Argument {.arg threaded} is set to TRUE but Julia was started with only one thread so this has no effect. Call Sys.setenv(\"JULIA_NUM_THREADS\"=<number>) to set the desired number of threads at the start of an analysis.")
   }
 
@@ -122,26 +134,61 @@ validate_pdmp_params <- function(d, flow, algorithm, T, t0 = 0.0, t_warmup = 0.0
 
   # Validate sticky parameters
   validate_type(sticky, type = "logical", n = 1)
+  if (!sticky && !is.null(slab_prior)) {
+    cli::cli_abort("Argument {.arg slab_prior} requires {.arg sticky} to be {.code TRUE}.")
+  }
   if (sticky) {
+    if (!is.null(parameter_prior) && !is.null(slab_prior)) {
+      cli::cli_abort("Use either legacy {.arg parameter_prior} or dependent {.arg slab_prior}, not both.")
+    }
+    if (!is.null(slab_prior) && !is.slab_prior(slab_prior)) {
+      cli::cli_abort("Argument {.arg slab_prior} must be created by a dependent slab constructor.")
+    }
+
     if (is.null(can_stick)) {
-      can_stick <- rep(FALSE, d)
+      if (!is.null(slab_prior)) {
+        coef_idx <- .slab_coef_indices(slab_prior, d, unc_names = unc_names)
+        if (is.null(coef_idx)) {
+          cli::cli_abort("Dependent {.arg slab_prior} requires {.arg can_stick} unless {.arg coef} is supplied as integer parameter indices.")
+        }
+        can_stick <- rep(FALSE, d)
+        can_stick[coef_idx] <- TRUE
+      } else {
+        can_stick <- rep(FALSE, d)
+      }
     } else {
       validate_type(can_stick, type = "logical", n = d)
     }
-    if (is.null(model_prior) || !(is.bernoulli(model_prior) || is.betabernoulli(model_prior))) {
-      cli::cli_abort("Argument {.arg model_prior} must be provided when {.arg sticky} is {.code TRUE}. It should be an object of class {.cls bernoulli} or {.cls beta-bernoulli}.")
+
+    if (is.null(model_prior) || !is.model_prior(model_prior)) {
+      cli::cli_abort("Argument {.arg model_prior} must be provided when {.arg sticky} is {.code TRUE}.")
     } else if (is.bernoulli(model_prior)) {
-      if (length(model_prior$prob) == 1) {
+      if (is.null(slab_prior) && length(model_prior$prob) == 1) {
         model_prior <- bernoulli(prob = rep(model_prior$prob, d))
-      } else if (length(model_prior$prob) != d) {
-        cli::cli_abort("For {.arg model_prior} of class {.cls bernoulli}, {.arg prob} must be a single value or a vector of length {.arg d}.")
+      } else if (is.null(slab_prior) && length(model_prior$prob) != d) {
+        cli::cli_abort("For legacy sticky sampling, {.arg model_prior} of class {.cls bernoulli} must have a single probability or a vector of length {.arg d}.")
+      } else if (!is.null(slab_prior)) {
+        p <- .slab_beta_dimension(slab_prior, d, can_stick, unc_names = unc_names)
+        if (!length(model_prior$prob) %in% c(1L, p, d)) {
+          cli::cli_abort("For dependent {.arg slab_prior}, Bernoulli {.arg prob} must have length 1, the slab beta dimension ({p}), or {.arg d} ({d}).")
+        }
       }
     }
 
-    if (is.null(parameter_prior))
-      cli::cli_abort("Argument {.arg parameter_prior} must be provided when {.arg sticky} is {.code TRUE}. It must be a single value or a vector of length {.arg d}.")
+    if (is.null(slab_prior)) {
+      if (is.exchangeable_model_size_prior(model_prior)) {
+        cli::cli_abort("{.fn exchangeable_model_size_prior} requires dependent {.arg slab_prior}; it is not supported by legacy sticky sampling.")
+      }
+      if (is.null(parameter_prior))
+        cli::cli_abort("Argument {.arg parameter_prior} must be provided for legacy sticky sampling. Use {.arg slab_prior} for the dependent aggregate sticky path.")
 
-    validate_type(parameter_prior, type = "double", n = d, positive = TRUE)
+      validate_type(parameter_prior, type = "double", n = d, positive = TRUE)
+    } else {
+      if (algorithm != "GridThinningStrategy") {
+        cli::cli_abort("Dependent {.arg slab_prior} sticky sampling currently requires {.val GridThinningStrategy}.")
+      }
+      .validate_slab_prior_dimensions(slab_prior, d, can_stick, unc_names = unc_names, model_prior = model_prior)
+    }
 
   }
 
@@ -149,17 +196,196 @@ validate_pdmp_params <- function(d, flow, algorithm, T, t0 = 0.0, t_warmup = 0.0
   validate_type(grid_n, type = "integer", n = 1, positive = TRUE)
   validate_type(grid_t_max, type = "double", n = 1, positive = TRUE)
   validate_type(post_warmup_simplify, type = "logical", n = 1)
+  if (!is.null(grid_curvature_bound)) {
+    validate_type(grid_curvature_bound, type = "double", n = 1)
+    if (!is.finite(grid_curvature_bound) || grid_curvature_bound < 0)
+      cli::cli_abort("Argument {.arg grid_curvature_bound} must be NULL or a finite non-negative number.")
+  }
+  if (grid_bound == "shared_node" && is.null(grid_curvature_bound)) {
+    cli::cli_abort("Argument {.arg grid_curvature_bound} is required for experimental {.val shared_node} bounds.")
+  }
+  validate_type(linear_area_threshold, type = "double", n = 1)
+  validate_type(linear_min_area_gain, type = "double", n = 1)
+  validate_type(lazy_low_tightness_threshold, type = "double", n = 1)
+  lazy_max_low_tightness_rejections <- cast_integer(lazy_max_low_tightness_rejections, n = 1)
+  lazy_max_rejections <- cast_integer(lazy_max_rejections, n = 1)
+  validate_type(lazy_max_low_tightness_rejections, type = "integer", n = 1, positive = TRUE)
+  validate_type(lazy_max_rejections, type = "integer", n = 1)
+  if (linear_area_threshold < 0)
+    cli::cli_abort("Argument {.arg linear_area_threshold} must be non-negative.")
+  if (linear_min_area_gain < 0)
+    cli::cli_abort("Argument {.arg linear_min_area_gain} must be non-negative.")
+  if (lazy_low_tightness_threshold < 0)
+    cli::cli_abort("Argument {.arg lazy_low_tightness_threshold} must be non-negative.")
+  if (lazy_max_rejections < 0)
+    cli::cli_abort("Argument {.arg lazy_max_rejections} must be non-negative.")
 
   return(list(
     d = d, flow = flow, algorithm = algorithm, T = T, t0 = t0, t_warmup = t_warmup,
     flow_mean = flow_mean, flow_cov = flow_cov, c0 = c0,
     x0 = x0, theta0 = theta0, show_progress = show_progress,
     sticky = sticky, can_stick = can_stick, model_prior = model_prior, parameter_prior = parameter_prior,
+    slab_prior = slab_prior,
     grid_n = grid_n, grid_t_max = grid_t_max,
     post_warmup_simplify = post_warmup_simplify,
+    grid_bound = grid_bound,
+    grid_curvature_bound = grid_curvature_bound,
+    linear_area_threshold = linear_area_threshold,
+    linear_min_area_gain = linear_min_area_gain,
+    lazy_low_tightness_threshold = lazy_low_tightness_threshold,
+    lazy_max_low_tightness_rejections = lazy_max_low_tightness_rejections,
+    lazy_max_rejections = lazy_max_rejections,
     n_chains = n_chains, threaded = threaded, seed = seed,
     adaptive_scheme = adaptive_scheme
   ))
+}
+
+.slab_coef_indices <- function(slab_prior, d, unc_names = NULL) {
+  coef <- slab_prior$coef
+  if (is.null(coef)) return(NULL)
+  if (is.character(coef)) {
+    if (is.null(unc_names)) {
+      cli::cli_abort("Character slab {.arg coef} requires unconstrained parameter names; use integer indices for custom-gradient {.fn pdmp_sample}.")
+    }
+    return(.resolve_unconstrained_spec(coef, unc_names, "coef"))
+  }
+  idx <- as.integer(coef)
+  if (any(idx < 1L) || any(idx > d)) {
+    cli::cli_abort("Integer {.arg coef} values must be 1-based indices in 1:d.")
+  }
+  idx
+}
+
+.slab_beta_dimension <- function(slab_prior, d, can_stick, unc_names = NULL) {
+  coef_idx <- .slab_coef_indices(slab_prior, d, unc_names = unc_names)
+  if (is.null(coef_idx)) sum(can_stick) else length(coef_idx)
+}
+
+.slab_state_indices <- function(value, d, unc_names = NULL, arg = "logscale") {
+  if (is.character(value)) {
+    if (is.null(unc_names)) {
+      cli::cli_abort("Character slab {.arg {arg}} requires unconstrained parameter names; use integer indices for custom-gradient {.fn pdmp_sample}.")
+    }
+    return(.resolve_unconstrained_spec(value, unc_names, arg))
+  }
+  idx <- as.integer(value)
+  if (any(idx < 1L) || any(idx > d)) {
+    cli::cli_abort("Integer {.arg {arg}} values must be 1-based indices in 1:d.")
+  }
+  idx
+}
+
+.validate_slab_prior_dimensions <- function(slab_prior, d, can_stick, unc_names = NULL, model_prior = NULL) {
+  if (is.null(slab_prior)) return(invisible(TRUE))
+  .validate_slab_prior_sampling_contract(slab_prior)
+  coef_idx <- .slab_coef_indices(slab_prior, d, unc_names = unc_names)
+  p <- if (is.null(coef_idx)) sum(can_stick) else length(coef_idx)
+  if (p == 0L) {
+    cli::cli_abort("Dependent {.arg slab_prior} requires at least one stickable coefficient.")
+  }
+  if (!is.null(coef_idx) && !all(can_stick[coef_idx])) {
+    cli::cli_abort("Explicit slab {.arg coef} must be a subset of coordinates enabled by {.arg can_stick}.")
+  }
+  if (!is.null(model_prior) && is.exchangeable_model_size_prior(model_prior) && length(model_prior$omega) != p + 1L) {
+    cli::cli_abort("For {.fn exchangeable_model_size_prior}, {.arg omega} must have length slab beta dimension + 1 ({p + 1L}).")
+  }
+  if (slab_prior$type == "dense_gaussian") {
+    if (length(slab_prior$mean) != p) {
+      cli::cli_abort("Length of {.arg mean} must match the number of slab coefficients.")
+    }
+    if (!all(dim(slab_prior$cov) == c(p, p))) {
+      cli::cli_abort("Dimensions of {.arg cov} must match the number of slab coefficients.")
+    }
+  } else if (slab_prior$type == "independent_slab_density") {
+    if (!(length(slab_prior$kappa) %in% c(1L, p))) {
+      cli::cli_abort("Argument {.arg kappa} must be length 1 or match the number of slab coefficients.")
+    }
+  } else if (slab_prior$type == "exchangeable_gaussian") {
+    if (slab_prior$u + p * slab_prior$v <= 0) {
+      cli::cli_abort("Exchangeable slab covariance requires {.code u + p * v > 0}.")
+    }
+  } else if (slab_prior$type == "independent_logscale_gaussian") {
+    logscale_idx <- .slab_state_indices(slab_prior$logscale, d, unc_names, arg = "logscale")
+    if (length(logscale_idx) == 1L) logscale_idx <- rep(logscale_idx, p)
+    if (length(logscale_idx) != p) {
+      cli::cli_abort("Argument {.arg logscale} must have length 1 or match the number of slab coefficients.")
+    }
+    beta_idx <- if (is.null(coef_idx)) which(can_stick) else coef_idx
+    if (length(slab_prior$log_base_scales) != 1L && length(slab_prior$log_base_scales) != p) {
+      cli::cli_abort("Argument {.arg log_base_scales} must have length 1 or match the number of slab coefficients.")
+    }
+    if (length(intersect(beta_idx, logscale_idx)) > 0L) {
+      cli::cli_abort("Slab {.arg logscale} coordinates must be disjoint from slab {.arg coef} coordinates.")
+    }
+    if (any(can_stick[unique(logscale_idx)])) {
+      cli::cli_abort("Slab {.arg logscale} coordinates must be non-stickable.")
+    }
+  } else if (slab_prior$type == "loglinear_gaussian_scale") {
+    logscale_idx <- .slab_state_indices(slab_prior$logscale, d, unc_names, arg = "logscale")
+    beta_idx <- if (is.null(coef_idx)) which(can_stick) else coef_idx
+    if (!identical(as.integer(slab_prior$logscale_design$dims),
+                   c(as.integer(p), as.integer(length(logscale_idx))))) {
+      cli::cli_abort("Argument {.arg logscale_design} must have one row per slab coefficient and one column per log-scale coordinate.")
+    }
+    if (!(length(slab_prior$log_base_scales) %in% c(1L, p))) {
+      cli::cli_abort("Argument {.arg log_base_sd} must have length 1 or match the number of slab coefficients.")
+    }
+    if (anyDuplicated(logscale_idx)) {
+      cli::cli_abort("Resolved {.arg logscale} coordinates cannot contain duplicates.")
+    }
+    if (length(intersect(beta_idx, logscale_idx)) > 0L) {
+      cli::cli_abort("Slab {.arg logscale} coordinates must be disjoint from slab {.arg coef} coordinates.")
+    }
+    if (any(can_stick[logscale_idx])) {
+      cli::cli_abort("Slab {.arg logscale} coordinates must be non-stickable.")
+    }
+  } else if (slab_prior$type == "global_logscale_exchangeable_gaussian") {
+    logscale_idx <- .slab_state_indices(slab_prior$logscale, d, unc_names, arg = "logscale")
+    if (length(logscale_idx) != 1L) {
+      cli::cli_abort("Argument {.arg logscale} must have length 1.")
+    }
+    beta_idx <- if (is.null(coef_idx)) which(can_stick) else coef_idx
+    if (logscale_idx %in% beta_idx) {
+      cli::cli_abort("Slab {.arg logscale} coordinate must be disjoint from slab {.arg coef} coordinates.")
+    }
+    if (can_stick[logscale_idx]) {
+      cli::cli_abort("Slab {.arg logscale} coordinate must be non-stickable.")
+    }
+  }
+  invisible(TRUE)
+}
+
+.validate_slab_prior_sampling_contract <- function(slab_prior) {
+  if (is.null(slab_prior)) return(invisible(TRUE))
+  if (identical(slab_prior$type, "callback_gaussian") &&
+      !rlang::is_function(slab_prior$active_prior_neggrad)) {
+    cli::cli_abort(
+      "{.fn gaussian_scale_mixture_slab} requires {.arg active_prior_neggrad} when used for dependent-slab sampling."
+    )
+  }
+  invisible(TRUE)
+}
+
+.validate_dependent_slab_early <- function(slab_prior, sticky, flow, algorithm,
+                                           model_prior, parameter_prior) {
+  if (is.null(slab_prior)) return(invisible(TRUE))
+  .validate_slab_prior_sampling_contract(slab_prior)
+  if (!isTRUE(sticky)) {
+    cli::cli_abort("Argument {.arg slab_prior} requires {.arg sticky} to be {.code TRUE}.")
+  }
+  if (!is.slab_prior(slab_prior)) {
+    cli::cli_abort("Argument {.arg slab_prior} must be created by a dependent slab constructor.")
+  }
+  if (!is.null(parameter_prior)) {
+    cli::cli_abort("Use either legacy {.arg parameter_prior} or dependent {.arg slab_prior}, not both.")
+  }
+  if (is.null(model_prior) || !is.model_prior(model_prior)) {
+    cli::cli_abort("Argument {.arg model_prior} must be provided when {.arg sticky} is {.code TRUE}.")
+  }
+  if (algorithm != "GridThinningStrategy") {
+    cli::cli_abort("Dependent {.arg slab_prior} sticky sampling currently requires {.val GridThinningStrategy}.")
+  }
+  invisible(TRUE)
 }
 
 #' Support Boundary Control
@@ -266,146 +492,6 @@ validate_support_boundary_control <- function(support_boundary) {
   do.call(support_boundary_control, utils::modifyList(defaults, support_boundary))
 }
 
-.standata_n_obs <- function(standata, standata_path, subsample) {
-  if (!is.null(subsample$N)) {
-    n <- cast_integer(subsample$N, n = 1)
-    validate_type(n, type = "integer", n = 1, positive = TRUE)
-    return(n)
-  }
-
-  if (is.list(standata) && !is.null(standata$N)) {
-    n <- cast_integer(standata$N, n = 1)
-    validate_type(n, type = "integer", n = 1, positive = TRUE)
-    return(n)
-  }
-
-  if (requireNamespace("jsonlite", quietly = TRUE)) {
-    data <- tryCatch(
-      jsonlite::read_json(standata_path, simplifyVector = TRUE),
-      error = function(e) NULL
-    )
-    if (is.list(data) && !is.null(data$N)) {
-      n <- cast_integer(data$N, n = 1)
-      validate_type(n, type = "integer", n = 1, positive = TRUE)
-      return(n)
-    }
-  }
-
-  cli::cli_abort(c(
-    "Could not determine the number of observations for subsampling.",
-    "i" = "Provide {.field N} in {.arg standata} or set {.code subsample$N}."
-  ))
-}
-
-.write_or_validate_standata_path <- function(data, arg = "subsample$prior_standata") {
-  if (is.list(data)) {
-    path <- tempfile(fileext = ".json")
-    write_stan_json(data, path)
-    return(list(path = path, temporary = TRUE))
-  }
-
-  validate_type(data, type = "character", n = 1)
-  if (!file.exists(data))
-    cli::cli_abort("{.arg {arg}} file not found: {.path {data}}")
-  if (!grepl("\\.json$", data))
-    cli::cli_abort("{.arg {arg}} should be a JSON file path or a named list.")
-  list(path = data, temporary = FALSE)
-}
-
-validate_stan_subsample <- function(subsample, standata, standata_path, path_to_stanmodel) {
-  if (is.null(subsample)) return(NULL)
-  if (!is.list(subsample))
-    cli::cli_abort("{.arg subsample} must be NULL or a named list.")
-
-  if (is.null(subsample$size))
-    cli::cli_abort("{.arg subsample$size} must be provided.")
-  N <- .standata_n_obs(standata, standata_path, subsample)
-  size <- cast_integer(subsample$size, n = 1)
-  validate_type(size, type = "integer", n = 1, positive = TRUE)
-  if (size >= N)
-    cli::cli_abort("{.arg subsample$size} ({size}) must be between 1 and {.code N - 1} ({N - 1L}).")
-
-  prior <- subsample$prior_standata
-  if (is.null(prior)) prior <- subsample$prior_data
-  if (is.null(prior)) prior <- subsample$prior_standata_path
-  if (is.null(prior))
-    cli::cli_abort("{.arg subsample$prior_standata} must be provided as a named list or JSON path.")
-  prior_info <- .write_or_validate_standata_path(prior, "subsample$prior_standata")
-
-  stanmodel_sub <- subsample$path_to_stanmodel
-  if (is.null(stanmodel_sub)) stanmodel_sub <- subsample$stan_file_ext
-  if (is.null(stanmodel_sub)) stanmodel_sub <- subsample$stanmodel
-  if (is.null(stanmodel_sub)) stanmodel_sub <- path_to_stanmodel
-  validate_type(stanmodel_sub, type = "character", n = 1)
-  if (!file.exists(stanmodel_sub))
-    cli::cli_abort("Subsampled Stan model file not found: {.path {stanmodel_sub}}")
-  if (!grepl("\\.(so|dll|dylib|stan)$", stanmodel_sub))
-    cli::cli_abort("{.arg subsample$path_to_stanmodel} should point to a Stan model or compiled Stan library.")
-
-  hpp <- subsample$hpp_path
-  if (is.null(hpp)) hpp <- subsample$external_hpp
-  if (is.null(hpp)) hpp <- hpp_path()
-  validate_type(hpp, type = "character", n = 1)
-  if (!file.exists(hpp))
-    cli::cli_abort("Subsampled Stan external header not found: {.path {hpp}}")
-
-  n_anchor_updates <- if (is.null(subsample$n_anchor_updates)) 10L else cast_integer(subsample$n_anchor_updates, n = 1)
-  validate_type(n_anchor_updates, type = "integer", n = 1)
-  if (n_anchor_updates < 0)
-    cli::cli_abort("{.arg subsample$n_anchor_updates} must be non-negative.")
-
-  hvp_mode <- if (is.null(subsample$hvp_mode)) "scaled" else subsample$hvp_mode
-  validate_type(hvp_mode, type = "character", n = 1)
-  if (!hvp_mode %in% c("scaled", "none"))
-    cli::cli_abort("{.arg subsample$hvp_mode} must be one of {.val scaled} or {.val none}.")
-
-  bool_option <- function(name, default) {
-    value <- subsample[[name]]
-    if (is.null(value)) value <- default
-    validate_type(value, type = "logical", n = 1)
-    value
-  }
-  double_option <- function(name, default, non_negative = TRUE) {
-    value <- subsample[[name]]
-    if (is.null(value)) value <- default
-    validate_type(value, type = "double", n = 1)
-    if (non_negative && value < 0)
-      cli::cli_abort("{.arg {paste0('subsample$', name)}} must be non-negative.")
-    value
-  }
-  integer_option <- function(name, default, positive = TRUE) {
-    value <- subsample[[name]]
-    if (is.null(value)) value <- default
-    value <- cast_integer(value, n = 1)
-    validate_type(value, type = "integer", n = 1)
-    if (positive && value <= 0)
-      cli::cli_abort("{.arg {paste0('subsample$', name)}} must be positive.")
-    value
-  }
-
-  list(
-    N = N,
-    size = size,
-    prior_path = prior_info$path,
-    prior_temporary = prior_info$temporary,
-    path_to_stanmodel = stanmodel_sub,
-    hpp_path = hpp,
-    n_anchor_updates = n_anchor_updates,
-    hvp_mode = hvp_mode,
-    use_hcv = bool_option("use_hcv", FALSE),
-    use_anchor_bank = bool_option("use_anchor_bank", FALSE),
-    use_fd_hvp = bool_option("use_fd_hvp", FALSE),
-    compute_lp = bool_option("compute_lp", FALSE),
-    resample_dt = double_option("resample_dt", 0.0),
-    discretize_dt = double_option("discretize_dt", 0.0),
-    bank_capacity = integer_option("bank_capacity", 20L),
-    use_fd_hcv = bool_option("use_fd_hcv", FALSE),
-    output_csv = if (is.null(subsample$output_csv)) tempfile(fileext = ".csv") else {
-      validate_type(subsample$output_csv, type = "character", n = 1)
-      subsample$output_csv
-    }
-  )
-}
 
 #' PDMP Sampling
 #'
@@ -419,12 +505,16 @@ validate_stan_subsample <- function(subsample, standata, standata_path, path_to_
 #'   "BouncyParticle", "Boomerang", "AdaptiveBoomerang", "PreconditionedZigZag",
 #'   or "PreconditionedBPS".
 #'   The `"AdaptiveBoomerang"` flow learns its reference (mean and precision)
-#'   during warmup and requires `"GridThinningStrategy"` as the algorithm.
+#'   during warmup and requires a grid-like algorithm. It is supported with
+#'   dependent slabs when `GridThinningStrategy` is selected; provide positive
+#'   `t_warmup`, or let the sampler choose its 20% default.
 #'   The `"PreconditionedZigZag"` and `"PreconditionedBPS"` flows learn a
 #'   diagonal preconditioner during warmup and also require
-#'   `"GridThinningStrategy"` as the algorithm.
+#'   a grid-like algorithm.
 #' @param algorithm Character string specifying the algorithm. One of
-#'   "ThinningStrategy", "GridThinningStrategy", or "RootsPoissonStrategy".
+#'   "ThinningStrategy", "GridThinningStrategy",
+#'   "PositiveVariationGridThinningStrategy", "VectorVariationThinningStrategy",
+#'   or "RootsPoissonStrategy".
 #' @param T Numeric, total sampling time (default: 50000).
 #' @param t0 Numeric, initial time (default: 0.0).
 #' @param t_warmup Numeric, warmup time (default: 0.0). Events during warmup are discarded.
@@ -435,16 +525,45 @@ validate_stan_subsample <- function(subsample, standata, standata_path, path_to_
 #' @param theta0 Numeric vector of length d, initial velocity (default: random based on the flow).
 #' @param hessian Function that returns the negative Hessian matrix of size d x d (default: NULL).
 #'   Only used with GridThinningStrategy to compute the Hessian-vector product.
+#' @param use_fd_hvp Logical compatibility switch selecting finite-difference
+#'   curvature when no exact Hessian-vector product is used.
 #' @param sticky Logical, whether to use sticky sampling (default: FALSE).
 #' @param can_stick Logical vector of length d, which coordinates can stick (default: all FALSE).
-#' @param model_prior Prior distribution object for model selection. Should be of class
-#'   'bernoulli' or 'beta-bernoulli' (default: NULL).
+#' @param model_prior Prior distribution object for model selection. Legacy
+#'   sticky sampling accepts \code{bernoulli()} or \code{betabernoulli()}.
+#'   Dependent-slab sampling also accepts \code{exchangeable_model_size_prior()}.
 #' @param parameter_prior Numeric vector of length d, prior parameters for sticky sampling (default: NULL).
+#' @param slab_prior Optional dependent slab prior created by
+#'   \code{dense_gaussian_slab()}, \code{exchangeable_gaussian_slab()},
+#'   \code{independent_slab_density()}, \code{gaussian_scale_mixture_slab()},
+#'   or \code{arbitrary_slab_boundary()}. Mutually exclusive with
+#'   \code{parameter_prior}. The full target supplied through \code{f} must
+#'   contain the complete coherent slab represented by \code{slab_prior}; the
+#'   package replaces that slab by its active-face restriction internally.
 #' @param grid_n Integer, number of grid points for GridThinningStrategy (default: 30).
 #' @param grid_t_max Numeric, maximum time for grid in GridThinningStrategy (default: 2.0).
 #' @param post_warmup_simplify Logical. If \code{TRUE}, the grid-thinning
 #'   strategy may switch to a constant bound after warmup, reducing
 #'   gradient calls during the main sampling phase.
+#' @param grid_bound Character string selecting the GridThinning proposal
+#'   envelope. \code{"constant"} preserves the historical behavior.
+#'   \code{"flat"}, \code{"linear"}, and \code{"auto"} expose signed-rate
+#'   affine envelope machinery when supported by the chosen flow and derivative
+#'   provider. \code{"shared_node"} is an experimental numerical clock using
+#'   consecutive rate nodes and secant-disagreement inflation; it is not a
+#'   mathematically certified thinning envelope.
+#' @param grid_curvature_bound Optional nonnegative curvature bound required by
+#'   the experimental `"shared_node"` grid bound.
+#' @param linear_area_threshold Numeric gate for \code{grid_bound = "linear"}
+#'   or \code{"auto"}; affine cells are skipped when their relative area gain is
+#'   too small.
+#' @param linear_min_area_gain Numeric absolute area-gain gate for affine cells.
+#' @param lazy_low_tightness_threshold Nonnegative threshold used by lazy grid
+#'   refinement diagnostics.
+#' @param lazy_max_low_tightness_rejections Nonnegative number of consecutive
+#'   low-tightness rejections allowed before refinement.
+#' @param lazy_max_rejections Nonnegative total lazy-rejection limit; zero uses
+#'   the package default behavior.
 #' @param show_progress Logical, whether to show progress bar (default: TRUE).
 #' @param n_chains Integer, number of chains to run (default: 1).
 #' @param threaded Logical, whether to run chains in parallel (default: FALSE).
@@ -469,14 +588,25 @@ validate_stan_subsample <- function(subsample, standata, standata_path, path_to_
 #' @export
 pdmp_sample <- function(f, d,
                         flow = c("ZigZag", "BouncyParticle", "Boomerang", "AdaptiveBoomerang", "PreconditionedZigZag", "PreconditionedBPS"),
-                        algorithm = c("ThinningStrategy", "GridThinningStrategy", "RootsPoissonStrategy"),
+                        algorithm = c("ThinningStrategy", "GridThinningStrategy",
+                                      "PositiveVariationGridThinningStrategy", "VectorVariationThinningStrategy",
+                                      "RootsPoissonStrategy"),
                         T = 50000, t0 = 0.0, t_warmup = 0.0,
                         flow_mean = NULL, flow_cov = NULL, c0 = 1e-2,
                         x0 = NULL, theta0 = NULL,
                         hessian = NULL,
                         sticky = FALSE, can_stick = NULL, model_prior = NULL, parameter_prior = NULL,
+                        slab_prior = NULL,
                         grid_n = 30, grid_t_max = 2.0,
+                        use_fd_hvp = FALSE,
                         post_warmup_simplify = FALSE,
+                        grid_bound = c("constant", "flat", "linear", "auto", "value_quadratic", "shared_node"),
+                        grid_curvature_bound = NULL,
+                        linear_area_threshold = 0.95,
+                        linear_min_area_gain = 0.0,
+                        lazy_low_tightness_threshold = 0.1,
+                        lazy_max_low_tightness_rejections = 3L,
+                        lazy_max_rejections = 0L,
                         show_progress = TRUE,
                         n_chains = 1L, threaded = FALSE, seed = NULL,
                         adaptive_scheme = c("diagonal", "fullrank"),
@@ -494,8 +624,10 @@ pdmp_sample <- function(f, d,
   # Use common validation function
   params <- validate_pdmp_params(d, flow, algorithm, T, t0, t_warmup, flow_mean, flow_cov,
                                 c0, x0, theta0, show_progress,
-                                sticky, can_stick, model_prior, parameter_prior,
+                                sticky, can_stick, model_prior, parameter_prior, slab_prior,
                                 grid_n, grid_t_max, post_warmup_simplify,
+                                grid_bound, grid_curvature_bound,
+                                linear_area_threshold, linear_min_area_gain,
                                 n_chains, threaded, seed,
                                 adaptive_scheme = adaptive_scheme)
 
@@ -553,14 +685,19 @@ pdmp_sample <- function(f, d,
   JuliaCall::julia_assign("support_boundary_refresh_probe_time", support_boundary$refresh_probe_time)
   JuliaCall::julia_assign("support_boundary_min_safe_time", support_boundary$min_safe_time)
 
-  result <- .pdmpsamplers_julia_eval("r_pdmp_custom(
+  result <- .pdmpsamplers_julia_eval("PDMPSamplersRBridge.r_pdmp_custom(
     grad!, d, x0, flow, algorithm, flow_mean, flow_cov;
     c0 = c0, grid_n = grid_n, grid_t_max = grid_t_max,
     post_warmup_simplify = post_warmup_simplify,
+    grid_bound = grid_bound,
+    grid_curvature_bound = grid_curvature_bound,
+    linear_area_threshold = linear_area_threshold,
+    linear_min_area_gain = linear_min_area_gain,
     t0 = t0, T = T, t_warmup = t_warmup,
     hessian = hessian_f,
     sticky = sticky, can_stick = can_stick,
     model_prior = model_prior, parameter_prior = parameter_prior,
+    slab_prior = slab_prior,
     show_progress = show_progress, n_chains = n_chains, threaded = threaded,
     seed = seed,
     adaptive_scheme = adaptive_scheme,
@@ -600,12 +737,48 @@ pdmp_sample <- function(f, d,
 #' @param standata Either a character path to the Stan data file (JSON format),
 #'   or a named list that will be written to a temporary JSON file via
 #'   [write_stan_json()].
-#' @param subsample NULL (default) for full-data sampling, or a named list with
-#'   at least `size` and `prior_standata`. Optional entries include
-#'   `path_to_stanmodel` (the external-C++ subsampled Stan model; defaults to
-#'   `path_to_stanmodel`), `hpp_path`, `n_anchor_updates`, `hvp_mode`,
-#'   `use_hcv`, `use_anchor_bank`, `use_fd_hvp`, `compute_lp`, and
-#'   `resample_dt`.
+#' @param prior_stanmodel Compatibility argument. The full-gradient
+#'   dependent-slab path does not use it. Custom-Stan subsampling accepts only
+#'   the same model as \code{path_to_stanmodel}; use \code{prior_standata} to
+#'   disable likelihood contributions.
+#' @param prior_standata Optional prior-only Stan data path or named list used
+#'   by \code{subsampling}; it is not needed for full-gradient slabs.
+#' @param curvature_backend Character string selecting directional curvature:
+#'   `"exact"` or `"finite_difference"`. Custom-Stan subsampling has no
+#'   deterministic exact HVP and therefore always requires finite differences.
+#'   Finite differences use
+#'   shifted exact gradients but approximate their directional derivative and
+#'   therefore have step-size and truncation error. `NULL` preserves the
+#'   legacy `use_fd_hvp` mapping.
+#' @param subsampling Optional exact subsampling custom-Stan specification
+#'   created by [stan_subsampling()]. The selected Stan branch must add
+#'   the unscaled sum of the installed observations; Julia applies `N / m`.
+#' @param full_gradient Optional non-factorized native full-gradient backend.
+#'   Currently [omrf_full_gradient()] supports independent-prior OMRF models
+#'   and provides an exact native Hessian-vector product for Boomerang-family
+#'   and other full samplers.
+#' @param theta0 Optional initial velocity forwarded to both full-gradient and
+#'   custom-Stan subsampling initialization.
+#' @param subsampling_warmup Warmup gradient backend for subsampling runs.
+#'   `"subsampled"` preserves the existing behavior. `"full"` uses the exact
+#'   native OMRF full gradient and HVP during warmup, then switches to the
+#'   configured subsampling model for retained sampling.
+#' @param subsampling_anchor_updates Number of prepared OMRF anchors added from
+#'   continuous-time warmup means. With full-gradient subsampling warmup, zero
+#'   prepares only the exact terminal warmup anchor.
+#' @param subsampling_use_anchor_bank Retain prepared OMRF anchors and select
+#'   the nearest entry at event boundaries. If false, updates replace the
+#'   active anchor. Full-gradient subsampling warmup can enable the bank with
+#'   zero scheduled updates because it prepares a terminal anchor.
+#' @param subsampling_anchor_bank_capacity Maximum prepared OMRF anchors kept
+#'   per chain.
+#' @param subsampling_main_anchor_refresh_distance Positive Euclidean distance
+#'   from the nearest prepared anchor that triggers a new exact OMRF anchor
+#'   during main sampling. The default `Inf` disables main-phase preparation.
+#' @param warmup_adaptation_interval Nonnegative time between dynamics
+#'   adaptation attempts during warmup. `NULL` uses ten equally spaced warmup
+#'   windows (`t_warmup / 10`); zero attempts adaptation at every event. The
+#'   same interval is used by full-gradient and subsampling runs.
 #' @inheritParams pdmp_sample
 #'
 #' @return A \code{pdmp_result} object. Use \code{mean}, \code{var},
@@ -614,23 +787,175 @@ pdmp_sample <- function(f, d,
 #'
 #' @export
 pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
+                        prior_stanmodel = NULL, prior_standata = NULL,
+                        subsampling = NULL,
+                        full_gradient = NULL,
+                        subsampling_warmup = c("subsampled", "full"),
+                        subsampling_anchor_updates = 0L,
+                        subsampling_use_anchor_bank = FALSE,
+                        subsampling_anchor_bank_capacity = 8L,
+                        subsampling_main_anchor_refresh_distance = Inf,
                         flow = c("ZigZag", "BouncyParticle", "Boomerang", "AdaptiveBoomerang", "PreconditionedZigZag", "PreconditionedBPS"),
-                        algorithm = c("ThinningStrategy", "GridThinningStrategy", "RootsPoissonStrategy"),
+                        algorithm = c("ThinningStrategy", "GridThinningStrategy",
+                                      "PositiveVariationGridThinningStrategy", "VectorVariationThinningStrategy",
+                                      "RootsPoissonStrategy"),
                         T = 50000, t0 = 0.0, t_warmup = 0.0,
+                        warmup_adaptation_interval = NULL,
                         flow_mean = NULL, flow_cov = NULL, c0 = 1e-2,
                         x0 = NULL, theta0 = NULL,
                         sticky = FALSE, can_stick = NULL, model_prior = NULL, parameter_prior = NULL,
+                        slab_prior = NULL,
                         grid_n = 30, grid_t_max = 2.0,
+                        use_fd_hvp = FALSE,
+                        curvature_backend = NULL,
                         post_warmup_simplify = FALSE,
+                        grid_bound = c("constant", "flat", "linear", "auto", "value_quadratic", "shared_node"),
+                        grid_curvature_bound = NULL,
+                        linear_area_threshold = 0.95,
+                        linear_min_area_gain = 0.0,
+                        lazy_low_tightness_threshold = 0.1,
+                        lazy_max_low_tightness_rejections = 3L,
+                        lazy_max_rejections = 0L,
                         show_progress = TRUE,
                         n_chains = 1L, threaded = FALSE, seed = NULL,
                         adaptive_scheme = c("diagonal", "fullrank"),
                         materialize = TRUE,
-                        support_boundary = support_boundary_control(),
-                        subsample = NULL) {
+                        support_boundary = support_boundary_control()) {
 
   # Validate file paths on R side before setting up Julia
   validate_type(path_to_stanmodel, type = "character", n = 1)
+  flow <- match.arg(flow)
+  algorithm <- match.arg(algorithm)
+  adaptive_scheme <- match.arg(adaptive_scheme)
+  subsampling_warmup <- match.arg(subsampling_warmup)
+  if (!is.null(warmup_adaptation_interval)) {
+    if (!is.numeric(warmup_adaptation_interval) ||
+        length(warmup_adaptation_interval) != 1L ||
+        !is.finite(warmup_adaptation_interval) ||
+        warmup_adaptation_interval < 0) {
+      cli::cli_abort(paste0(
+        "Argument {.arg warmup_adaptation_interval} must be NULL or a ",
+        "finite nonnegative number."))
+    }
+    warmup_adaptation_interval <- as.numeric(warmup_adaptation_interval)
+  }
+  if (!rlang::is_integerish(n_chains, n = 1L, finite = TRUE) || n_chains < 1L) {
+    cli::cli_abort("Argument {.arg n_chains} must be a positive integer.")
+  }
+  n_chains <- as.integer(n_chains)
+  if (!is.null(subsampling) &&
+      !inherits(subsampling, "stan_subsampling")) {
+    cli::cli_abort("Argument {.arg subsampling} must be created by {.fn stan_subsampling}.")
+  }
+  if (!is.null(full_gradient) &&
+      !inherits(full_gradient, "omrf_full_gradient")) {
+    cli::cli_abort("Argument {.arg full_gradient} must be created by {.fn omrf_full_gradient}.")
+  }
+  if (!is.null(full_gradient) && !is.null(subsampling)) {
+    cli::cli_abort("Arguments {.arg full_gradient} and {.arg subsampling} are mutually exclusive.")
+  }
+  if (subsampling_warmup == "full") {
+    if (is.null(subsampling)) {
+      cli::cli_abort("Argument {.arg subsampling_warmup = \"full\"} requires {.arg subsampling}.")
+    }
+    if (!inherits(subsampling$residual_envelope, "omrf_residual_envelope") ||
+        !identical(subsampling$residual_envelope$backend, "analytic") ||
+        !identical(subsampling$residual_envelope$prior_backend, "analytic")) {
+      cli::cli_abort(paste0(
+        "Full-gradient subsampling warmup requires an analytic OMRF residual ",
+        "envelope with {.arg prior_backend = \"analytic\"}."))
+    }
+    if (t_warmup <= 0) {
+      cli::cli_abort("Full-gradient subsampling warmup requires positive {.arg t_warmup}.")
+    }
+    if (!is.null(slab_prior)) {
+      cli::cli_abort("Full-gradient subsampling warmup does not yet support dependent slab priors.")
+    }
+  }
+  if (!is.null(full_gradient)) {
+    full_gradient$spec <- .attach_omrf_analytic_prior(
+      full_gradient$spec, standata, "standata")
+  }
+  if (!rlang::is_integerish(subsampling_anchor_updates, n = 1L, finite = TRUE) ||
+      subsampling_anchor_updates < 0L) {
+    cli::cli_abort("Argument {.arg subsampling_anchor_updates} must be a nonnegative integer.")
+  }
+  if (!is.logical(subsampling_use_anchor_bank) ||
+      length(subsampling_use_anchor_bank) != 1L || is.na(subsampling_use_anchor_bank)) {
+    cli::cli_abort("Argument {.arg subsampling_use_anchor_bank} must be TRUE or FALSE.")
+  }
+  if (!rlang::is_integerish(subsampling_anchor_bank_capacity, n = 1L, finite = TRUE) ||
+      subsampling_anchor_bank_capacity < 1L) {
+    cli::cli_abort("Argument {.arg subsampling_anchor_bank_capacity} must be a positive integer.")
+  }
+  subsampling_anchor_updates <- as.integer(subsampling_anchor_updates)
+  subsampling_anchor_bank_capacity <- as.integer(subsampling_anchor_bank_capacity)
+  if (!is.numeric(subsampling_main_anchor_refresh_distance) ||
+      length(subsampling_main_anchor_refresh_distance) != 1L ||
+      is.na(subsampling_main_anchor_refresh_distance) ||
+      subsampling_main_anchor_refresh_distance <= 0) {
+    cli::cli_abort(paste0(
+      "Argument {.arg subsampling_main_anchor_refresh_distance} must be ",
+      "positive or Inf."))
+  }
+  subsampling_main_anchor_refresh_distance <-
+    as.numeric(subsampling_main_anchor_refresh_distance)
+  if (isTRUE(subsampling_use_anchor_bank) && subsampling_anchor_updates == 0L &&
+      subsampling_warmup != "full") {
+    cli::cli_abort(paste0(
+      "Argument {.arg subsampling_use_anchor_bank = TRUE} requires positive ",
+      "{.arg subsampling_anchor_updates}, unless {.arg subsampling_warmup = \"full\"} ",
+      "prepares the terminal warmup anchor."))
+  }
+  if (is.finite(subsampling_main_anchor_refresh_distance) &&
+      !isTRUE(subsampling_use_anchor_bank)) {
+    cli::cli_abort(paste0(
+      "Finite {.arg subsampling_main_anchor_refresh_distance} requires ",
+      "{.arg subsampling_use_anchor_bank = TRUE}."))
+  }
+  if (is.null(subsampling) &&
+      (subsampling_anchor_updates > 0L || isTRUE(subsampling_use_anchor_bank))) {
+    cli::cli_abort("Subsampling anchor controls require {.arg subsampling}.")
+  }
+  if (subsampling_anchor_updates > 0L &&
+      (!inherits(subsampling$residual_envelope, "omrf_residual_envelope") ||
+       !identical(subsampling$residual_envelope$backend, "analytic"))) {
+    cli::cli_abort("Subsampling anchor updates currently require an analytic OMRF residual envelope.")
+  }
+  if (subsampling_anchor_updates > 0L && t_warmup <= 0) {
+    cli::cli_abort("Subsampling anchor updates require positive {.arg t_warmup}.")
+  }
+  if (!is.null(subsampling)) {
+    if (!algorithm %in% c("GridThinningStrategy", "ThinningStrategy")) {
+      cli::cli_abort("Subsampling custom-Stan sampling requires {.val GridThinningStrategy} or {.val ThinningStrategy}.")
+    }
+    if (is.null(prior_standata)) {
+      prior_standata <- subsampling$prior_standata
+    }
+  }
+
+  validate_type(use_fd_hvp, type = "logical", n = 1)
+  if (!is.null(subsampling)) {
+    if (!is.null(curvature_backend)) {
+      curvature_backend <- match.arg(curvature_backend, c("exact", "finite_difference"))
+      if (curvature_backend == "exact") {
+        cli::cli_abort("Custom-Stan subsampling has no deterministic exact HVP; use {.val finite_difference} curvature.")
+      }
+    }
+    curvature_backend <- "finite_difference"
+    use_fd_hvp <- TRUE
+  } else if (is.null(curvature_backend)) {
+    curvature_backend <- if (isTRUE(use_fd_hvp)) "finite_difference" else "exact"
+  } else {
+    curvature_backend <- match.arg(curvature_backend, c("exact", "finite_difference"))
+    if (isTRUE(use_fd_hvp) && curvature_backend != "finite_difference") {
+      cli::cli_abort("Argument {.arg use_fd_hvp = TRUE} conflicts with {.arg curvature_backend = {curvature_backend}}.")
+    }
+  }
+  support_boundary <- validate_support_boundary_control(support_boundary)
+  if (!is.null(subsampling) && support_boundary$mode != "error") {
+    cli::cli_abort("Custom-Stan subsampling currently requires {.arg support_boundary} mode {.val error}.")
+  }
 
   if (is.list(standata)) {
     standata_path <- tempfile(fileext = ".json")
@@ -639,6 +964,30 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
   } else {
     validate_type(standata, type = "character", n = 1)
     standata_path <- standata
+  }
+
+  prior_standata_path <- NULL
+  if (!is.null(prior_standata)) {
+    if (is.list(prior_standata)) {
+      prior_standata_path <- tempfile(fileext = ".json")
+      write_stan_json(prior_standata, prior_standata_path)
+      on.exit(unlink(prior_standata_path), add = TRUE)
+    } else {
+      validate_type(prior_standata, type = "character", n = 1)
+      prior_standata_path <- prior_standata
+    }
+  }
+  .validate_dependent_slab_early(
+    slab_prior, sticky, flow, algorithm, model_prior, parameter_prior
+  )
+  if (is.null(prior_stanmodel)) {
+    prior_stanmodel <- path_to_stanmodel
+  } else {
+    validate_type(prior_stanmodel, type = "character", n = 1)
+  }
+
+  if (!is.null(subsampling) && is.null(prior_standata_path)) {
+    cli::cli_abort("Subsampling custom-Stan sampling requires prior-only Stan data.")
   }
 
   if (!file.exists(path_to_stanmodel))
@@ -656,49 +1005,140 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
       "i" = "Got: {.path {standata_path}}",
       "i" = "Use {.fn write_stan_json} to create a data file or pass a list directly."
     ))
+  if (!is.null(prior_standata_path)) {
+    if (!file.exists(prior_stanmodel))
+      cli::cli_abort("Prior Stan model file not found: {.path {prior_stanmodel}}")
+    if (!file.exists(prior_standata_path))
+      cli::cli_abort("Prior Stan data file not found: {.path {prior_standata_path}}")
+    if (!grepl("\\.(so|dll|dylib|stan)$", prior_stanmodel))
+      cli::cli_abort("{.arg prior_stanmodel} should point to a Stan model or compiled Stan library.")
+    if (!grepl("\\.json$", prior_standata_path))
+      cli::cli_abort("{.arg prior_standata} should be a JSON file path or a named list.")
+  }
 
-  subsample <- validate_stan_subsample(subsample, standata, standata_path, path_to_stanmodel)
-  if (!is.null(subsample) && isTRUE(subsample$prior_temporary))
-    on.exit(unlink(subsample$prior_path), add = TRUE)
+  if (!is.null(subsampling) &&
+      !identical(normalizePath(prior_stanmodel, mustWork = TRUE),
+                 normalizePath(path_to_stanmodel, mustWork = TRUE))) {
+    cli::cli_abort(c(
+      "Custom-Stan subsampling requires {.arg prior_stanmodel} to be the same model as {.arg path_to_stanmodel}.",
+      "i" = "Use prior-only data to switch off likelihood contributions."
+    ))
+  }
 
   check_for_julia_setup()
 
   # Normalize paths to absolute
   path_to_stanmodel <- normalizePath(path_to_stanmodel, mustWork = TRUE)
   standata_path     <- normalizePath(standata_path,     mustWork = TRUE)
+  if (!is.null(prior_standata_path)) {
+    prior_stanmodel <- normalizePath(prior_stanmodel, mustWork = TRUE)
+    prior_standata_path <- normalizePath(prior_standata_path, mustWork = TRUE)
+  }
 
-  support_boundary <- validate_support_boundary_control(support_boundary)
+  compile_control_enabled <- any(tolower(Sys.getenv(c(
+    "PDMPSAMPLERSR_BRIDGESTAN_CACHE",
+    "PDMPSAMPLERSR_BRIDGESTAN_NATIVE",
+    "PDMPSAMPLERSR_BRIDGESTAN_STANC_O1"
+  ), "false")) %in% c("1", "true", "yes", "y"))
+  if (!is.null(subsampling) && grepl("\\.stan$", path_to_stanmodel)) {
+    path_to_stanmodel <- .pdmpsamplers_julia_call(
+      "_compile_model_with_header", path_to_stanmodel,
+      pdmp_subsample_hpp_path()
+    )
+    prior_stanmodel <- path_to_stanmodel
+  } else if (compile_control_enabled && grepl("\\.stan$", path_to_stanmodel)) {
+    path_to_stanmodel <- .pdmpsamplers_julia_call("_compile_model", path_to_stanmodel)
+  }
+  if (is.null(subsampling) && compile_control_enabled && !is.null(prior_standata_path) && grepl("\\.stan$", prior_stanmodel)) {
+    prior_stanmodel <- .pdmpsamplers_julia_call("_compile_model", prior_stanmodel)
+  }
 
   JuliaCall::julia_assign("_path_to_stan_model", path_to_stanmodel)
   JuliaCall::julia_assign("_path_to_stan_data",  standata_path)
+  JuliaCall::julia_assign("_path_to_prior_stan_data_full", prior_standata_path)
+  JuliaCall::julia_assign("_subsampling", subsampling)
+  JuliaCall::julia_assign("_full_gradient_spec",
+                          if (is.null(full_gradient)) NULL else full_gradient$spec)
+  JuliaCall::julia_assign("_n_chains", as.integer(n_chains))
 
-  if (is.null(subsample)) {
-    # Create PDMPModel in Julia and get dimension for the ordinary full-data path.
-    JuliaCall::julia_command("_pdmp_model = PDMPModel(_path_to_stan_model, _path_to_stan_data);")
+  # Initialize exactly the persistent contexts that sampling will reuse, and
+  # obtain dimension/name metadata from those contexts.
+  JuliaCall::julia_assign("_curvature_backend", curvature_backend)
+  if (is.null(subsampling)) {
+    JuliaCall::julia_command("_stan_model = BridgeStan.StanModel(_path_to_stan_model, _path_to_stan_data; warn=false);")
+    if (is.null(full_gradient)) {
+      JuliaCall::julia_command("_pdmp_model = PDMPModel(_stan_model; hvp = _curvature_backend != \"finite_difference\");")
+    } else {
+      JuliaCall::julia_command("_pdmp_model = PDMPSamplersRBridge.build_omrf_full_model(_full_gradient_spec, BridgeStan.param_unc_names(_stan_model), Int(BridgeStan.param_unc_num(_stan_model)));")
+    }
     d <- JuliaCall::julia_eval("_pdmp_model.d")
+    unc_names <- character(0)
+    if (!is.null(slab_prior) || is.character(can_stick) || !is.null(full_gradient)) {
+      unc_names <- JuliaCall::julia_eval("BridgeStan.param_unc_names(_stan_model)")
+    }
   } else {
-    subsample$path_to_stanmodel <- normalizePath(subsample$path_to_stanmodel, mustWork = TRUE)
-    subsample$prior_path <- normalizePath(subsample$prior_path, mustWork = TRUE)
-    subsample$hpp_path <- normalizePath(subsample$hpp_path, mustWork = TRUE)
-    d <- .pdmpsamplers_julia_call(
-      "r_stan_param_unc_num_with_header",
-      path_to_stanmodel,
-      standata_path,
-      subsample$hpp_path
-    )
+    JuliaCall::julia_command("_prepared_stan_subsampling = PDMPSamplersRBridge.prepare_stan_subsampling(_path_to_stan_model, _path_to_stan_data, _path_to_prior_stan_data_full, _subsampling, _n_chains);")
+    d <- JuliaCall::julia_eval("_prepared_stan_subsampling.d")
+    unc_names <- JuliaCall::julia_eval("_prepared_stan_subsampling.unc_names")
+  }
+  if (is.character(can_stick)) {
+    stick_idx <- .resolve_unconstrained_spec(can_stick, unc_names, "can_stick")
+    can_stick <- rep(FALSE, d)
+    can_stick[stick_idx] <- TRUE
+  }
+  if (!is.null(subsampling)) {
+    envelope_spec <- subsampling$residual_envelope
+    if (inherits(envelope_spec, "omrf_residual_envelope")) {
+      threshold_idx <- .resolve_unconstrained_spec(
+        envelope_spec$thresholds, unc_names, "thresholds")
+      interaction_idx <- .resolve_unconstrained_spec(
+        envelope_spec$interactions, unc_names, "interactions")
+      expected_thresholds <- sum(envelope_spec$seen - 1L)
+      expected_interactions <- ncol(envelope_spec$X) *
+        (ncol(envelope_spec$X) - 1L) / 2L
+      if (length(threshold_idx) != expected_thresholds) {
+        cli::cli_abort("Resolved OMRF threshold block has {length(threshold_idx)} coordinates; expected {expected_thresholds}.")
+      }
+      if (length(interaction_idx) != expected_interactions) {
+        cli::cli_abort("Resolved OMRF interaction block has {length(interaction_idx)} coordinates; expected {expected_interactions}.")
+      }
+      if (length(intersect(threshold_idx, interaction_idx))) {
+        cli::cli_abort("Resolved OMRF threshold and interaction blocks overlap.")
+      }
+    }
+  }
+  if (!is.null(full_gradient)) {
+    envelope_spec <- full_gradient$spec
+    threshold_idx <- .resolve_unconstrained_spec(
+      envelope_spec$thresholds, unc_names, "thresholds")
+    interaction_idx <- .resolve_unconstrained_spec(
+      envelope_spec$interactions, unc_names, "interactions")
+    covered <- sort(c(threshold_idx, interaction_idx))
+    if (!identical(covered, seq_len(d))) {
+      cli::cli_abort(c(
+        "Native OMRF full gradients require threshold and interaction blocks to cover the complete unconstrained state.",
+        "i" = "Covered {length(covered)} of {d} coordinates."
+      ))
+    }
   }
 
   # Use common validation function
   params <- validate_pdmp_params(d, flow, algorithm, T, t0, t_warmup, flow_mean, flow_cov,
                                  c0, x0, theta0, show_progress,
-                                 sticky, can_stick, model_prior, parameter_prior,
+                                 sticky, can_stick, model_prior, parameter_prior, slab_prior,
                                  grid_n, grid_t_max, post_warmup_simplify,
+                                 grid_bound, grid_curvature_bound,
+                                 linear_area_threshold, linear_min_area_gain,
                                  n_chains, threaded, seed,
-                                 adaptive_scheme = adaptive_scheme)
+                                 adaptive_scheme = adaptive_scheme,
+                                 unc_names = unc_names,
+                                 lazy_low_tightness_threshold = lazy_low_tightness_threshold,
+                                 lazy_max_low_tightness_rejections = lazy_max_low_tightness_rejections,
+                                 lazy_max_rejections = lazy_max_rejections)
 
-  if (isTRUE(params$threaded) && params$n_chains > 1L) {
+  if (!is.null(subsampling) && isTRUE(params$threaded) && params$n_chains > 1L) {
     cli::cli_warn(c(
-      "Stan-backed PDMP sampling uses BridgeStan gradients, which are serialized across Julia threads to avoid Stan Math autodiff memory corruption.",
+      "Custom-Stan subsampling serializes every BridgeStan call across Julia threads to avoid Stan Math autodiff memory corruption.",
       "i" = "This prevents segmentation faults but may limit parallel-chain speedups.",
       "i" = "For true parallel speedups with Stan-backed models, use separate R/Julia processes or a Julia-native thread-safe gradient implementation."
     ))
@@ -707,6 +1147,15 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
   # Pass arguments to Julia
   for (nm in names(params))
     JuliaCall::julia_assign(nm, params[[nm]])
+  JuliaCall::julia_assign("_unc_names", unc_names)
+  JuliaCall::julia_assign("subsampling_anchor_updates", subsampling_anchor_updates)
+  JuliaCall::julia_assign("subsampling_warmup", subsampling_warmup)
+  JuliaCall::julia_assign("subsampling_use_anchor_bank", subsampling_use_anchor_bank)
+  JuliaCall::julia_assign("subsampling_anchor_bank_capacity", subsampling_anchor_bank_capacity)
+  JuliaCall::julia_assign("subsampling_main_anchor_refresh_distance",
+                          subsampling_main_anchor_refresh_distance)
+  JuliaCall::julia_assign("warmup_adaptation_interval",
+                          warmup_adaptation_interval)
   JuliaCall::julia_assign("support_boundary_mode", support_boundary$mode)
   JuliaCall::julia_assign("support_boundary_max_bisection_steps", support_boundary$max_bisection_steps)
   JuliaCall::julia_assign("support_boundary_time_rtol", support_boundary$time_rtol)
@@ -716,14 +1165,27 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
   JuliaCall::julia_assign("support_boundary_refresh_probe_time", support_boundary$refresh_probe_time)
   JuliaCall::julia_assign("support_boundary_min_safe_time", support_boundary$min_safe_time)
 
-  if (is.null(subsample)) {
-    result <- .pdmpsamplers_julia_eval("r_pdmp_stan(
+  if (is.null(subsampling)) {
+    result <- .pdmpsamplers_julia_eval("PDMPSamplersRBridge.r_pdmp_stan(
       _pdmp_model, x0, flow, algorithm, flow_mean, flow_cov;
+      theta0 = theta0,
       c0 = c0, grid_n = grid_n, grid_t_max = grid_t_max,
+      use_fd_hvp = _curvature_backend == \"finite_difference\",
+      curvature_backend = _curvature_backend,
       post_warmup_simplify = post_warmup_simplify,
+      grid_bound = grid_bound,
+      grid_curvature_bound = grid_curvature_bound,
+      linear_area_threshold = linear_area_threshold,
+      linear_min_area_gain = linear_min_area_gain,
+      lazy_low_tightness_threshold = lazy_low_tightness_threshold,
+      lazy_max_low_tightness_rejections = lazy_max_low_tightness_rejections,
+      lazy_max_rejections = lazy_max_rejections,
       t0 = t0, T = T, t_warmup = t_warmup,
+      warmup_adaptation_interval = warmup_adaptation_interval,
       sticky = sticky, can_stick = can_stick,
       model_prior = model_prior, parameter_prior = parameter_prior,
+      slab_prior = slab_prior,
+      unc_names = _unc_names,
       show_progress = show_progress, n_chains = n_chains, threaded = threaded,
       seed = seed,
       adaptive_scheme = adaptive_scheme,
@@ -737,55 +1199,61 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
       support_boundary_min_safe_time = support_boundary_min_safe_time
     );")
   } else {
-    JuliaCall::julia_assign("_path_to_subsampled_stan_model", subsample$path_to_stanmodel)
-    JuliaCall::julia_assign("_path_to_prior_stan_data", subsample$prior_path)
-    JuliaCall::julia_assign("_subsample_hpp_path", subsample$hpp_path)
-    JuliaCall::julia_assign("_subsample_N", as.integer(subsample$N))
-    JuliaCall::julia_assign("_subsample_size", as.integer(subsample$size))
-    JuliaCall::julia_assign("_subsample_output_csv", subsample$output_csv)
-    JuliaCall::julia_assign("_subsample_n_anchor_updates", as.integer(subsample$n_anchor_updates))
-    JuliaCall::julia_assign("_subsample_hvp_mode", subsample$hvp_mode)
-    JuliaCall::julia_assign("_subsample_use_hcv", subsample$use_hcv)
-    JuliaCall::julia_assign("_subsample_use_anchor_bank", subsample$use_anchor_bank)
-    JuliaCall::julia_assign("_subsample_use_fd_hvp", subsample$use_fd_hvp)
-    JuliaCall::julia_assign("_subsample_compute_lp", subsample$compute_lp)
-    JuliaCall::julia_assign("_subsample_resample_dt", subsample$resample_dt)
-    JuliaCall::julia_assign("_subsample_discretize_dt", subsample$discretize_dt)
-    JuliaCall::julia_assign("_subsample_bank_capacity", as.integer(subsample$bank_capacity))
-    JuliaCall::julia_assign("_subsample_use_fd_hcv", subsample$use_fd_hcv)
-
-    result <- .pdmpsamplers_julia_eval("r_pdmp_brms_subsampled(
-      _path_to_stan_model, _path_to_subsampled_stan_model, _subsample_hpp_path,
-      _path_to_stan_data, _path_to_prior_stan_data,
-      _subsample_N, _subsample_size,
-      flow, algorithm, flow_mean, flow_cov, _subsample_output_csv;
+    result <- .pdmpsamplers_julia_eval("PDMPSamplersRBridge.r_pdmp_stan_subsampling(
+      _prepared_stan_subsampling, _subsampling, x0, flow, algorithm,
+      flow_mean, flow_cov;
+      theta0 = theta0,
       c0 = c0, grid_n = grid_n, grid_t_max = grid_t_max,
-      t0 = t0, T = T, t_warmup = t_warmup,
-      n_anchor_updates = _subsample_n_anchor_updates,
-      adaptive_scheme = adaptive_scheme,
-      discretize_dt = _subsample_discretize_dt,
-      show_progress = show_progress,
-      n_chains = n_chains, threaded = threaded, seed = seed,
-      compute_lp = _subsample_compute_lp,
-      resample_dt = _subsample_resample_dt,
-      hvp_mode = _subsample_hvp_mode,
-      use_hcv = _subsample_use_hcv,
-      use_anchor_bank = _subsample_use_anchor_bank,
-      bank_capacity = _subsample_bank_capacity,
-      use_fd_hvp = _subsample_use_fd_hvp,
+      use_fd_hvp = true,
+      curvature_backend = _curvature_backend,
       post_warmup_simplify = post_warmup_simplify,
-      use_fd_hcv = _subsample_use_fd_hcv,
+      grid_bound = grid_bound,
+      grid_curvature_bound = grid_curvature_bound,
+      linear_area_threshold = linear_area_threshold,
+      linear_min_area_gain = linear_min_area_gain,
+      lazy_low_tightness_threshold = lazy_low_tightness_threshold,
+      lazy_max_low_tightness_rejections = lazy_max_low_tightness_rejections,
+      lazy_max_rejections = lazy_max_rejections,
+      t0 = t0, T = T, t_warmup = t_warmup,
+      warmup_adaptation_interval = warmup_adaptation_interval,
       sticky = sticky, can_stick = can_stick,
-      model_prior = model_prior, parameter_prior = parameter_prior
+      model_prior = model_prior, parameter_prior = parameter_prior,
+      slab_prior = slab_prior,
+      show_progress = show_progress, n_chains = n_chains,
+      threaded = threaded, seed = seed,
+      adaptive_scheme = adaptive_scheme,
+      warmup_mode = subsampling_warmup,
+      n_anchor_updates = subsampling_anchor_updates,
+      use_anchor_bank = subsampling_use_anchor_bank,
+      anchor_bank_capacity = subsampling_anchor_bank_capacity,
+      main_anchor_refresh_distance = subsampling_main_anchor_refresh_distance,
+      support_boundary_mode = support_boundary_mode,
+      support_boundary_max_bisection_steps = support_boundary_max_bisection_steps,
+      support_boundary_time_rtol = support_boundary_time_rtol,
+      support_boundary_time_atol = support_boundary_time_atol,
+      support_boundary_clip_fraction = support_boundary_clip_fraction,
+      support_boundary_max_refresh_attempts = support_boundary_max_refresh_attempts,
+      support_boundary_refresh_probe_time = support_boundary_refresh_probe_time,
+      support_boundary_min_safe_time = support_boundary_min_safe_time
     );")
   }
   if (is.environment(result)) result <- as.list(result)
+  subsampling_context_counters <- result$subsampling_context_counters
+  if (!is.null(subsampling_context_counters)) {
+    subsampling_context_counters <- lapply(subsampling_context_counters, function(counter) {
+      if (is.environment(counter)) as.list(counter) else counter
+    })
+  }
   result <- new_pdmp_result(
     chains   = result$chains,
     stats    = result$stats,
     d        = result$d,
     n_chains = result$n_chains
   )
+  if (!is.null(subsampling)) {
+    attr(result, "subsampling") <- TRUE
+    attr(result, "subsampling_context_counters") <- subsampling_context_counters
+  }
   if (materialize) result <- .materialize(result)
   result
 }

@@ -212,6 +212,7 @@ test_that("brm_pdmp sticky validation uses formula-aware support checks", {
       writeLines(code, stan_file)
       stan_file
     },
+    make_prior_standata = function(data) data,
     write_stan_json = function(data, file, always_decimal = FALSE) {
       writeLines("{}", con = file)
     },
@@ -228,6 +229,53 @@ test_that("brm_pdmp sticky validation uses formula-aware support checks", {
     ),
     "numeric predictors only"
   )
+})
+
+test_that("brm_pdmp accepts dependent-slab AdaptiveBoomerang before Julia setup", {
+  testthat::skip_if_not_installed("brms")
+
+  df <- data.frame(y = rnorm(8), x = seq(-1, 1, length.out = 8))
+  stan_file <- tempfile(fileext = ".stan")
+  on.exit(unlink(stan_file), add = TRUE)
+  testthat::local_mocked_bindings(
+    stancode = function(...) "parameters {} model {}",
+    standata = function(...) list(Y = df$y,
+      X = cbind(1, df$x), K = 2L),
+    brm = function(..., empty = TRUE) structure(list(), class = "brmsfit"),
+    prior_summary = function(...) data.frame(
+      prior = "normal(0, 1)", class = "b", coef = "x",
+      stringsAsFactors = FALSE),
+    .package = "brms"
+  )
+  testthat::local_mocked_bindings(
+    check_for_julia_setup = function() NULL,
+    cached_stan_model = function(code) {
+      writeLines(code, stan_file)
+      stan_file
+    },
+    make_prior_standata = function(data) data,
+    write_stan_json = function(data, file, always_decimal = FALSE) {
+      writeLines("{}", con = file)
+    },
+    .pdmpsamplers_julia_call = function(name, ...) {
+      if (identical(name, "r_get_param_unc_names")) {
+        return(c("b.Intercept", "b.x"))
+      }
+      stop("SENTINEL_JULIA_CALL", call. = FALSE)
+    },
+    .pdmpsamplers_julia_eval = function(...) stop(
+      "SENTINEL_JULIA_CALL", call. = FALSE),
+    .package = "PDMPSamplersR"
+  )
+
+  expect_error(PDMPSamplersR::brm_pdmp(
+    y ~ x, data = df, flow = "AdaptiveBoomerang",
+    algorithm = "GridThinningStrategy", T = 2, t_warmup = 0.5,
+    sticky = TRUE, can_stick = c(x = TRUE),
+    model_prior = PDMPSamplersR::bernoulli(0.8),
+    slab_prior = PDMPSamplersR::dense_gaussian_slab(
+      0, matrix(1, 1, 1), coef = "b.x")),
+    "SENTINEL_JULIA_CALL")
 })
 
 # ──────────────────────────────────────────────────────────────────────────────

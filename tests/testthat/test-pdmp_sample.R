@@ -96,6 +96,21 @@ test_that("pdmp_sample rejects invalid gradient function", {
   expect_error(pdmp_sample(function(x) x[1], d = 2, flow = "ZigZag", T = 100), "length")
 })
 
+test_that("shared-node grid bounds require explicit inflation", {
+  shared <- PDMPSamplersR:::validate_pdmp_params(
+    d = 2, flow = "ZigZag", algorithm = "GridThinningStrategy", T = 10,
+    grid_bound = "shared_node", grid_curvature_bound = 2
+  )
+  expect_identical(shared$grid_bound, "shared_node")
+  expect_error(
+    PDMPSamplersR:::validate_pdmp_params(
+      d = 2, flow = "ZigZag", algorithm = "GridThinningStrategy", T = 10,
+      grid_bound = "shared_node"
+    ),
+    "grid_curvature_bound"
+  )
+})
+
 test_that("pdmp_sample forwards support-boundary diagnostics", {
   skip_on_cran()
   skip_if_no_pdmp_julia_backend()
@@ -103,15 +118,15 @@ test_that("pdmp_sample forwards support-boundary diagnostics", {
   d <- 2
   neg_grad <- function(x) {
     if (x[1] >= 1) stop("Outside support")
-    x
+    c(-1, 0)
   }
-  neg_hess <- function(x) diag(d)
+  neg_hess <- function(x) matrix(0, d, d)
 
   expect_error(
     pdmp_sample(
       neg_grad, d = d, flow = "BouncyParticle",
       algorithm = "GridThinningStrategy", T = 10,
-      x0 = c(0, 0), theta0 = c(1, 0), hessian = neg_hess,
+      x0 = c(0.999, 0), theta0 = c(1, 0), hessian = neg_hess,
       show_progress = FALSE, materialize = FALSE, seed = 42,
       support_boundary = support_boundary_control(
         mode = "line_search",
@@ -130,14 +145,14 @@ test_that("pdmp_sample accepts line_search_truncated_refresh for BPS-family flow
   d <- 2
   neg_grad <- function(x) {
     if (x[1] >= 1) stop("Outside support")
-    x
+    c(-1, 0)
   }
-  neg_hess <- function(x) diag(d)
+  neg_hess <- function(x) matrix(0, d, d)
 
   result <- pdmp_sample(
     neg_grad, d = d, flow = "BouncyParticle",
     algorithm = "GridThinningStrategy", T = 5,
-    x0 = c(0, 0), theta0 = c(1, 0), hessian = neg_hess,
+    x0 = c(0.999, 0), theta0 = c(1, 0), hessian = neg_hess,
     show_progress = FALSE, materialize = FALSE, seed = 42,
     support_boundary = support_boundary_control(
       mode = "line_search_truncated_refresh",

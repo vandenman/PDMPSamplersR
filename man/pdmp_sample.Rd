@@ -9,7 +9,9 @@ pdmp_sample(
   d,
   flow = c("ZigZag", "BouncyParticle", "Boomerang", "AdaptiveBoomerang",
     "PreconditionedZigZag", "PreconditionedBPS"),
-  algorithm = c("ThinningStrategy", "GridThinningStrategy", "RootsPoissonStrategy"),
+  algorithm = c("ThinningStrategy", "GridThinningStrategy",
+    "PositiveVariationGridThinningStrategy", "VectorVariationThinningStrategy",
+    "RootsPoissonStrategy"),
   T = 50000,
   t0 = 0,
   t_warmup = 0,
@@ -23,9 +25,18 @@ pdmp_sample(
   can_stick = NULL,
   model_prior = NULL,
   parameter_prior = NULL,
+  slab_prior = NULL,
   grid_n = 30,
   grid_t_max = 2,
+  use_fd_hvp = FALSE,
   post_warmup_simplify = FALSE,
+  grid_bound = c("constant", "flat", "linear", "auto", "value_quadratic", "shared_node"),
+  grid_curvature_bound = NULL,
+  linear_area_threshold = 0.95,
+  linear_min_area_gain = 0,
+  lazy_low_tightness_threshold = 0.1,
+  lazy_max_low_tightness_rejections = 3L,
+  lazy_max_rejections = 0L,
   show_progress = TRUE,
   n_chains = 1L,
   threaded = FALSE,
@@ -45,13 +56,17 @@ and return a numeric vector of the same length.}
 "BouncyParticle", "Boomerang", "AdaptiveBoomerang", "PreconditionedZigZag",
 or "PreconditionedBPS".
 The `"AdaptiveBoomerang"` flow learns its reference (mean and precision)
-during warmup and requires `"GridThinningStrategy"` as the algorithm.
+during warmup and requires a grid-like algorithm. It is supported with
+dependent slabs when `GridThinningStrategy` is selected; provide positive
+`t_warmup`, or let the sampler choose its 20% default.
 The `"PreconditionedZigZag"` and `"PreconditionedBPS"` flows learn a
 diagonal preconditioner during warmup and also require
-`"GridThinningStrategy"` as the algorithm.}
+a grid-like algorithm.}
 
 \item{algorithm}{Character string specifying the algorithm. One of
-"ThinningStrategy", "GridThinningStrategy", or "RootsPoissonStrategy".}
+"ThinningStrategy", "GridThinningStrategy",
+"PositiveVariationGridThinningStrategy", "VectorVariationThinningStrategy",
+or "RootsPoissonStrategy".}
 
 \item{T}{Numeric, total sampling time (default: 50000).}
 
@@ -76,18 +91,56 @@ Only used with GridThinningStrategy to compute the Hessian-vector product.}
 
 \item{can_stick}{Logical vector of length d, which coordinates can stick (default: all FALSE).}
 
-\item{model_prior}{Prior distribution object for model selection. Should be of class
-'bernoulli' or 'beta-bernoulli' (default: NULL).}
+\item{model_prior}{Prior distribution object for model selection. Legacy
+sticky sampling accepts \code{bernoulli()} or \code{betabernoulli()}.
+Dependent-slab sampling also accepts \code{exchangeable_model_size_prior()}.}
 
 \item{parameter_prior}{Numeric vector of length d, prior parameters for sticky sampling (default: NULL).}
+
+\item{slab_prior}{Optional dependent slab prior created by
+\code{dense_gaussian_slab()}, \code{exchangeable_gaussian_slab()},
+\code{independent_slab_density()}, \code{gaussian_scale_mixture_slab()},
+or \code{arbitrary_slab_boundary()}. Mutually exclusive with
+\code{parameter_prior}. The full target supplied through \code{f} must
+contain the complete coherent slab represented by \code{slab_prior}; the
+package replaces that slab by its active-face restriction internally.}
 
 \item{grid_n}{Integer, number of grid points for GridThinningStrategy (default: 30).}
 
 \item{grid_t_max}{Numeric, maximum time for grid in GridThinningStrategy (default: 2.0).}
 
+\item{use_fd_hvp}{Logical compatibility switch selecting finite-difference
+curvature when no exact Hessian-vector product is used.}
+
 \item{post_warmup_simplify}{Logical. If \code{TRUE}, the grid-thinning
 strategy may switch to a constant bound after warmup, reducing
 gradient calls during the main sampling phase.}
+
+\item{grid_bound}{Character string selecting the GridThinning proposal
+envelope. \code{"constant"} preserves the historical behavior.
+\code{"flat"}, \code{"linear"}, and \code{"auto"} expose signed-rate
+affine envelope machinery when supported by the chosen flow and derivative
+provider. \code{"shared_node"} is an experimental numerical clock using
+consecutive rate nodes and secant-disagreement inflation; it is not a
+mathematically certified thinning envelope.}
+
+\item{grid_curvature_bound}{Optional nonnegative curvature bound required by
+the experimental `"shared_node"` grid bound.}
+
+\item{linear_area_threshold}{Numeric gate for \code{grid_bound = "linear"}
+or \code{"auto"}; affine cells are skipped when their relative area gain is
+too small.}
+
+\item{linear_min_area_gain}{Numeric absolute area-gain gate for affine cells.}
+
+\item{lazy_low_tightness_threshold}{Nonnegative threshold used by lazy grid
+refinement diagnostics.}
+
+\item{lazy_max_low_tightness_rejections}{Nonnegative number of consecutive
+low-tightness rejections allowed before refinement.}
+
+\item{lazy_max_rejections}{Nonnegative total lazy-rejection limit; zero uses
+the package default behavior.}
 
 \item{show_progress}{Logical, whether to show progress bar (default: TRUE).}
 

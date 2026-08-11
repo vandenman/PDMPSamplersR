@@ -45,3 +45,32 @@ betabernoulli <- function(a = 1, b = 1) {
 is.betabernoulli <- function(x) {
   inherits(x, "beta-bernoulli")
 }
+
+#' Create an exchangeable model-size prior
+#'
+#' Specifies prior probabilities for model sizes \eqn{0, \ldots, p}. The
+#' resulting prior is exchangeable within each model size: all models with the
+#' same number of included coefficients receive equal prior mass.
+#'
+#' @param omega Numeric vector of positive prior probabilities or unnormalised
+#'   weights for model sizes \eqn{0, \ldots, p}.
+#'
+#' @returns An object of class \code{"exchangeable-model-size-prior"}.
+#'
+#' @export
+exchangeable_model_size_prior <- function(omega) {
+  validate_type(omega, type = "double", positive = TRUE)
+  if (length(omega) < 2L) {
+    cli::cli_abort("Argument {.arg omega} must contain probabilities for model sizes 0:p.")
+  }
+  omega <- omega / sum(omega)
+  structure(list(omega = omega), class = "exchangeable-model-size-prior")
+}
+
+is.exchangeable_model_size_prior <- function(x) {
+  inherits(x, "exchangeable-model-size-prior")
+}
+
+is.model_prior <- function(x) {
+  is.bernoulli(x) || is.betabernoulli(x) || is.exchangeable_model_size_prior(x)
+}

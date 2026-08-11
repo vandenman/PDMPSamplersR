@@ -9,8 +9,6 @@ brm_standata(
   data,
   family = gaussian(),
   prior = NULL,
-  subsample_size = NULL,
-  indices = NULL,
   stanvars = NULL,
   sample_prior = "no",
   ...
@@ -25,16 +23,6 @@ brm_standata(
 
 \item{prior}{A `brmsprior` object or NULL for default priors.}
 
-\item{subsample_size}{Integer number of observations per subsample,
-or NULL (default) for full-data gradients. When non-NULL, a
-BridgeStan control-variate subsampled gradient is used. Must be
-less than `nrow(data)`. Fixed-effects and random-effects models are
-supported for subsampling.}
-
-\item{indices}{Optional integer vector of observation indices for
-the initial subsample. If NULL (default), a random sample of
-size `subsample_size` is drawn.}
-
 \item{stanvars}{Optional `stanvar` object for custom Stan code.}
 
 \item{sample_prior}{Currently only `"no"` is supported.}
@@ -42,17 +30,9 @@ size `subsample_size` is drawn.}
 \item{...}{Additional arguments passed to [brms::brm()] for model setup.}
 }
 \value{
-A list (Stan data) when `subsample_size` is NULL, or a
-  named list with elements `full`, `prior`, and `subsample`.
+A named list containing the generated Stan data.
 }
 \description{
-Returns the Stan data that [brm_pdmp()] would pass to BridgeStan,
-after any subsampling modifications. Without `subsample_size`, this
-is identical to `brms::standata()`. With `subsample_size`, returns
-a named list with three elements:
-\describe{
-  \item{full}{Full dataset.}
-  \item{prior}{Prior-only dummy data (`N=1`, `prior_only=1`).}
-  \item{subsample}{An initial subsample of `subsample_size` rows.}
-}
+This is a thin wrapper around [brms::standata()]. Observation subsampling derives
+its deterministic and family geometry from this ordinary standata object.
 }

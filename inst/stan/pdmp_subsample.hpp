@@ -1,8 +1,8 @@
 #ifndef PDMP_SUBSAMPLE_HPP
 #define PDMP_SUBSAMPLE_HPP
 
+#include <ostream>
 #include <vector>
-#include <stan/math/prim/fun/Eigen.hpp>
 
 #ifdef _WIN32
 #define PDMP_EXPORT __declspec(dllexport)
@@ -11,81 +11,37 @@
 #endif
 
 namespace pdmp_subsample {
-    static std::vector<int> indices_;
-    static int m_ = 0;
-    static Eigen::MatrixXd Xc_buf_;
-    static Eigen::VectorXd Y_real_buf_;
-    static std::vector<int> Y_int_buf_;
+thread_local std::vector<int> indices;
 }
 
 extern "C" {
-    PDMP_EXPORT void pdmp_set_subsample_indices(const int* idx, int new_m) {
-        pdmp_subsample::indices_.assign(idx, idx + new_m);
-        pdmp_subsample::m_ = new_m;
-    }
-
-    PDMP_EXPORT int pdmp_get_subsample_size() {
-        return pdmp_subsample::m_;
-    }
+PDMP_EXPORT void pdmp_set_subsample_indices(const int* idx, int size) {
+  if (size < 0) return;
+  pdmp_subsample::indices.assign(idx, idx + size);
 }
 
-inline int pdmp_get_subsample_size(std::ostream* pstream__) {
-    return pdmp_subsample::m_;
+PDMP_EXPORT void pdmp_clear_subsample_indices() {
+  pdmp_subsample::indices.clear();
 }
 
-inline int pdmp_get_subsample_index(int n, std::ostream* pstream__) {
-    return pdmp_subsample::indices_[n - 1] + 1;
+PDMP_EXPORT int pdmp_get_subsample_size() {
+  return static_cast<int>(pdmp_subsample::indices.size());
 }
 
-template <typename T>
-inline const Eigen::VectorXd& get_subsampled_Y_real(const T& Y_full, std::ostream* pstream__) {
-    int m = pdmp_subsample::m_;
-    pdmp_subsample::Y_real_buf_.resize(m);
-    for (int i = 0; i < m; ++i) {
-        pdmp_subsample::Y_real_buf_(i) = Y_full(pdmp_subsample::indices_[i]);
-    }
-    return pdmp_subsample::Y_real_buf_;
+// C-facing getter uses zero-based n and returns the stored zero-based index.
+PDMP_EXPORT int pdmp_get_subsample_index(int n) {
+  if (n < 0 || n >= static_cast<int>(pdmp_subsample::indices.size())) return -1;
+  return pdmp_subsample::indices[static_cast<std::size_t>(n)];
+}
 }
 
-template <typename T>
-inline const std::vector<int>& get_subsampled_Y_int(const T& Y_full, std::ostream* pstream__) {
-    int m = pdmp_subsample::m_;
-    pdmp_subsample::Y_int_buf_.resize(m);
-    for (int i = 0; i < m; ++i) {
-        pdmp_subsample::Y_int_buf_[i] = Y_full[pdmp_subsample::indices_[i]];
-    }
-    return pdmp_subsample::Y_int_buf_;
+// Stan external functions use one-based n and require one-based data indices.
+inline int pdmp_get_subsample_size(std::ostream*) {
+  return pdmp_get_subsample_size();
 }
 
-template <typename T>
-inline const Eigen::MatrixXd& get_subsampled_Xc(const T& Xc_full, std::ostream* pstream__) {
-    int m = pdmp_subsample::m_;
-    int p = Xc_full.cols();
-    pdmp_subsample::Xc_buf_.resize(m, p);
-    for (int i = 0; i < m; ++i) {
-        pdmp_subsample::Xc_buf_.row(i) = Xc_full.row(pdmp_subsample::indices_[i]);
-    }
-    return pdmp_subsample::Xc_buf_;
-}
-
-template <typename T>
-inline auto get_subsampled_vector(const T& v_full, std::ostream* pstream__) {
-    int m = pdmp_subsample::m_;
-    Eigen::Matrix<typename T::Scalar, Eigen::Dynamic, 1> v_sub(m);
-    for (int i = 0; i < m; ++i) {
-        v_sub(i) = v_full(pdmp_subsample::indices_[i]);
-    }
-    return v_sub;
-}
-
-inline std::vector<int> get_subsampled_int_array(const std::vector<int>& arr,
-                                                  std::ostream* pstream__) {
-    int m = pdmp_subsample::m_;
-    std::vector<int> result(m);
-    for (int i = 0; i < m; ++i) {
-        result[i] = arr[pdmp_subsample::indices_[i]];
-    }
-    return result;
+inline int pdmp_get_subsample_index(int n, std::ostream*) {
+  return pdmp_get_subsample_index(n - 1) + 1;
 }
 
 #endif

@@ -1,57 +1,3 @@
-random_effect_subsampling_diagnostics <- function(sdata, subsample_size) {
-  N <- sdata$N %||% 0L
-  if (!is.numeric(subsample_size) || length(subsample_size) != 1L ||
-      !is.numeric(N) || length(N) != 1L || subsample_size <= 0L || subsample_size >= N) {
-    return(data.frame())
-  }
-
-  z_names <- grep("^Z_[0-9]+_[0-9]+$", names(sdata), value = TRUE)
-  if (length(z_names) == 0L) return(data.frame())
-
-  out <- lapply(z_names, function(name) {
-    Z <- sdata[[name]]
-    if (!is.matrix(Z) || nrow(Z) != N || ncol(Z) == 0L) return(NULL)
-
-    support <- colSums(abs(Z) > 0)
-    support <- support[is.finite(support) & support > 0]
-    if (length(support) == 0L) return(NULL)
-
-    min_support <- min(support)
-    data.frame(
-      block = name,
-      n_columns = ncol(Z),
-      min_support = min_support,
-      expected_support = subsample_size * min_support / N,
-      p_zero = stats::dhyper(0L, min_support, N - min_support, subsample_size)
-    )
-  })
-
-  out <- Filter(Negate(is.null), out)
-  if (length(out) == 0L) return(data.frame())
-  do.call(rbind, out)
-}
-
-warn_if_low_random_effect_subsampling_support <- function(sdata, subsample_size) {
-  diag <- random_effect_subsampling_diagnostics(sdata, subsample_size)
-  if (!nrow(diag)) return(invisible(NULL))
-
-  worst_idx <- which.min(diag$expected_support)
-  worst <- diag[worst_idx, , drop = FALSE]
-  if (worst$expected_support[[1]] >= 5 && worst$p_zero[[1]] <= 0.01) {
-    return(invisible(NULL))
-  }
-
-  cli::cli_warn(c(
-    "Subsampled random-effects gradients may be unstable for this model.",
-    "x" = "The sparsest random-effects design block {.code {worst$block[[1]]}} has minimum support {worst$min_support[[1]]} observations per coefficient in the full data, but only an expected {formatC(worst$expected_support[[1]], digits = 2, format = 'f')} observations per minibatch at {.arg subsample_size} = {subsample_size}.",
-    "i" = "A coefficient in that block is absent from a minibatch with probability about {formatC(worst$p_zero[[1]], digits = 3, format = 'f')}.",
-    "i" = "This mainly affects group-level parameters: fixed effects can look stable while random effects still drift.",
-    "i" = "Consider increasing {.arg subsample_size} or using full-data gradients for hierarchical models."
-  ))
-
-  invisible(NULL)
-}
-
 #' Fit a brms model using PDMP samplers
 #'
 #' Uses PDMPSamplers.jl as a sampling backend for brms models.
@@ -64,15 +10,21 @@ warn_if_low_random_effect_subsampling_support <- function(sdata, subsample_size)
 #' @param prior A `brmsprior` object or NULL for default priors.
 #' @param flow Character string specifying the PDMP flow type.
 #' @param algorithm Character string specifying the Poisson time strategy.
-#' @param adaptive_scheme Character string for preconditioner adaptation.
+#' @param adaptive_scheme Character string for AdaptiveBoomerang covariance
+#'   adaptation: `"diagonal"`, `"fullrank"`, or `"lowrank"`.
 #' @param T Numeric total simulation time.
 #' @param t0 Numeric start time.
 #' @param t_warmup Numeric warmup duration. Auto-set for adaptive flows.
 #'    When subsampling is active and `t_warmup` is 0, it is automatically
 #'   set to 20\% of the sampling time.
-#' @param flow_mean Numeric vector for the flow reference mean, or NULL.
+#' @param flow_mean Numeric vector for the flow reference mean, or NULL. For
+#'   observation subsampling this is also the fixed control-variate anchor and
+#'   initial position; supplying a posterior mode or other representative point
+#'   can materially tighten the residual envelope.
 #' @param flow_cov Numeric matrix for the flow covariance, or NULL.
-#' @param c0 Numeric thinning bound constant.
+#' @param c0 Numeric thinning bound constant. With `ThinningStrategy` this
+#'   user-configured bound must dominate the deterministic subsampling component;
+#'   violations are detected and stop the sampler.
 #' @param grid_n Integer number of grid points for GridThinningStrategy.
 #' @param grid_t_max Numeric max grid interval for GridThinningStrategy.
 #' @param show_progress Logical; show sampling progress bar.
@@ -87,27 +39,34 @@ warn_if_low_random_effect_subsampling_support <- function(sdata, subsample_size)
 #'   for each sample (default: FALSE). Adds overhead but enables
 #'   `bridge_sampler()` and populates the `lp__` diagnostic column.
 #' @param subsample_size Integer number of observations per subsample,
-#'   or NULL (default) for full-data gradients. When non-NULL, a
-#'   BridgeStan control-variate subsampled gradient is used. Must be
-#'   less than `nrow(data)`. Fixed-effects and random-effects models are
-#'   supported for subsampling.
+#'   or NULL (default) for full-data gradients. With `GridThinningStrategy`
+#'   or a representable `ThinningStrategy` envelope,
+#'   subsampling acceleration is selected automatically when affine predictor,
+#'   first-batch likelihood, and trajectory providers are all available for
+#'   the requested dynamics. Ineligible models use exact full gradients.
 #' @param n_anchor_updates Integer number of anchor updates during warmup
-#'   (default: 10). Only used when `subsample_size` is non-NULL.
-#' @param resample_dt Numeric time step for resampling, or NULL (default)
-#'   for no resampling. Only used when `subsample_size` is non-NULL.
-#' @param hvp_mode Character string controlling Hessian-vector product
-#'   scaling in subsampled gradients. One of `"scaled"` (default) or
-#'   `"none"`.
-#' @param use_hcv Logical; enable damped Hessian control variate (HCV)
-#'   correction for subsampled gradients (default: FALSE). Requires
-#'   `subsample_size` to be set. Adds a second-order correction that
-#'   reduces gradient variance near the anchor.
-#' @param use_anchor_bank Logical; enable anchor bank with LRU eviction
-#'   for subsampled gradients (default: FALSE). Requires `subsample_size`
-#'   to be set. Maintains multiple cached anchor points and selects the
-#'   nearest one at each trajectory step.
+#'   (default: 0). For analytic subsampling sampling, each update prepares a
+#'   coherent anchor state containing the full and deterministic anchor
+#'   gradients, cached likelihood predictors, and residual envelope.
+#' @param use_hcv Logical; enable the certified analytic damped Hessian
+#'   control variate for subsampling affine Bernoulli-logit or binomial-logit
+#'   sampling (default: FALSE). Its likelihood Hessian and Taylor-remainder
+#'   envelope are prepared with each anchor, with Cauchy damping
+#'   `d / (d + ||x - anchor||^2)` in `d` unconstrained dimensions;
+#'   finite-difference HCV is not used.
+#' @param use_anchor_bank Logical; retain prepared warmup anchors and select
+#'   the nearest one at event boundaries (default: FALSE). Selection is
+#'   chain-local and performs no full-data gradient or envelope rebuild.
+#'   Requires `n_anchor_updates > 0`; use only `n_anchor_updates` for the
+#'   lower-memory single-anchor update mode.
 #' @param bank_capacity Integer capacity of the anchor bank (default: 20).
-#'   Only used when `use_anchor_bank` is TRUE.
+#'   Least-recently-used entries are replaced during warmup. Each populated
+#'   entry stores predictor and kernel caches of order `N * K` plus a complete
+#'   residual envelope of order `N * R`; memory therefore grows linearly in
+#'   the populated capacity and can be substantial for large `N` or many
+#'   growth-envelope components. Benchmark representative models before using
+#'   a large capacity. Analytic HCV additionally stores one dense `d * d`
+#'   likelihood Hessian per populated anchor.
 #' @param use_fd_hvp Logical; use finite-difference directional curvature
 #'   instead of BridgeStan's Hessian-vector product (default: FALSE).
 #'   Replaces each HVP call (2-3x gradient cost) with one extra gradient
@@ -116,25 +75,32 @@ warn_if_low_random_effect_subsampling_support <- function(sdata, subsample_size)
 #'   thinning mode after warmup when the sampler is well-adapted
 #'   (default: FALSE). Activates when the reflection ratio is below 30\%
 #'   and at least 10 events have been observed.
-#' @param use_fd_hcv Logical; use finite-difference approximation for the
-#'   HVP inside the HCV correction (default: FALSE). Replaces the exact
-#'   BridgeStan HVP at the anchor with a cheaper gradient-based FD
-#'   approximation. Also disables HVP for grid thinning. Only used when
-#'   `use_hcv` is TRUE.
 #' @param sticky Logical; enable spike-and-slab variable selection for
 #'   population-level coefficients (default: FALSE). Requires
-#'   `model_prior` to be set.
+#'   `model_prior` to be set. Sticky transitions redraw the complete velocity
+#'   from the exact law on each active coordinate stratum; no pre-freeze
+#'   velocity is restored. This applies to every supported dynamics, including
+#'   dense-preconditioned Zig-Zag.
 #' @param can_stick Optional logical vector indicating which non-intercept
 #'   population-level coefficients are candidates for selection. Length
 #'   must match the number of supported coefficients. If omitted, all
 #'   non-intercept population-level coefficients are candidates.
-#' @param model_prior A [bernoulli()] or [betabernoulli()] object
-#'   specifying the prior on model space. Required when `sticky = TRUE`.
+#' @param model_prior A [bernoulli()] or [betabernoulli()] object specifying
+#'   the prior on model space. Dependent slabs also accept
+#'   [exchangeable_model_size_prior()].
 #' @param kappa Optional numeric vector of slab densities at zero for each
-#'   stickable coordinate (κ in the sticky PDMP literature). If omitted,
+#'   stickable coordinate (kappa in the sticky PDMP literature). If omitted,
 #'   derived automatically from the brms prior specification (only
 #'   `normal(0, s)` and `student_t(df, 0, s)` are supported for automatic
 #'   derivation).
+#' @param slab_prior Optional dependent slab prior created by
+#'   [dense_gaussian_slab()], [exchangeable_gaussian_slab()],
+#'   [independent_slab_density()], [gaussian_scale_mixture_slab()], or
+#'   [arbitrary_slab_boundary()]. Mutually exclusive with `kappa`. Full-data
+#'   dependent slabs use the brms prior-only data as the base prior target;
+#'   subsampled brms dependent slabs are not yet supported. Adaptive Boomerang
+#'   is supported with `GridThinningStrategy` and requires positive warmup
+#'   (automatically set to one fifth of the sampling time when omitted).
 #' @param stanvars Optional `stanvar` object for custom Stan code.
 #' @param sample_prior Currently only `"no"` is supported.
 #' @param save_model Optional file path to save the generated Stan code.
@@ -156,20 +122,32 @@ warn_if_low_random_effect_subsampling_support <- function(sdata, subsample_size)
 #' With a single chain, `Rhat` will report `NA`. Use `n_chains >= 2`
 #' for convergence diagnostics.
 #'
-#' When `subsample_size` is specified, the function uses BridgeStan
-#' data-swapping to compute control-variate subsampled gradients. A
-#' centering fix is applied to the brms-generated Stan code so that
-#' predictor centering remains consistent across subsamples.
+#' Subsampling acceleration is enabled when the model has certified affine predictor,
+#' likelihood, and dynamics providers. The first provider batch covers weighted
+#' and subsetted Bernoulli/binomial logit models, categorical/multinomial logit,
+#' Poisson log models (including `rate()`), and Gaussian location-scale models
+#' (including known `se()` values and affine sigma predictors). Independent
+#' affine multivariate Bernoulli responses are also supported. Unknown geometry
+#' falls back to the exact full-gradient sampler. Priors, Jacobians, and
+#' unconditional custom target additions remain in an opaque deterministic
+#' BridgeStan provider.
+#'
+#' PDMPSamplers.jl applies `N / m`, draws a fresh subsampling subset per proposal,
+#' uses dynamics-specific linear or harmonic trajectory bounds, and reuses the
+#' accepted stochastic gradient for the event. Observation subsampling supports
+#' `GridThinningStrategy` generally and `ThinningStrategy` when the residual
+#' envelope has an affine global roof (or the trajectory is periodic).
 #'
 #' @export
 brm_pdmp <- function(
     formula, data, family = gaussian(),
     prior = NULL,
     flow = c("ZigZag", "BouncyParticle", "Boomerang",
-             "AdaptiveBoomerang", "PreconditionedZigZag", "PreconditionedBPS"),
+             "AdaptiveBoomerang", "PreconditionedZigZag", "PreconditionedBPS",
+             "DensePreconditionedZigZag", "DensePreconditionedBPS"),
     algorithm = c("GridThinningStrategy", "ThinningStrategy",
                   "RootsPoissonStrategy"),
-    adaptive_scheme = c("diagonal", "fullrank"),
+    adaptive_scheme = c("diagonal", "fullrank", "lowrank"),
     T = 50000, t0 = 0.0, t_warmup = 0.0,
     flow_mean = NULL, flow_cov = NULL, c0 = 1e-2,
     grid_n = 30, grid_t_max = 2.0,
@@ -178,17 +156,14 @@ brm_pdmp <- function(
     n_chains = 1L, threaded = FALSE, seed = NULL,
     compute_lp = FALSE,
     subsample_size = NULL,
-    n_anchor_updates = 10L,
-    resample_dt = NULL,
-    hvp_mode = c("scaled", "none"),
+    n_anchor_updates = 0L,
     use_hcv = FALSE,
     use_anchor_bank = FALSE,
     bank_capacity = 20L,
     use_fd_hvp = FALSE,
     post_warmup_simplify = FALSE,
-    use_fd_hcv = FALSE,
     sticky = FALSE, can_stick = NULL, model_prior = NULL,
-    kappa = NULL,
+    kappa = NULL, slab_prior = NULL,
     stanvars = NULL, sample_prior = "no",
     save_model = NULL,
     ...
@@ -204,7 +179,14 @@ brm_pdmp <- function(
   flow <- match.arg(flow)
   algorithm <- match.arg(algorithm)
   adaptive_scheme <- match.arg(adaptive_scheme)
-  hvp_mode <- match.arg(hvp_mode)
+  if (!is.null(slab_prior)) {
+    if (!isTRUE(sticky)) {
+      cli::cli_abort("Argument {.arg slab_prior} requires {.arg sticky} to be {.code TRUE}.")
+    }
+    if (algorithm != "GridThinningStrategy") {
+      cli::cli_abort("Dependent {.arg slab_prior} sticky sampling currently requires {.val GridThinningStrategy}.")
+    }
+  }
   if (!is.null(seed)) {
     if (!rlang::is_integerish(seed, n = 1)) {
       cli::cli_abort("Argument {.arg seed} must be NULL or an integerish scalar.")
@@ -215,17 +197,35 @@ brm_pdmp <- function(
     }
   }
   subsampled <- !is.null(subsample_size)
+  requested_t_warmup <- t_warmup
+  if (subsampled && !is.null(slab_prior)) {
+    cli::cli_abort("Dependent {.arg slab_prior} is not yet supported together with {.arg subsample_size}.")
+  }
   N <- nrow(data)
 
   if (!subsampled && (use_hcv || use_anchor_bank))
     cli::cli_abort("{.arg use_hcv} and {.arg use_anchor_bank} require {.arg subsample_size} to be set.")
 
   if (subsampled) {
-    bank_capacity <- as.integer(bank_capacity)
+    if (!rlang::is_integerish(subsample_size, n = 1L, finite = TRUE) ||
+        subsample_size <= 0)
+      cli::cli_abort("{.arg subsample_size} must be a positive integerish scalar.")
+    if (!rlang::is_integerish(bank_capacity, n = 1L, finite = TRUE) ||
+        bank_capacity <= 0)
+      cli::cli_abort("{.arg bank_capacity} must be a positive integer.")
+    if (!rlang::is_integerish(n_anchor_updates, n = 1L, finite = TRUE) ||
+        n_anchor_updates < 0)
+      cli::cli_abort("{.arg n_anchor_updates} must be a non-negative integer.")
     subsample_size <- as.integer(subsample_size)
+    bank_capacity <- as.integer(bank_capacity)
+    n_anchor_updates <- as.integer(n_anchor_updates)
     if (subsample_size >= N)
       cli::cli_abort("{.arg subsample_size} ({subsample_size}) must be less than {.code nrow(data)} ({N}).")
-    n_anchor_updates <- as.integer(n_anchor_updates)
+    if (isTRUE(use_anchor_bank) && n_anchor_updates == 0L)
+      cli::cli_abort(paste0(
+        "{.arg use_anchor_bank} requires a positive {.arg n_anchor_updates}; ",
+        "otherwise no additional anchors can be prepared."
+      ))
     if (t_warmup == 0) {
       t_warmup <- (T - t0) / 5
       cli::cli_inform("Setting {.arg t_warmup} to {t_warmup} (20% of sampling time) for subsampled gradients.")
@@ -233,16 +233,17 @@ brm_pdmp <- function(
   }
 
   if (flow == "AdaptiveBoomerang") {
-    if (algorithm != "GridThinningStrategy")
-      cli::cli_abort("{.val AdaptiveBoomerang} requires {.val GridThinningStrategy} as the algorithm.")
+    if (!algorithm %in% c("GridThinningStrategy", "ThinningStrategy"))
+      cli::cli_abort("{.val AdaptiveBoomerang} requires a thinning algorithm with a certified trajectory bound.")
     if (t_warmup == 0) {
       t_warmup <- (T - t0) / 5
       cli::cli_inform("Setting {.arg t_warmup} to {t_warmup} (20% of sampling time) for {.val AdaptiveBoomerang}.")
     }
   }
-  if (flow %in% c("PreconditionedZigZag", "PreconditionedBPS")) {
-    if (algorithm != "GridThinningStrategy")
-      cli::cli_abort("{.val {flow}} requires {.val GridThinningStrategy} as the algorithm.")
+  if (flow %in% c("PreconditionedZigZag", "PreconditionedBPS",
+                  "DensePreconditionedZigZag", "DensePreconditionedBPS")) {
+    if (!algorithm %in% c("GridThinningStrategy", "ThinningStrategy"))
+      cli::cli_abort("{.val {flow}} requires a thinning algorithm with a certified trajectory bound.")
     if (t_warmup == 0) {
       t_warmup <- (T - t0) / 5
       cli::cli_inform("Setting {.arg t_warmup} to {t_warmup} (20% of sampling time) for {.val {flow}}.")
@@ -259,15 +260,75 @@ brm_pdmp <- function(
                           sample_prior = sample_prior, ...)
 
   if (subsampled) {
-    warn_if_low_random_effect_subsampling_support(sdata, subsample_size)
+    eligibility <- subsampling_eligibility(formula, family, stanvars, sdata)
+    runtime_supported <- flow %in% c(
+      "BouncyParticle", "ZigZag", "PreconditionedBPS",
+      "PreconditionedZigZag", "DensePreconditionedBPS",
+      "DensePreconditionedZigZag", "Boomerang", "AdaptiveBoomerang"
+    ) && algorithm %in% c("GridThinningStrategy", "ThinningStrategy")
+    periodic_flow <- flow %in% c("Boomerang", "AdaptiveBoomerang")
+    affine_thinning_envelope <- isTRUE(eligibility$eligible) &&
+      !identical(eligibility$family, "poisson")
+    if (identical(algorithm, "ThinningStrategy") && isTRUE(eligibility$eligible) &&
+        !periodic_flow && !affine_thinning_envelope) {
+      runtime_supported <- FALSE
+      eligibility <- list(
+        eligible = FALSE,
+        reason = paste0(
+          "ThinningStrategy has only an affine global clock, which cannot dominate ",
+          "this model's exponentially growing residual envelope on a linear trajectory; ",
+          "use GridThinningStrategy"
+        )
+      )
+    }
+    if (!runtime_supported) {
+      if (isTRUE(eligibility$eligible)) {
+        eligibility <- list(
+          eligible = FALSE,
+          reason = paste0(
+            "the subsampling fast path requires a dynamics trajectory provider and ",
+            "GridThinningStrategy or ThinningStrategy"
+          )
+        )
+      }
+    }
+    if (!isTRUE(eligibility$eligible)) {
+      cli::cli_inform(c(
+        "Subsampling is not eligible for this model; using the full-gradient sampler.",
+        "i" = eligibility$reason
+      ))
+      subsampled <- FALSE
+      use_hcv <- FALSE
+      use_anchor_bank <- FALSE
+      if (!flow %in% c("AdaptiveBoomerang", "PreconditionedZigZag",
+                       "PreconditionedBPS", "DensePreconditionedZigZag",
+                       "DensePreconditionedBPS")) {
+        t_warmup <- requested_t_warmup
+      }
+    } else {
+      N <- as.integer(sdata$N)
+      if (subsample_size >= N) {
+        cli::cli_abort(paste0(
+          "subsample_size (", subsample_size,
+          ") must be smaller than the number of included observations (", N,
+          ") after applying subset() modifiers."
+        ))
+      }
+      if (isTRUE(use_hcv) && !eligibility$family %in% c("bernoulli", "binomial")) {
+        cli::cli_abort(paste0(
+          "The analytic subsampling HCV currently requires an affine Bernoulli-logit ",
+          "or binomial-logit likelihood."
+        ))
+      }
+    }
   }
 
-  if (subsampled) {
-    scode_ext <- make_ext_cpp_stancode(scode, formula, data, family,
-                                       prior, stanvars, sample_prior, ...)
-    Y_full <- as.numeric(sdata$Y)
-    X_full <- sdata$X
-    sdata_prior <- make_prior_standata(sdata)
+  if (subsampled || !is.null(slab_prior)) {
+    sdata_prior <- if (subsampled) {
+      make_opaque_deterministic_standata(sdata)
+    } else {
+      make_prior_standata(sdata)
+    }
   }
 
   empty_fit <- brms::brm(formula, data = data, family = family,
@@ -278,14 +339,68 @@ brm_pdmp <- function(
   stan_file <- cached_stan_model(scode)
 
   if (subsampled) {
-    stan_file_ext <- cached_stan_model(scode_ext)
     data_full_file <- tempfile(fileext = ".json")
     write_stan_json(sdata, data_full_file)
     data_prior_file <- tempfile(fileext = ".json")
     write_stan_json(sdata_prior, data_prior_file)
+    geometry_error <- NULL
+    tryCatch({
+      subsampling_unc_names <- .pdmpsamplers_julia_call(
+        "r_get_param_unc_names",
+        normalizePath(stan_file, mustWork = TRUE),
+        normalizePath(data_full_file, mustWork = TRUE)
+      )
+      subsampling_geometry <- build_subsampling_predictor_geometry(
+        sdata, subsampling_unc_names, eligibility
+      )
+      subsampling_multipliers <- subsampling_observation_multipliers(
+        sdata, eligibility$family
+      )
+    }, error = function(e) geometry_error <<- conditionMessage(e))
+    if (!is.null(geometry_error)) {
+      cli::cli_inform(c(
+        "The affine subsampling geometry could not be certified; using the exact full-gradient sampler.",
+        "i" = geometry_error
+      ))
+      subsampled <- FALSE
+      use_hcv <- FALSE
+      use_anchor_bank <- FALSE
+      if (!flow %in% c("AdaptiveBoomerang", "PreconditionedZigZag",
+                       "PreconditionedBPS", "DensePreconditionedZigZag",
+                       "DensePreconditionedBPS")) {
+        t_warmup <- requested_t_warmup
+      }
+      data_file <- tempfile(fileext = ".json")
+      write_stan_json(sdata, data_file)
+    } else if (identical(algorithm, "ThinningStrategy") &&
+               !flow %in% c("Boomerang", "AdaptiveBoomerang") &&
+               identical(eligibility$family, "gaussian") &&
+               length(subsampling_geometry$designs) > 1L) {
+      cli::cli_inform(c(
+        "Subsampling is not eligible for this model; using the full-gradient sampler.",
+        "i" = paste0(
+          "ThinningStrategy has only an affine global clock, which cannot dominate ",
+          "a distributional Gaussian residual envelope on a linear trajectory; ",
+          "use GridThinningStrategy"
+        )
+      ))
+      subsampled <- FALSE
+      use_hcv <- FALSE
+      use_anchor_bank <- FALSE
+      if (!flow %in% c("PreconditionedZigZag", "PreconditionedBPS",
+                       "DensePreconditionedZigZag", "DensePreconditionedBPS")) {
+        t_warmup <- requested_t_warmup
+      }
+      data_file <- tempfile(fileext = ".json")
+      write_stan_json(sdata, data_file)
+    }
   } else {
     data_file <- tempfile(fileext = ".json")
     write_stan_json(sdata, data_file)
+    if (!is.null(slab_prior)) {
+      data_prior_file <- tempfile(fileext = ".json")
+      write_stan_json(sdata_prior, data_prior_file)
+    }
   }
 
   if (!is.null(save_model))
@@ -295,7 +410,6 @@ brm_pdmp <- function(
   jl_flow_mean <- if (is.null(flow_mean)) numeric(0) else flow_mean
   jl_flow_cov  <- if (is.null(flow_cov)) matrix(numeric(0), nrow = 0, ncol = 0) else flow_cov
   jl_discretize_dt <- if (is.null(discretize_dt)) 0.0 else discretize_dt
-  jl_resample_dt <- if (is.null(resample_dt)) 0.0 else resample_dt
 
   # Validate sticky arguments (requires param_unc_names from BridgeStan)
   if (isTRUE(sticky)) {
@@ -313,26 +427,59 @@ brm_pdmp <- function(
       normalizePath(stan_file, mustWork = TRUE),
       normalizePath(data_for_names, mustWork = TRUE)
     )
-    sticky_args <- validate_brms_sticky(
-      sticky, can_stick, model_prior, kappa,
-      d = length(unc_names), unc_names = unc_names,
-      supported_coef_names = supported_coef_names,
-      prior = brms_prior, subsampled = subsampled
-    )
+    if (!is.null(slab_prior)) {
+      if (!is.null(kappa)) {
+        cli::cli_abort("Use either legacy {.arg kappa} or dependent {.arg slab_prior}, not both.")
+      }
+      if (!is.slab_prior(slab_prior)) {
+        cli::cli_abort("Argument {.arg slab_prior} must be created by a dependent slab constructor.")
+      }
+      if (is.null(model_prior) || !is.model_prior(model_prior)) {
+        cli::cli_abort("Argument {.arg model_prior} must be provided when {.arg sticky} is {.code TRUE}.")
+      }
+      can_stick_full <- map_can_stick(
+        unc_names,
+        supported_coef_names = supported_coef_names,
+        user_can_stick = can_stick
+      )
+      .validate_slab_prior_dimensions(slab_prior, length(unc_names), can_stick_full,
+                                      unc_names = unc_names, model_prior = model_prior)
+      sticky_args <- list(
+        sticky = TRUE,
+        can_stick = can_stick_full,
+        model_prior = model_prior,
+        parameter_prior = NULL,
+        slab_prior = slab_prior,
+        unc_names = unc_names,
+        supported_coef_names = supported_coef_names
+      )
+    } else {
+      sticky_args <- validate_brms_sticky(
+        sticky, can_stick, model_prior, kappa,
+        d = length(unc_names), unc_names = unc_names,
+        supported_coef_names = supported_coef_names,
+        prior = brms_prior, subsampled = subsampled
+      )
+      sticky_args$slab_prior <- NULL
+      sticky_args$unc_names <- unc_names
+    }
   } else {
     sticky_args <- list(sticky = FALSE, can_stick = NULL,
-                        model_prior = NULL, parameter_prior = NULL)
+                        model_prior = NULL, parameter_prior = NULL,
+                        slab_prior = NULL, unc_names = character(0))
   }
 
   if (subsampled) {
     jl_result <- .pdmpsamplers_julia_call(
-      "r_pdmp_brms_subsampled",
+      "r_pdmp_brms_subsampling",
       normalizePath(stan_file, mustWork = TRUE),
-      normalizePath(stan_file_ext, mustWork = TRUE),
-      normalizePath(hpp_path(), mustWork = TRUE),
       normalizePath(data_full_file, mustWork = TRUE),
       normalizePath(data_prior_file, mustWork = TRUE),
       as.integer(N), subsample_size,
+      eligibility$family, subsampling_geometry$designs,
+      subsampling_geometry$design_indices, as.integer(subsampling_geometry$dimension),
+      subsampling_geometry$offsets,
+      subsampling_geometry$response, subsampling_geometry$se, subsampling_multipliers,
       flow, algorithm,
       jl_flow_mean, jl_flow_cov,
       csv_file,
@@ -340,7 +487,6 @@ brm_pdmp <- function(
       grid_n = as.integer(grid_n),
       grid_t_max = grid_t_max,
       t0 = t0, T = T, t_warmup = t_warmup,
-      n_anchor_updates = n_anchor_updates,
       adaptive_scheme = adaptive_scheme,
       discretize_dt = jl_discretize_dt,
       show_progress = show_progress,
@@ -348,18 +494,16 @@ brm_pdmp <- function(
       threaded = threaded,
       seed = seed,
       compute_lp = compute_lp,
-      resample_dt = jl_resample_dt,
-      hvp_mode = hvp_mode,
-      use_hcv = use_hcv,
-      use_anchor_bank = use_anchor_bank,
-      bank_capacity = as.integer(bank_capacity),
       use_fd_hvp = use_fd_hvp,
       post_warmup_simplify = post_warmup_simplify,
-      use_fd_hcv = use_fd_hcv,
       sticky = sticky_args$sticky,
       can_stick = sticky_args$can_stick,
       model_prior = sticky_args$model_prior,
-      parameter_prior = sticky_args$parameter_prior
+      parameter_prior = sticky_args$parameter_prior,
+      n_anchor_updates = as.integer(n_anchor_updates),
+      use_anchor_bank = isTRUE(use_anchor_bank),
+      bank_capacity = as.integer(bank_capacity),
+      use_hcv = isTRUE(use_hcv)
     )
   } else {
     jl_result <- .pdmpsamplers_julia_call(
@@ -385,7 +529,9 @@ brm_pdmp <- function(
       sticky = sticky_args$sticky,
       can_stick = sticky_args$can_stick,
       model_prior = sticky_args$model_prior,
-      parameter_prior = sticky_args$parameter_prior
+      parameter_prior = sticky_args$parameter_prior,
+      slab_prior = sticky_args$slab_prior,
+      unc_names = sticky_args$unc_names
     )
   }
 
@@ -399,6 +545,8 @@ brm_pdmp <- function(
   empty_fit <- brms::rename_pars(empty_fit)
   attr(empty_fit, "sampling_time") <- sampling_time
   attr(empty_fit, "pdmp_stats") <- pdmp_stats
+  attr(empty_fit, "bridge_call_counts") <- jl_result$bridge_call_counts
+  attr(empty_fit, "subsampling") <- isTRUE(jl_result$subsampling)
   class(empty_fit) <- unique(c("pdmp_brmsfit", class(empty_fit)))
 
   if (isTRUE(sticky_args$sticky) && !is.null(jl_result$inclusion_probs)) {

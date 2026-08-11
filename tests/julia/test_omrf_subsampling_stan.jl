@@ -526,7 +526,7 @@ end
     pattern_envelope = PDMPSamplersRBridge._build_omrf_residual_envelope(
         pattern_spec, anchor, analytic.residual_context)
     @test pattern_envelope isa PDMPSamplers.GroupedResidualEnvelope
-    covariate_spec = copy(envelope_spec)
+    covariate_spec = copy(analytic_prior_spec)
     covariate_spec["bound_type"] = "covariate_local_expansion"
     covariate_weights = zeros(27, 3)
     destination = 1
@@ -566,12 +566,55 @@ end
             covariate_bank_ctx, covariate_bank_names,
             covariate_subsampling, anchor, nothing, falses(9);
             anchor_capacity=2)
+    caller_anchor = copy(anchor)
     covariate_prepared = PDMPSamplersRBridge._prepare_omrf_anchor(
         covariate_manager, anchor .+ 0.01)
     @test covariate_prepared.envelope.weights ===
         covariate_model.grad.envelope.weights
     @test length(covariate_prepared.envelope.component_scales!.
         coordinate_offsets) == length(anchor)
+    first_inserted_idx = PDMPSamplersRBridge._insert_omrf_anchor!(
+        covariate_manager, covariate_prepared)
+    covariate_manager.active_idx = first_inserted_idx
+    PDMPSamplers.refresh_anchor!(covariate_model.grad,
+        covariate_prepared.anchor)
+
+    # The first replacement creates an inactive scratch state. The following
+    # preparation must recycle its arrays without mutating the active anchor,
+    # and the fused native pass must agree with BridgeStan's exact gradient.
+    replacement_anchor = anchor .- 0.02
+    replacement = PDMPSamplersRBridge._prepare_omrf_anchor(
+        covariate_manager, replacement_anchor)
+    PDMPSamplersRBridge._insert_omrf_anchor!(
+        covariate_manager, replacement)
+    recycled_context = covariate_manager.recycled_state.residual_context
+    recycled_probabilities = recycled_context.anchor_probabilities
+    recycled_envelope = covariate_manager.recycled_state.envelope
+    recycled_scales = recycled_envelope.component_scales!
+    active_before_recycling = copy(covariate_manager.oracle.anchor)
+    recycled_anchor = anchor .+ 0.03
+    recycled_before = covariate_manager.recycled_preparations
+    recycled_prepared = PDMPSamplersRBridge._prepare_omrf_anchor(
+        covariate_manager, recycled_anchor)
+    @test recycled_prepared.residual_context === recycled_context
+    @test recycled_prepared.residual_context.anchor_probabilities ===
+        recycled_probabilities
+    @test recycled_prepared.envelope.component_scales! === recycled_scales
+    @test recycled_prepared.envelope.component_scales!.anchor ==
+        recycled_prepared.anchor
+    @test covariate_manager.oracle.anchor == active_before_recycling
+    @test anchor == caller_anchor
+    @test covariate_manager.recycled_preparations == recycled_before + 1
+    recycled_stan_full = zeros(9)
+    PDMPSamplersRBridge._clear_gradient!(covariate_bank_ctx, :full,
+        recycled_stan_full, recycled_anchor)
+    @test recycled_prepared.full_anchor ≈
+        recycled_stan_full atol=3e-10 rtol=3e-10
+    recycled_prior = zeros(9)
+    PDMPSamplersRBridge._clear_gradient!(covariate_bank_ctx, :prior,
+        recycled_prior, recycled_anchor)
+    @test recycled_prepared.prior_anchor ≈
+        recycled_prior atol=2e-12 rtol=2e-12
     covariate_hcv_spec = copy(covariate_spec)
     covariate_hcv_spec["use_hcv"] = true
     covariate_hcv_spec["hcv_damping"] = 9.0

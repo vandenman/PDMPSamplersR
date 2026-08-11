@@ -1034,6 +1034,7 @@ function r_pdmp_stan(
         t0::Float64 = 0.0,
         T::Float64 = 10000.0,
         t_warmup::Float64 = 0.0,
+        warmup_adaptation_interval::Union{Nothing,Float64} = nothing,
         sticky::Bool = false,
         can_stick = nothing,
         model_prior = nothing,
@@ -1093,9 +1094,13 @@ function r_pdmp_stan(
 
     initial = isnothing(theta0) ? x0_vec :
         SkeletonPoint(x0_vec, _as_float_vector(theta0))
+    adapter = PDMPSamplers.default_warmup_adapter(
+        flow, sampling_model.grad, t_warmup, t0;
+        warmup_adaptation_interval)
     chains = pdmp_sample(initial, flow, sampling_model, alg, t0, T, t_warmup;
                          progress = show_progress, n_chains = n_chains, threaded = threaded,
                          seed = seed,
+                         adapter = adapter,
                          warmup_stop = build_warmup_stop(t_warmup),
                          support_boundary_options = sbopts,
                          statistic_counter = PDMPSamplers.DevelStatisticCounter)
@@ -1373,8 +1378,8 @@ function _run_subsampling_brms_subsampled(lib_path_std::String,
         run_chain = function(i)
             seed_i = isnothing(seed) ? nothing : seed + i - 1
             flow_i = deepcopy(flow)
-            dynamics_adapter = PDMPSamplers.default_adapter(
-                flow_i, models[i].grad, t_warmup / 10, t_warmup, t0)
+            dynamics_adapter = PDMPSamplers.default_warmup_adapter(
+                flow_i, models[i].grad, t_warmup, t0)
             adapter_i = dynamics_adapter isa PDMPSamplers.NoAdaptation ?
                 anchor_adapters[i] : PDMPSamplers.SequenceAdapter(
                     (dynamics_adapter, anchor_adapters[i]))

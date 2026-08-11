@@ -775,6 +775,10 @@ pdmp_sample <- function(f, d,
 #' @param subsampling_main_anchor_refresh_distance Positive Euclidean distance
 #'   from the nearest prepared anchor that triggers a new exact OMRF anchor
 #'   during main sampling. The default `Inf` disables main-phase preparation.
+#' @param warmup_adaptation_interval Nonnegative time between dynamics
+#'   adaptation attempts during warmup. `NULL` uses ten equally spaced warmup
+#'   windows (`t_warmup / 10`); zero attempts adaptation at every event. The
+#'   same interval is used by full-gradient and subsampling runs.
 #' @inheritParams pdmp_sample
 #'
 #' @return A \code{pdmp_result} object. Use \code{mean}, \code{var},
@@ -796,6 +800,7 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
                                       "PositiveVariationGridThinningStrategy", "VectorVariationThinningStrategy",
                                       "RootsPoissonStrategy"),
                         T = 50000, t0 = 0.0, t_warmup = 0.0,
+                        warmup_adaptation_interval = NULL,
                         flow_mean = NULL, flow_cov = NULL, c0 = 1e-2,
                         x0 = NULL, theta0 = NULL,
                         sticky = FALSE, can_stick = NULL, model_prior = NULL, parameter_prior = NULL,
@@ -823,6 +828,17 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
   algorithm <- match.arg(algorithm)
   adaptive_scheme <- match.arg(adaptive_scheme)
   subsampling_warmup <- match.arg(subsampling_warmup)
+  if (!is.null(warmup_adaptation_interval)) {
+    if (!is.numeric(warmup_adaptation_interval) ||
+        length(warmup_adaptation_interval) != 1L ||
+        !is.finite(warmup_adaptation_interval) ||
+        warmup_adaptation_interval < 0) {
+      cli::cli_abort(paste0(
+        "Argument {.arg warmup_adaptation_interval} must be NULL or a ",
+        "finite nonnegative number."))
+    }
+    warmup_adaptation_interval <- as.numeric(warmup_adaptation_interval)
+  }
   if (!rlang::is_integerish(n_chains, n = 1L, finite = TRUE) || n_chains < 1L) {
     cli::cli_abort("Argument {.arg n_chains} must be a positive integer.")
   }
@@ -1138,6 +1154,8 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
   JuliaCall::julia_assign("subsampling_anchor_bank_capacity", subsampling_anchor_bank_capacity)
   JuliaCall::julia_assign("subsampling_main_anchor_refresh_distance",
                           subsampling_main_anchor_refresh_distance)
+  JuliaCall::julia_assign("warmup_adaptation_interval",
+                          warmup_adaptation_interval)
   JuliaCall::julia_assign("support_boundary_mode", support_boundary$mode)
   JuliaCall::julia_assign("support_boundary_max_bisection_steps", support_boundary$max_bisection_steps)
   JuliaCall::julia_assign("support_boundary_time_rtol", support_boundary$time_rtol)
@@ -1163,6 +1181,7 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
       lazy_max_low_tightness_rejections = lazy_max_low_tightness_rejections,
       lazy_max_rejections = lazy_max_rejections,
       t0 = t0, T = T, t_warmup = t_warmup,
+      warmup_adaptation_interval = warmup_adaptation_interval,
       sticky = sticky, can_stick = can_stick,
       model_prior = model_prior, parameter_prior = parameter_prior,
       slab_prior = slab_prior,
@@ -1196,6 +1215,7 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
       lazy_max_low_tightness_rejections = lazy_max_low_tightness_rejections,
       lazy_max_rejections = lazy_max_rejections,
       t0 = t0, T = T, t_warmup = t_warmup,
+      warmup_adaptation_interval = warmup_adaptation_interval,
       sticky = sticky, can_stick = can_stick,
       model_prior = model_prior, parameter_prior = parameter_prior,
       slab_prior = slab_prior,

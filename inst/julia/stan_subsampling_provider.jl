@@ -296,6 +296,33 @@ function (provider::OMRFFullGradientProvider)(out, x)
     return out
 end
 
+"""Refresh an OMRF anchor cache and its exact full gradient in one pass."""
+function _cache_omrf_anchor_and_full_gradient!(context::OMRFResidualContext,
+        full, prior::OMRFIndependentAnalyticPrior, anchor)
+    _omrf_prior_gradient!(full, prior, anchor)
+    N, P = size(context.X)
+    @inbounds for n in 1:N, node in 1:P
+        expected = _omrf_node_probabilities!(context, anchor, n, node)
+        context.anchor_expected_scores[node, n] = expected
+        observed = context.X[n, node]
+        q = context.seen[node] - 1
+        start = context.threshold_starts[node]
+        for u in 1:q
+            probability = context.probability_buffer[u]
+            context.anchor_probabilities[start + u - 1, n] = probability
+            full[context.threshold_indices[start + u - 1]] +=
+                probability - (observed == u)
+        end
+        for k in eachindex(context.incident_edges[node])
+            edge = context.incident_edges[node][k]
+            neighbour = context.incident_neighbours[node][k]
+            full[context.interaction_indices[edge]] +=
+                context.X[n, neighbour] * (expected - observed)
+        end
+    end
+    return full
+end
+
 """Exact Hessian-vector product paired with `OMRFFullGradientProvider`."""
 mutable struct OMRFFullHVPProvider <: Function
     context::OMRFResidualContext
@@ -1860,6 +1887,8 @@ mutable struct OMRFAnchorManager
     max_main_distance::Float64
     main_refresh_distance::Float64
     hcv_active::Bool
+    recycled_state::Union{Nothing,OMRFPreparedAnchorState}
+    recycled_preparations::Int
 end
 
 function _prepare_omrf_anchor_envelope(manager::OMRFAnchorManager,
@@ -1893,6 +1922,29 @@ function _prepare_omrf_anchor(manager::OMRFAnchorManager,
         anchor::AbstractVector)
     started = time_ns()
     oracle = manager.oracle
+    recycled = manager.recycled_state
+    if recycled !== nothing && oracle.analytic_prior !== nothing &&
+            !manager.hcv_active && !recycled.residual_context.use_hcv &&
+            recycled.envelope isa SeparableResidualEnvelope &&
+            recycled.envelope.component_scales! isa OMRFCovariateLocalScales
+        # The recycled state is not installed in the bank, so it can be
+        # mutated without exposing a partially prepared anchor. Its envelope
+        # callbacks retain the same anchor/context array identities.
+        manager.recycled_state = nothing
+        copyto!(recycled.anchor, anchor)
+        scales = recycled.envelope.component_scales!
+        scales.anchor === recycled.anchor || copyto!(scales.anchor, anchor)
+        recycled.residual_context.hcv_active = false
+        _omrf_prior_gradient!(
+            recycled.prior_anchor, oracle.analytic_prior, recycled.anchor)
+        _cache_omrf_anchor_and_full_gradient!(recycled.residual_context,
+            recycled.full_anchor, oracle.analytic_prior, recycled.anchor)
+        oracle.ctx.counts.full_gradient += 1
+        manager.preparations += 1
+        manager.recycled_preparations += 1
+        manager.preparation_seconds += (time_ns() - started) / 1e9
+        return recycled
+    end
     envelope_spec = manager.envelope_spec
     requested = collect(Float64, anchor)
     residual_context = _omrf_residual_context(envelope_spec,
@@ -1933,7 +1985,9 @@ function _insert_omrf_anchor!(manager::OMRFAnchorManager,
         length(manager.entries)
     else
         replace_idx = argmax(map(entry -> entry.age, manager.entries))
+        replaced = manager.entries[replace_idx].state
         manager.entries[replace_idx] = OMRFAnchorEntry(state, 0)
+        manager.recycled_state = replaced
         replace_idx
     end
     return idx
@@ -1945,7 +1999,7 @@ function _new_omrf_anchor_manager(oracle::OMRFAnalyticSubsamplingOracle,
     manager = OMRFAnchorManager(oracle, envelope_spec, String.(unc_names),
         OMRFAnchorEntry[], 0, Int(capacity), zeros(length(oracle.full_anchor)),
         0, 0.0, 0, 0, 0, 0, 0.0, 0.0, Inf,
-        oracle.residual_context.hcv_active)
+        oracle.residual_context.hcv_active, nothing, 0)
     initial = OMRFPreparedAnchorState(oracle.anchor, oracle.full_anchor,
         oracle.prior_anchor, oracle.residual_context, initial_envelope)
     manager.active_idx = _insert_omrf_anchor!(manager, initial)
@@ -2141,7 +2195,13 @@ function _build_stan_subsampling_model(ctx::StanSubsamplingContext,
             "OMRF $(residual_context.factorization) factorization requires " *
             "$expected likelihood contributions; received $N"))
     end
-    envelope = _build_stan_residual_envelope(envelope_spec, anchor, oracle)
+    # Analytic OMRF oracles own their anchor storage. Point the initial
+    # envelope at that owned vector as well, so later state recycling cannot
+    # mutate a caller-owned initial-position vector.
+    envelope_anchor = oracle isa OMRFAnalyticSubsamplingOracle ?
+        oracle.anchor : anchor
+    envelope = _build_stan_residual_envelope(
+        envelope_spec, envelope_anchor, oracle)
     staged_hcv = oracle isa OMRFAnalyticSubsamplingOracle &&
         oracle.residual_context.use_hcv && !oracle.residual_context.hcv_active
     manager = (anchor_capacity > 0 || staged_hcv) &&
@@ -2394,6 +2454,7 @@ function r_pdmp_stan_subsampling(prepared, subsampling, x0, flow_type::String,
         lazy_max_low_tightness_rejections::Int=3,
         lazy_max_rejections::Int=0,
         t0::Float64=0.0, T::Float64=10000.0, t_warmup::Float64=0.0,
+        warmup_adaptation_interval::Union{Nothing,Float64}=nothing,
         sticky::Bool=false, can_stick=nothing, model_prior=nothing,
         parameter_prior=nothing, slab_prior=nothing,
         show_progress::Bool=true, n_chains::Int=1, threaded::Bool=false,
@@ -2506,8 +2567,12 @@ function r_pdmp_stan_subsampling(prepared, subsampling, x0, flow_type::String,
     initial = isnothing(theta0) ? x0_vec :
         SkeletonPoint(x0_vec, _as_float_vector(theta0))
     chains = if all(isnothing, anchor_managers)
+        adapter = PDMPSamplers.default_warmup_adapter(
+            flow, first(models).grad, t_warmup, t0;
+            warmup_adaptation_interval)
         pdmp_sample(initial, flow, models, alg, t0, T, t_warmup;
             progress=show_progress, threaded, seed,
+            adapter,
             warmup_models, warmup_algorithm=warmup_alg,
             warmup_stop=build_warmup_stop(t_warmup),
             support_boundary_options=sbopts,
@@ -2516,8 +2581,9 @@ function r_pdmp_stan_subsampling(prepared, subsampling, x0, flow_type::String,
         run_chain = function(i)
             seed_i = isnothing(seed) ? nothing : seed + i - 1
             flow_i = deepcopy(flow)
-            dynamics_adapter = PDMPSamplers.default_adapter(
-                flow_i, models[i].grad, t_warmup / 10, t_warmup, t0)
+            dynamics_adapter = PDMPSamplers.default_warmup_adapter(
+                flow_i, models[i].grad, t_warmup, t0;
+                warmup_adaptation_interval)
             adapter_i = dynamics_adapter isa PDMPSamplers.NoAdaptation ?
                 anchor_adapters[i] : PDMPSamplers.SequenceAdapter(
                     (dynamics_adapter, anchor_adapters[i]))
@@ -2599,6 +2665,8 @@ function r_pdmp_stan_subsampling(prepared, subsampling, x0, flow_type::String,
         "sampling_data_constructions" => ctx.counts.data_constructions - snapshot.data,
         "sampling_full_gradient_calls" => ctx.counts.full_gradient - snapshot.full_gradient,
         "anchor_preparations" => manager === nothing ? 0 : manager.preparations,
+        "anchor_recycled_preparations" => manager === nothing ? 0 :
+            manager.recycled_preparations,
         "anchor_preparation_seconds" => manager === nothing ? 0.0 : manager.preparation_seconds,
         "anchor_activations" => manager === nothing ? 0 : manager.activations,
         "anchor_main_activations" => manager === nothing ? 0 : manager.main_activations,
@@ -2614,7 +2682,8 @@ function r_pdmp_stan_subsampling(prepared, subsampling, x0, flow_type::String,
             manager.entries[manager.active_idx].state.anchor),
         "anchor_positions" => manager === nothing ? zeros(0, 0) :
             reduce(hcat, (entry.state.anchor for entry in manager.entries)),
-        "anchor_bank_bytes" => manager === nothing ? 0 : Base.summarysize(manager.entries),
+        "anchor_bank_bytes" => manager === nothing ? 0 :
+            Base.summarysize((manager.entries, manager.recycled_state)),
         "analytic_hcv" => model.grad.residual_oracle isa OMRFAnalyticSubsamplingOracle &&
             model.grad.residual_oracle.residual_context.use_hcv,
         "analytic_prior" => model.grad.residual_oracle isa

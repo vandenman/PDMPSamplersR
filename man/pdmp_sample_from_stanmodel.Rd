@@ -24,6 +24,7 @@ pdmp_sample_from_stanmodel(
   T = 50000,
   t0 = 0,
   t_warmup = 0,
+  warmup_adaptation_interval = NULL,
   flow_mean = NULL,
   flow_cov = NULL,
   c0 = 0.01,
@@ -123,6 +124,11 @@ or "RootsPoissonStrategy".}
 \item{t0}{Numeric, initial time (default: 0.0).}
 
 \item{t_warmup}{Numeric, warmup time (default: 0.0). Events during warmup are discarded.}
+
+\item{warmup_adaptation_interval}{Nonnegative time between dynamics
+adaptation attempts during warmup. `NULL` uses ten equally spaced warmup
+windows (`t_warmup / 10`); zero attempts adaptation at every event. The
+same interval is used by full-gradient and subsampling runs.}
 
 \item{flow_mean}{Numeric vector of length d, mean vector for the flow (default: zero vector).}
 

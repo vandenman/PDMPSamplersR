@@ -122,6 +122,16 @@ test_that("parameter blocks resolve to ordered unconstrained coordinates", {
 test_that("custom-Stan anchor-bank controls validate before backend setup", {
   expect_error(
     pdmp_sample_from_stanmodel(
+      "missing.stan", list(), warmup_adaptation_interval = -0.1),
+    "finite nonnegative"
+  )
+  expect_error(
+    pdmp_sample_from_stanmodel(
+      "missing.stan", list(), warmup_adaptation_interval = Inf),
+    "finite nonnegative"
+  )
+  expect_error(
+    pdmp_sample_from_stanmodel(
       "missing.stan", list(), subsampling_anchor_updates = 1L,
       t_warmup = 1),
     "require.*subsampling"

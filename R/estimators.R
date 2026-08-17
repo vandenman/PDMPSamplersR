@@ -29,7 +29,10 @@
       lapply(x$skeleton, `[[`, "velocities"),
       lapply(x$skeleton, `[[`, "is_boomerang"),
       lapply(x$skeleton, `[[`, "mu"),
-      lapply(x$skeleton, `[[`, "is_mutable")
+      lapply(x$skeleton, `[[`, "is_mutable"),
+      lapply(x$skeleton, function(s) {
+        if (is.null(s$flow_cov)) matrix(numeric(0), 0L, 0L) else s$flow_cov
+      })
     )
   }
 }
@@ -247,13 +250,23 @@ quantile.pdmp_result <- function(x, probs, transforms = NULL, chain = NULL, coor
 
   chain <- as.integer(chain)
 
-  # Julia r_quantile only accepts scalar probs; loop for vectors
+  # Untransformed quantiles use one joint Julia sweep for all probabilities.
+  # Besides avoiding duplicate sorting, the Julia bridge releases each
+  # coordinate's O(number-of-events) workspace before proceeding.
   if (length(probs) > 1L) {
+    if (is.null(specs)) {
+      return(.pdmpsamplers_julia_call(
+        "r_quantile", chains, as.numeric(probs),
+        chain = chain, coordinate = coordinate
+      ))
+    }
+
+    # Transformed vector quantiles retain the scalar compatibility path.
     result_list <- lapply(probs, function(p) {
-      if (is.null(specs))
-        .pdmpsamplers_julia_call("r_quantile", chains, p, chain = chain, coordinate = coordinate)
-      else
-        .pdmpsamplers_julia_call("r_quantile", chains, p, specs, chain = chain, coordinate = coordinate)
+      .pdmpsamplers_julia_call(
+        "r_quantile", chains, p, specs,
+        chain = chain, coordinate = coordinate
+      )
     })
     result <- do.call(rbind, result_list)
     rownames(result) <- NULL

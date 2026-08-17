@@ -1,6 +1,8 @@
 module PDMPSamplersRBridge
 
 using PDMPSamplers, LinearAlgebra, BridgeStan, Random, SparseArrays, Statistics, Libdl
+using FileWatching
+const LogExpFunctions = PDMPSamplers.LogExpFunctions
 
 # BridgeStan/Stan Math autodiff state is serialized consistently for every
 # Stan-backed provider used by this bridge.
@@ -10,7 +12,7 @@ export build_flow, build_algorithm, wrap_sticky
 export build_model_prior_odds, build_slab_provider, wrap_dependent_sticky
 export r_discretize, r_mean, r_var, r_std, r_cov, r_cor, r_quantile, r_median, r_cdf, r_ess, r_summary_all
 export r_inclusion_probs, extract_stats
-export r_chain_times, r_chain_positions, r_chain_velocities, r_chain_is_boomerang, r_chain_is_mutable_boomerang, r_chain_mu
+export r_chain_times, r_chain_positions, r_chain_velocities, r_chain_is_boomerang, r_chain_is_mutable_boomerang, r_chain_mu, r_chain_flow_cov
 export r_from_skeleton
 export r_chain_is_factorized
 export r_chain_sparse_initial_time, r_chain_sparse_initial_position, r_chain_sparse_initial_velocity
@@ -160,7 +162,8 @@ function wrap_sticky(alg::PDMPSamplers.PoissonTimeStrategy, sticky::Bool, model_
         w = model_prior[:prob] ./ (1 .- model_prior[:prob])
         κ = w .* parameter_prior
     else
-        κ = BetaBernoulliKappa(model_prior[:a]::Float64, model_prior[:b]::Float64, parameter_prior)
+        κ = BetaBernoulliKappa(model_prior[:a]::Float64,
+            model_prior[:b]::Float64, parameter_prior, can_stick)
     end
 
     return Sticky(alg, κ, BitVector(can_stick))
@@ -490,14 +493,37 @@ function _compile_cache_checksum(bytes::Vector{UInt8})
     return value
 end
 
-function _cached_stan_source(path_to_stan_model::String,
+# The compiled BridgeStan library is an ABI artifact, not just a function of
+# the Stan source.  Include an explicit schema marker so caches produced by an
+# older BridgeStan/PDMPSamplersR build cannot be loaded after the toolchain or
+# generated-model ABI changes.
+const _BRIDGESTAN_CACHE_SCHEMA = "pdmpsamplersr-bridgestan-cache-v2"
+
+function _cache_build_dir(path_to_stan_model::String,
         stanc_args::Vector{String}, make_args::Vector{String})
     cache_root = get(ENV, "PDMPSAMPLERSR_BRIDGESTAN_CACHE_DIR",
         joinpath(first(DEPOT_PATH), "pdmpsamplersr", "bridgestan"))
     source_bytes = read(path_to_stan_model)
     option_bytes = Vector{UInt8}(codeunits(join([stanc_args; make_args], '\0')))
-    checksum = _compile_cache_checksum([source_bytes; option_bytes])
-    build_dir = joinpath(cache_root, string(checksum; base=16, pad=16))
+    schema_bytes = Vector{UInt8}(codeunits(_BRIDGESTAN_CACHE_SCHEMA))
+    checksum = _compile_cache_checksum([schema_bytes; source_bytes; option_bytes])
+    return joinpath(cache_root, string(checksum; base=16, pad=16))
+end
+
+function _with_compile_lock(f::Function, lock_path::String)
+    mkpath(dirname(lock_path))
+    # Compilation can take minutes on a cold cache.  Refresh the pidfile while
+    # waiting/compiling, and recover locks left by a killed worker after one
+    # hour.  This lock is shared by independent R/mirai worker processes.
+    FileWatching.Pidfile.mkpidlock(lock_path;
+        stale_age=3600.0, refresh=600.0) do
+        f()
+    end
+end
+
+function _cached_stan_source(path_to_stan_model::String,
+        stanc_args::Vector{String}, make_args::Vector{String},
+        build_dir::String=_cache_build_dir(path_to_stan_model, stanc_args, make_args))
     mkpath(build_dir)
     cached_source = joinpath(build_dir, basename(path_to_stan_model))
     isfile(cached_source) || cp(path_to_stan_model, cached_source)
@@ -512,11 +538,20 @@ function _compile_model(path_to_stan_model::String)
     make_args = String[]
     _compile_env_enabled("PDMPSAMPLERSR_BRIDGESTAN_NATIVE") &&
         push!(make_args, "CXXFLAGS+=-march=native")
-    source = _compile_env_enabled("PDMPSAMPLERSR_BRIDGESTAN_CACHE") ?
-        _cached_stan_source(path_to_stan_model, stanc_args, make_args) : path_to_stan_model
-    library = replace(source, r"\.stan$" => "_model.$(Libdl.dlext)")
-    isfile(library) && return library
-    return BridgeStan.compile_model(source; stanc_args, make_args)
+    if _compile_env_enabled("PDMPSAMPLERSR_BRIDGESTAN_CACHE")
+        build_dir = _cache_build_dir(path_to_stan_model, stanc_args, make_args)
+        return _with_compile_lock(joinpath(build_dir, ".compile.lock")) do
+            source = _cached_stan_source(path_to_stan_model, stanc_args, make_args, build_dir)
+            library = replace(source, r"\.stan$" => "_model.$(Libdl.dlext)")
+            isfile(library) && return library
+            BridgeStan.compile_model(source; stanc_args, make_args)
+        end
+    end
+    return _with_compile_lock(string(path_to_stan_model, ".compile.lock")) do
+        library = replace(path_to_stan_model, r"\.stan$" => "_model.$(Libdl.dlext)")
+        isfile(library) && return library
+        BridgeStan.compile_model(path_to_stan_model; stanc_args, make_args)
+    end
 end
 
 function _compile_model_with_header(path_to_stan_model::String, hpp_path::String)
@@ -528,13 +563,22 @@ function _compile_model_with_header(path_to_stan_model::String, hpp_path::String
     make_args = ["USER_HEADER=$(header)"]
     _compile_env_enabled("PDMPSAMPLERSR_BRIDGESTAN_NATIVE") &&
         push!(make_args, "CXXFLAGS+=-march=native")
-    source = _compile_env_enabled("PDMPSAMPLERSR_BRIDGESTAN_CACHE") ?
-        _cached_stan_source(path_to_stan_model, stanc_args, make_args) :
-        path_to_stan_model
-    library = replace(source, r"\.stan$" => "_model.$(Libdl.dlext)")
-    isfile(library) && mtime(library) >=
-        max(mtime(source), mtime(hpp_path)) && return library
-    return BridgeStan.compile_model(source; stanc_args, make_args)
+    if _compile_env_enabled("PDMPSAMPLERSR_BRIDGESTAN_CACHE")
+        build_dir = _cache_build_dir(path_to_stan_model, stanc_args, make_args)
+        return _with_compile_lock(joinpath(build_dir, ".compile.lock")) do
+            source = _cached_stan_source(path_to_stan_model, stanc_args, make_args, build_dir)
+            library = replace(source, r"\.stan$" => "_model.$(Libdl.dlext)")
+            isfile(library) && mtime(library) >=
+                max(mtime(source), mtime(hpp_path)) && return library
+            BridgeStan.compile_model(source; stanc_args, make_args)
+        end
+    end
+    return _with_compile_lock(string(path_to_stan_model, ".compile.lock")) do
+        library = replace(path_to_stan_model, r"\.stan$" => "_model.$(Libdl.dlext)")
+        isfile(library) && mtime(library) >=
+            max(mtime(path_to_stan_model), mtime(hpp_path)) && return library
+        BridgeStan.compile_model(path_to_stan_model; stanc_args, make_args)
+    end
 end
 
 function _pack_result(chains::PDMPChains)
@@ -568,6 +612,36 @@ r_cor(chains::PDMPChains; chain::Int = 1)  = Statistics.cor(chains; chain)
 
 function r_quantile(chains::PDMPChains, p::Float64; chain::Int = 1, coordinate::Int = -1)
     Statistics.quantile(chains, p; chain, coordinate)
+end
+
+"""
+    r_quantile(chains, probabilities; chain=1, coordinate=-1)
+
+Compute several quantiles in one position-domain sweep per coordinate.  The
+scalar R bridge historically repeated the complete sweep for every requested
+probability.  On long sticky traces this doubled multi-gigabyte temporary
+allocations for an equal-tail interval.  Reclaim each coordinate's sweep
+workspace before moving to the next coordinate so peak memory is bounded by
+one marginal rather than by the full parameter dimension.
+"""
+function r_quantile(chains::PDMPChains, p::AbstractVector{<:Real};
+        chain::Int = 1, coordinate::Int = -1)
+    trace = chains.traces[chain]
+    probabilities = collect(Float64, p)
+    if coordinate != -1
+        return Statistics.quantile(trace, probabilities; coordinate)
+    end
+
+    d = length(first(trace).position)
+    result = Matrix{Float64}(undef, length(probabilities), d)
+    for j in 1:d
+        result[:, j] .= Statistics.quantile(trace, probabilities; coordinate=j)
+        # Sweep events can be O(length(trace)) and are not reused by another
+        # coordinate.  An explicit incremental collection prevents them from
+        # accumulating until the enclosing all-coordinate call returns.
+        GC.gc(false)
+    end
+    return result
 end
 
 function r_median(chains::PDMPChains; chain::Int = 1, coordinate::Int = -1)
@@ -765,6 +839,17 @@ function r_chain_mu(chains::PDMPChains; chain::Int)
     base isa AnyBoomerang ? Vector{Float64}(base.μ) : Float64[]
 end
 
+function r_chain_flow_cov(chains::PDMPChains; chain::Int)
+    base = PDMPSamplers._underlying_flow(chains.traces[chain].flow)
+    base isa AnyBoomerang || return zeros(Float64, 0, 0)
+    if base.Γ isa LowRankPrecision
+        covariance = Diagonal(base.Γ.D) +
+            base.Γ.V * Diagonal(base.Γ.Λ) * transpose(base.Γ.V)
+        return Matrix{Float64}(covariance)
+    end
+    return Matrix{Float64}(base.ΣL * transpose(base.ΣL))
+end
+
 function _final_lambda_ref(chains::PDMPChains, chain::Int)
     base = PDMPSamplers._underlying_flow(chains.traces[chain].flow)
     return base isa AnyBoomerang ? Float64(base.λref) : NaN
@@ -772,7 +857,8 @@ end
 
 function r_from_skeleton(times_list::AbstractVector, positions_list::AbstractVector,
                           velocities_list::AbstractVector, is_boomerang_list::AbstractVector,
-                          mu_list::AbstractVector, is_mutable_boomerang_list::AbstractVector)
+                          mu_list::AbstractVector, is_mutable_boomerang_list::AbstractVector,
+                          flow_cov_list=nothing)
     n = length(times_list)
     traces = PDMPTrace[]
     sizehint!(traces, n)
@@ -784,10 +870,16 @@ function r_from_skeleton(times_list::AbstractVector, positions_list::AbstractVec
         is_boom    = Bool(is_boomerang_list[i])
         is_mutable = Bool(is_mutable_boomerang_list[i])
         mu         = Vector{Float64}(mu_list[i])
+        covariance = if flow_cov_list === nothing || isempty(flow_cov_list[i])
+            Matrix{Float64}(I, d, d)
+        else
+            Matrix{Float64}(flow_cov_list[i])
+        end
+        precision = inv(Symmetric(covariance))
         flow = if is_mutable
-            MutableBoomerang(I(d), mu)
+            MutableBoomerang(precision, mu)
         elseif is_boom
-            Boomerang(I(d), mu)
+            Boomerang(precision, mu)
         else
             ZigZag(I(d), zeros(d))
         end
@@ -1096,7 +1188,8 @@ function r_pdmp_stan(
         SkeletonPoint(x0_vec, _as_float_vector(theta0))
     adapter = PDMPSamplers.default_warmup_adapter(
         flow, sampling_model.grad, t_warmup, t0;
-        warmup_adaptation_interval)
+        warmup_adaptation_interval,
+        can_stick=sticky ? can_stick_vec : nothing)
     chains = pdmp_sample(initial, flow, sampling_model, alg, t0, T, t_warmup;
                          progress = show_progress, n_chains = n_chains, threaded = threaded,
                          seed = seed,
@@ -1379,7 +1472,8 @@ function _run_subsampling_brms_subsampled(lib_path_std::String,
             seed_i = isnothing(seed) ? nothing : seed + i - 1
             flow_i = deepcopy(flow)
             dynamics_adapter = PDMPSamplers.default_warmup_adapter(
-                flow_i, models[i].grad, t_warmup, t0)
+                flow_i, models[i].grad, t_warmup, t0;
+                can_stick=sticky ? can_stick : nothing)
             adapter_i = dynamics_adapter isa PDMPSamplers.NoAdaptation ?
                 anchor_adapters[i] : PDMPSamplers.SequenceAdapter(
                     (dynamics_adapter, anchor_adapters[i]))

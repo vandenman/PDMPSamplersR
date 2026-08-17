@@ -88,6 +88,16 @@ test_that("OMRF provider uses persons and finite categorical curvature weights",
     omrf_residual_envelope(
       X, c(3, 3, 3), "a", "b", geometry = "pattern_local")$bound_type,
     "pattern_local_range")
+  expect_identical(
+    omrf_residual_envelope(
+      X, c(3, 3, 3), "a", "b", use_hcv = TRUE,
+      hcv_damping = Inf, geometry = "pattern_local")$bound_type,
+    "pattern_local_hcv_range")
+  expect_error(
+    omrf_residual_envelope(
+      X, c(3, 3, 3), "a", "b", use_hcv = TRUE,
+      hcv_damping = Inf, geometry = "norm_local"),
+    "pattern_local")
   expect_equal(unname(envelope$edge_order),
                rbind(c(1L, 2L), c(1L, 3L), c(2L, 3L)))
   expect_error(
@@ -155,8 +165,20 @@ test_that("custom-Stan anchor-bank controls validate before backend setup", {
   expect_error(
     pdmp_sample_from_stanmodel(
       "missing.stan", list(),
+      subsampling_node_source_check_distance = -0.1),
+    "finite and nonnegative"
+  )
+  expect_error(
+    pdmp_sample_from_stanmodel(
+      "missing.stan", list(),
       subsampling_main_anchor_refresh_distance = 0.5),
     "requires.*anchor_bank"
+  )
+  expect_error(
+    pdmp_sample_from_stanmodel(
+      "missing.stan", list(),
+      subsampling_require_no_main_full_data = NA),
+    "must be TRUE or FALSE"
   )
 })
 

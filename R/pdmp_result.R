@@ -58,7 +58,8 @@ materialize <- function(x) {
         velocities    = .pdmpsamplers_julia_call("r_chain_velocities",           chains, chain = i_int),
         is_boomerang  = .pdmpsamplers_julia_call("r_chain_is_boomerang",         chains, chain = i_int),
         is_mutable    = .pdmpsamplers_julia_call("r_chain_is_mutable_boomerang", chains, chain = i_int),
-        mu            = .pdmpsamplers_julia_call("r_chain_mu",                   chains, chain = i_int)
+        mu            = .pdmpsamplers_julia_call("r_chain_mu",                   chains, chain = i_int),
+        flow_cov      = .pdmpsamplers_julia_call("r_chain_flow_cov",             chains, chain = i_int)
       )
     })
   }

@@ -35,7 +35,9 @@ omrf_residual_envelope(
   factorization = c("person", "person_node"),
   factor_sampling = c("size_biased", "node_stratified"),
   prior_backend = c("stan", "analytic"),
-  geometry = c("norm_local", "covariate_local", "pattern_local")
+  geometry = c("norm_local", "covariate_local", "pattern_local", "grouped_box", "node_grouped_box", "cell_cached_node_grouped_box", "lazy_node_grouped_box"),
+  box_groups = 16L,
+  box_root_groups = max(1L, box_groups %/% 2L)
 )
 
 stan_parameter_mapping(path_to_stanmodel, standata, parameters = NULL)
@@ -76,7 +78,10 @@ variate. This requires `backend = "analytic"` and retains a certified
 first-order fallback through damping.}
 
 \item{hcv_damping}{Positive damping scale. By default this is the number of
-OMRF likelihood coordinates.}
+OMRF likelihood coordinates. `Inf` selects the exact undamped Hessian
+control variate and is currently supported only with
+`geometry = "pattern_local"`, `geometry = "grouped_box"`, or one of
+the node-grouped geometries.}
 
 \item{hcv_warmup}{HCV policy during warmup. `"hcv"` preserves the existing
 behavior. Experimental `"first_order"` uses the certified first-order
@@ -92,7 +97,8 @@ from every node while retaining exact size-biased proposal mixing.}
 
 \item{prior_backend}{Deterministic prior-gradient backend. `"stan"` supports
 arbitrary custom priors. `"analytic"` recognizes the package OMRF
-independent Gaussian and Cauchy prior contracts from `prior_standata`.}
+independent Gaussian/Cauchy and node-scale Gaussian prior contracts from
+`prior_standata`.}
 
 \item{geometry}{Certified residual-rate geometry. `"norm_local"` uses a
 compact covariate-norm decomposition. `"covariate_local"` retains
@@ -100,7 +106,29 @@ empirical neighbour covariates in threshold, edge, and edge-pair terms
 while sharing trajectory scales across people. `"pattern_local"` groups
 identical node-neighbour patterns and retains their signed directional
 logit geometry, which is especially tighter for scalar BPS/Boomerang
-rates but is more expensive to construct.}
+rates but is more expensive to construct. `"grouped_box"` is the preferred
+exact HCV clock for non-factorized subsampling: setup partitions whole
+persons into a fixed number of covariate boxes and retained sampling
+evaluates one certificate per box, never one certificate per person. It
+currently requires `backend = "analytic"`, `use_hcv = TRUE`,
+`hcv_damping = Inf`, and `factorization = "person"`.
+`"node_grouped_box"` independently partitions each node by its incident
+covariates and reuses the node's trajectory geometry across those boxes.
+Experimental `"cell_cached_node_grouped_box"` uses the same node boxes but
+samples marked persons from the already-certified grid-cell masses, then
+thins only the selected person using its exact observed covariate pattern.
+This avoids a second all-box pointwise traversal at every clock proposal
+while retaining a whole-person stochastic gradient.
+Experimental `"lazy_node_grouped_box"` exposes a coarser root frontier and
+descends the certified support tree only along the sampled branch.}
+
+\item{box_groups}{Maximum number of deterministic setup-time covariate
+boxes used by `geometry = "grouped_box"`, or boxes per node for
+`geometry = "node_grouped_box"`. The actual number is capped by the
+number of distinct relevant person patterns.}
+
+\item{box_root_groups}{Root boxes per node used by
+`geometry = "lazy_node_grouped_box"`. This must not exceed `box_groups`.}
 
 \item{path_to_stanmodel}{Stan source or compiled-library path.}
 

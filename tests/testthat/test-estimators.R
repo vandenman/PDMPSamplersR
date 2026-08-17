@@ -127,6 +127,28 @@ test_that("quantile and median return correct types", {
   expect_length(med, d)
 })
 
+test_that("joint quantiles equal repeated scalar quantiles", {
+  skip_if_no_pdmp_julia_backend()
+
+  d <- 3
+  neg_grad <- function(x) x
+  result <- pdmp_sample(neg_grad, d = d, flow = "ZigZag", T = 1000,
+                        show_progress = FALSE)
+
+  probs <- c(0.1, 0.5, 0.9)
+  joint <- quantile(result, probs)
+  repeated <- do.call(rbind, lapply(probs, function(p) quantile(result, p)))
+  expect_equal(dim(joint), c(length(probs), d))
+  expect_equal(joint, repeated, tolerance = 1e-12)
+
+  joint_coordinate <- quantile(result, probs, coordinate = 2L)
+  expect_equal(
+    as.numeric(joint_coordinate),
+    vapply(probs, function(p) quantile(result, p, coordinate = 2L), numeric(1L)),
+    tolerance = 1e-12
+  )
+})
+
 test_that("ess returns positive values", {
   skip_if_no_pdmp_julia_backend()
 

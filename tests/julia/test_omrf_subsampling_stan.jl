@@ -5,6 +5,19 @@ include(normpath(joinpath(@__DIR__, "..", "..", "inst", "julia",
     "main_interface_function.jl")))
 using .PDMPSamplersRBridge
 
+@testset "Beta-Bernoulli sticky wrapper excludes always-active parameters" begin
+    inner = PDMPSamplers.GridThinningStrategy()
+    mask = BitVector([false, true, true, false, true])
+    wrapped = PDMPSamplersRBridge.wrap_sticky(inner, true,
+        Dict(:a => 1.0, :b => 4.0), fill(0.5, 5), mask)
+    free = BitVector([true, true, false, true, true])
+    # Only the three stickable coordinates define the model size; two are
+    # active.  The always-active coordinates at positions one and four do not
+    # enter the beta-binomial odds.
+    @test wrapped.κ(3, zeros(5), free) ==
+        (1 + 2) / (4 + 3 - 2 - 1) * 0.5
+end
+
 function omrf_person_loglik(q, x)
     P = 3
     thresholds = reshape(q[1:6], 2, 3)
@@ -160,6 +173,150 @@ end
         7 * size(X, 1) * size(X, 2)
     @test factor_context.counts.analytic_node_conditionals ==
         7 * size(X, 1) * size(X, 2)
+
+    local_spec = copy(factor_spec)
+    local_candidates = hcat(anchor,
+        anchor .+ collect(range(-0.35, 0.28; length=d)),
+        anchor .+ collect(range(0.24, -0.31; length=d)))
+    local_counts = PDMPSamplersRBridge.StanSubsamplingCallCounts()
+    local_cv = PDMPSamplersRBridge._prepare_omrf_factor_local_cv(
+        local_spec, names, local_candidates, local_counts)
+    @test size(local_cv.anchor_logits) ==
+        (maximum(seen) - 1, length(seen), size(X, 1))
+    @test size(local_cv.source_indices) == (length(seen), size(X, 1))
+    @test all(index -> 1 <= index <= size(local_candidates, 2),
+        local_cv.source_indices)
+    # Preparation uses the native factor algebra once.  In particular it
+    # never asks BridgeStan for a full-data gradient.
+    @test local_counts.full_gradient == 0
+    # One scan initializes the common anchor cache and one constructs all
+    # factor-local deterministic baselines.
+    @test local_counts.native_full_data_scans == 2
+    local_baseline_and_residual = copy(local_cv.full_anchor_likelihood)
+    local_factor_residual = zeros(d)
+    local_factors = collect(1:(size(X, 1) * size(X, 2)))
+    local_cv(local_factor_residual, position, local_factors)
+    local_baseline_and_residual .+= local_factor_residual
+    exact_likelihood = zeros(d)
+    for person in axes(X, 1)
+        exact_likelihood[1:(no_thresholds + no_edges)] .+=
+            finite_difference_person_neggrad_variable(
+                position[1:(no_thresholds + no_edges)],
+                view(X, person, :), seen)
+    end
+    @test local_baseline_and_residual ≈ exact_likelihood atol=2e-9
+
+    local_velocity = collect(range(-0.7, 0.8; length=d))
+    for factor in local_factors
+        node = cld(factor, size(X, 1))
+        person = mod1(factor, size(X, 1))
+        local_cv(local_factor_residual, position, [factor])
+        exact_rate = abs(dot(local_velocity, local_factor_residual))
+        bound = PDMPSamplersRBridge._omrf_factor_local_bound(
+            local_cv, position, local_velocity, person, node)
+        @test exact_rate <= bound + 2e-13
+    end
+
+    local_bank_counts = PDMPSamplersRBridge.StanSubsamplingCallCounts()
+    local_bank = PDMPSamplersRBridge._prepare_omrf_node_local_bank(
+        local_spec, names, local_candidates, local_bank_counts)
+    # Each candidate performs one cache scan and one exact node-baseline scan.
+    @test local_bank_counts.native_full_data_scans ==
+        2 * size(local_candidates, 2)
+    @test size(local_bank.node_baselines) ==
+        (d, length(seen), size(local_candidates, 2))
+    mixed_sources = [1, 2, 3]
+    mixed_total = zeros(d)
+    PDMPSamplersRBridge._omrf_node_local_baseline!(
+        mixed_total, local_bank, mixed_sources)
+    mixed_residual = zeros(d)
+    PDMPSamplersRBridge._omrf_node_local_residual!(local_bank,
+        mixed_residual, position, collect(axes(X, 1)), mixed_sources)
+    @test mixed_total + mixed_residual ≈ exact_likelihood atol=2e-9
+    # The same identity holds under person-node subsampling and after an
+    # arbitrary no-data recombination of already prepared node references.
+    reverse_sources = reverse(mixed_sources)
+    PDMPSamplersRBridge._omrf_node_local_baseline!(
+        mixed_total, local_bank, reverse_sources)
+    PDMPSamplersRBridge._omrf_node_local_residual!(local_bank,
+        mixed_residual, position, local_factors, reverse_sources;
+        factorization=:person_node)
+    @test mixed_total + mixed_residual ≈ exact_likelihood atol=2e-9
+end
+
+@testset "node-scale analytic prior includes transformed scale terms" begin
+    seen = [2, 2, 2]
+    no_thresholds = sum(seen .- 1)
+    no_edges = 3
+    d = no_thresholds + no_edges + 1 + length(seen)
+    names = vcat(
+        ["thresholds_0.$j" for j in 1:no_thresholds],
+        ["interactions_0.$j" for j in 1:no_edges],
+        ["global_scale"], ["node_scale.$j" for j in 1:length(seen)])
+    spec = Dict{String,Any}(
+        "X" => [0 1 0; 1 0 1],
+        "seen" => seen,
+        "thresholds" => "thresholds_0",
+        "interactions" => "interactions_0",
+        "analytic_prior" => Dict{String,Any}(
+            "type" => "node_scale_gaussian",
+            "threshold_alpha" => 1.0,
+            "threshold_beta" => 1.0,
+            "interaction_scale" => 0.7,
+            "global_scale" => "global_scale",
+            "node_scale" => "node_scale",
+            "global_scale_sd" => 1.2,
+            "node_scale_sd" => 0.8))
+    context = PDMPSamplersRBridge._omrf_residual_context(
+        spec, names, zeros(d), PDMPSamplersRBridge.StanSubsamplingCallCounts())
+    @test context.global_scale_index == no_thresholds + no_edges + 1
+    @test context.node_scale_indices == (no_thresholds + no_edges + 2):d
+
+    position = [0.2, -0.1, 0.3, 0.4, -0.2, 0.1, 0.5, -0.3, 0.25, 0.1]
+    gradient = zeros(d)
+    prior = PDMPSamplersRBridge._omrf_analytic_prior(spec, context)
+    PDMPSamplersRBridge._omrf_prior_gradient!(gradient, prior, position)
+    global_scale = exp(position[7])
+    node_scales = exp.(position[8:10])
+    expected_global = global_scale^2 / 1.2^2 - 1
+    expected_nodes = node_scales .^ 2 ./ 0.8^2 .- 1
+    edge = 1
+    for left in 1:2, right in (left + 1):3
+        scale2 = 0.7^2 * global_scale^2 * node_scales[left] * node_scales[right]
+        ratio = position[3 + edge]^2 / scale2
+        expected_global += 1 - ratio
+        expected_nodes[left] += 0.5 * (1 - ratio)
+        expected_nodes[right] += 0.5 * (1 - ratio)
+        @test gradient[3 + edge] ≈ position[3 + edge] / scale2
+        edge += 1
+    end
+    @test gradient[7] ≈ expected_global
+    @test gradient[8:10] ≈ expected_nodes
+end
+
+@testset "retained full-data invariant reports every work category" begin
+    clean = [Dict{String,Any}(
+        "anchor_main_preparations" => 0,
+        "main_native_full_data_scans" => 0,
+        "main_event_bound_observation_visits" => 0)]
+    @test isnothing(PDMPSamplersRBridge._enforce_no_main_full_data!(
+        [0], clean))
+    dirty = [Dict{String,Any}(
+        "anchor_main_preparations" => 2,
+        "main_native_full_data_scans" => 3,
+        "main_event_bound_observation_visits" => 17)]
+    error = try
+        PDMPSamplersRBridge._enforce_no_main_full_data!([1], dirty)
+        nothing
+    catch exception
+        exception
+    end
+    @test error isa ErrorException
+    message = sprint(showerror, error)
+    @test contains(message, "main_full_gradient_calls=1")
+    @test contains(message, "anchor_main_preparations=2")
+    @test contains(message, "main_native_full_data_scans=3")
+    @test contains(message, "main_event_bound_observation_visits=17")
 end
 
 function omrf_curvature_weights(X, seen; legacy_node_sum=false,
@@ -523,13 +680,41 @@ end
     refresh_position = new_anchor .+ 0.1
     manager.main_refresh_distance = 0.01
     preparations_before_main = manager.preparations
-    PDMPSamplersRBridge._select_omrf_anchor!(
+    @test PDMPSamplersRBridge._select_omrf_anchor!(
         manager, managed_model.grad, refresh_position; phase=:main)
     @test manager.preparations == preparations_before_main + 1
     @test manager.main_refreshes == 1
     @test manager.main_activations == 1
     @test manager.oracle.anchor == refresh_position
     @test managed_model.grad.anchor == refresh_position
+    @test !PDMPSamplersRBridge._select_omrf_anchor!(
+        manager, managed_model.grad, refresh_position; phase=:main)
+    PDMPSamplersRBridge._finish_omrf_warmup!(
+        manager, managed_model.grad, refresh_position)
+    @test manager.warmup_finish_preparations == manager.preparations
+    post_warmup_position = refresh_position .+ 0.2
+    @test PDMPSamplersRBridge._select_omrf_anchor!(
+        manager, managed_model.grad, post_warmup_position; phase=:main)
+    @test manager.preparations - manager.warmup_finish_preparations == 1
+    @test bank_ctx.counts.native_full_data_scans -
+        manager.warmup_finish_native_full_data_scans > 0
+
+    representative_trace = PDMPTrace([
+        PDMPEvent(0.0, zeros(2), ones(2)),
+        PDMPEvent(1.0, [1.0, 0.0], ones(2)),
+        PDMPEvent(2.0, [2.0, 2.0], ones(2)),
+    ], BouncyParticle(2, 0.0))
+    representatives, representative_scales =
+        PDMPSamplersRBridge._omrf_representative_anchors(
+            representative_trace, [3.0, 3.0], 3)
+    @test size(representatives) == (2, 3)
+    @test representatives[:, 1] == [3.0, 3.0]
+    @test all(isfinite, representative_scales)
+    @test all(>(0), representative_scales)
+    @test length(unique(eachcol(representatives))) == 3
+    tail_candidates = PDMPSamplersRBridge._omrf_warmup_candidates(
+        representative_trace, [3.0, 3.0], 3; retained_fraction=0.5)
+    @test all(tail_candidates[1, 2:end] .>= 1.0)
 
     node_weights = envelope_spec["node_weights"]
     pattern_spec = copy(envelope_spec)
@@ -543,6 +728,298 @@ end
     pattern_envelope = PDMPSamplersRBridge._build_omrf_residual_envelope(
         pattern_spec, anchor, analytic.residual_context)
     @test pattern_envelope isa PDMPSamplers.GroupedResidualEnvelope
+    pattern_hcv_spec = copy(pattern_spec)
+    pattern_hcv_spec["bound_type"] = "pattern_local_hcv_range"
+    pattern_hcv_spec["use_hcv"] = true
+    pattern_hcv_spec["hcv_after_warmup"] = false
+    pattern_hcv_spec["hcv_damping"] = Inf
+    pattern_hcv_oracle = PDMPSamplersRBridge.OMRFAnalyticSubsamplingOracle(
+        model_ctx, pattern_hcv_spec, analytic_prior_names, copy(anchor))
+    pattern_hcv_envelope = PDMPSamplersRBridge._build_stan_residual_envelope(
+        pattern_hcv_spec, pattern_hcv_oracle.anchor, pattern_hcv_oracle)
+    @test pattern_hcv_envelope isa PDMPSamplers.GroupedResidualEnvelope
+    @test pattern_hcv_envelope.component_scales! isa
+        PDMPSamplersRBridge.OMRFPatternLocalHCVScales
+    factor_pattern_hcv_spec = copy(pattern_hcv_spec)
+    factor_pattern_hcv_spec["factorization"] = "person_node"
+    factor_pattern_hcv_spec["structural_groups"] =
+        reshape(collect(1:9), 1, 9)
+    factor_pattern_hcv_oracle =
+        PDMPSamplersRBridge.OMRFAnalyticSubsamplingOracle(
+            model_ctx, factor_pattern_hcv_spec, analytic_prior_names,
+            copy(anchor))
+    factor_pattern_hcv_context =
+        factor_pattern_hcv_oracle.residual_context
+    factor_pattern_hcv_envelope =
+        PDMPSamplersRBridge._build_omrf_residual_envelope(
+            factor_pattern_hcv_spec, anchor,
+            factor_pattern_hcv_context)
+    @test factor_pattern_hcv_envelope isa
+        PDMPSamplers.GroupedResidualEnvelope
+    @test PDMPSamplers.n_observations(factor_pattern_hcv_envelope) == 9
+    @test factor_pattern_hcv_envelope.component_scales! isa
+        PDMPSamplersRBridge.OMRFBatchedFactorHCVScales
+    grouped_hcv_spec = copy(pattern_hcv_spec)
+    grouped_hcv_spec["bound_type"] = "grouped_person_hcv_box"
+    grouped_hcv_spec["box_membership"] = [1, 1, 2]
+    grouped_hcv_spec["box_minima"] = [0 0 1; 1 2 0]
+    grouped_hcv_spec["box_maxima"] = [2 1 2; 1 2 0]
+    grouped_hcv_oracle =
+        PDMPSamplersRBridge.OMRFAnalyticSubsamplingOracle(
+            model_ctx, grouped_hcv_spec, analytic_prior_names,
+            copy(anchor))
+    grouped_hcv_envelope =
+        PDMPSamplersRBridge._build_omrf_residual_envelope(
+            grouped_hcv_spec, grouped_hcv_oracle.anchor,
+            grouped_hcv_oracle.residual_context)
+    @test grouped_hcv_envelope isa PDMPSamplers.GroupedResidualEnvelope
+    @test PDMPSamplers.n_observations(grouped_hcv_envelope) == 3
+    @test grouped_hcv_envelope.component_scales! isa
+        PDMPSamplersRBridge.OMRFGroupedPersonHCVBoxScales
+    @test grouped_hcv_envelope.groups == reshape([1, 1, 2], 1, :)
+    node_grouped_hcv_spec = copy(pattern_hcv_spec)
+    node_grouped_hcv_spec["bound_type"] =
+        "node_grouped_person_hcv_box"
+    node_grouped_hcv_spec["node_box_membership"] = [
+        1 1 2;
+        3 4 3;
+        5 6 5
+    ]
+    node_grouped_hcv_spec["node_box_nodes"] = [1, 1, 2, 2, 3, 3]
+    node_grouped_hcv_spec["node_box_minima"] = [
+        0 0 1; 0 2 0; 0 0 0; 2 0 1; 0 1 0; 2 0 0
+    ]
+    node_grouped_hcv_spec["node_box_maxima"] = [
+        0 1 2; 0 2 0; 1 0 2; 2 0 1; 1 2 0; 2 0 0
+    ]
+    node_grouped_hcv_oracle =
+        PDMPSamplersRBridge.OMRFAnalyticSubsamplingOracle(
+            model_ctx, node_grouped_hcv_spec, analytic_prior_names,
+            copy(anchor))
+    node_grouped_hcv_envelope =
+        PDMPSamplersRBridge._build_omrf_residual_envelope(
+            node_grouped_hcv_spec, node_grouped_hcv_oracle.anchor,
+            node_grouped_hcv_oracle.residual_context)
+    @test node_grouped_hcv_envelope isa PDMPSamplers.GroupedResidualEnvelope
+    @test node_grouped_hcv_envelope.groups ==
+        node_grouped_hcv_spec["node_box_membership"]
+    @test node_grouped_hcv_envelope.component_scales! isa
+        PDMPSamplersRBridge.OMRFNodeGroupedPersonHCVBoxScales
+    cell_cached_spec = copy(node_grouped_hcv_spec)
+    cell_cached_spec["bound_type"] =
+        "cell_cached_node_grouped_person_hcv_box"
+    cell_cached_oracle =
+        PDMPSamplersRBridge.OMRFAnalyticSubsamplingOracle(
+            model_ctx, cell_cached_spec, analytic_prior_names,
+            copy(anchor))
+    cell_cached_envelope =
+        PDMPSamplersRBridge._build_omrf_residual_envelope(
+            cell_cached_spec, cell_cached_oracle.anchor,
+            cell_cached_oracle.residual_context)
+    @test cell_cached_envelope.component_scales! isa
+        PDMPSamplersRBridge.OMRFCellCachedNodeGroupedPersonHCVBoxScales
+    lazy_node_grouped_hcv_spec = copy(node_grouped_hcv_spec)
+    lazy_node_grouped_hcv_spec["bound_type"] =
+        "lazy_node_grouped_person_hcv_box"
+    lazy_node_grouped_hcv_spec["node_box_membership"] = [
+        2 2 3;
+        5 6 5;
+        8 9 8
+    ]
+    lazy_node_grouped_hcv_spec["node_box_nodes"] = [
+        1, 1, 1, 2, 2, 2, 3, 3, 3]
+    lazy_node_grouped_hcv_spec["node_box_minima"] = [
+        0 0 1; 0 0 1; 0 0 2;
+        0 0 0; 0 0 0; 2 0 0;
+        0 0 0; 0 0 0; 1 0 0
+    ]
+    lazy_node_grouped_hcv_spec["node_box_maxima"] = [
+        0 2 2; 0 1 2; 0 2 2;
+        2 0 2; 1 0 2; 2 0 2;
+        2 2 0; 2 1 0; 1 2 0
+    ]
+    lazy_node_grouped_hcv_spec["node_box_parents"] = [
+        0, 1, 1, 0, 4, 4, 0, 7, 7]
+    lazy_node_grouped_hcv_spec["node_box_roots"] = [1, 4, 7]
+    lazy_node_grouped_hcv_spec["node_box_leaves"] = [2, 3, 5, 6, 8, 9]
+    lazy_node_grouped_hcv_oracle =
+        PDMPSamplersRBridge.OMRFAnalyticSubsamplingOracle(
+            model_ctx, lazy_node_grouped_hcv_spec,
+            analytic_prior_names, copy(anchor))
+    lazy_node_grouped_hcv_envelope =
+        PDMPSamplersRBridge._build_omrf_residual_envelope(
+            lazy_node_grouped_hcv_spec,
+            lazy_node_grouped_hcv_oracle.anchor,
+            lazy_node_grouped_hcv_oracle.residual_context)
+    @test lazy_node_grouped_hcv_envelope.component_scales! isa
+        PDMPSamplersRBridge.OMRFLazyNodeGroupedPersonHCVBoxScales
+    @test PDMPSamplers.n_observations(lazy_node_grouped_hcv_envelope) == 3
+    @test length(lazy_node_grouped_hcv_envelope.scales) == 3
+    mixed_hcv_candidates = hcat(anchor, anchor .+ 0.17)
+    mixed_hcv_entries = PDMPSamplersRBridge.OMRFAnchorEntry[]
+    for candidate in eachcol(mixed_hcv_candidates)
+        mixed_context = PDMPSamplersRBridge._omrf_residual_context(
+            factor_pattern_hcv_spec, analytic_prior_names, candidate,
+            model_ctx.counts)
+        mixed_state = PDMPSamplersRBridge.OMRFPreparedAnchorState(
+            collect(candidate), zeros(9), zeros(9), mixed_context,
+            factor_pattern_hcv_envelope)
+        push!(mixed_hcv_entries,
+            PDMPSamplersRBridge.OMRFAnchorEntry(mixed_state, 0))
+    end
+    mixed_hcv_bank =
+        PDMPSamplersRBridge._prepare_omrf_node_local_hcv_bank(
+            mixed_hcv_entries, model_ctx.counts)
+    PDMPSamplersRBridge._install_omrf_node_local_sources!(
+        mixed_hcv_bank, [1, 2, 1])
+    factor_pattern_hcv_oracle.node_local_hcv = mixed_hcv_bank
+    PDMPSamplersRBridge._install_omrf_batched_node_sources!(
+        factor_pattern_hcv_envelope.component_scales!, mixed_hcv_bank)
+    grouped_hcv_oracle.node_local_hcv = mixed_hcv_bank
+    grouped_hcv_manager =
+        PDMPSamplersRBridge._new_omrf_anchor_manager(
+            grouped_hcv_oracle, grouped_hcv_spec,
+            analytic_prior_names, grouped_hcv_envelope, 2)
+    grouped_hcv_manager.oracle.node_local_hcv = mixed_hcv_bank
+    grouped_hcv_cv = SubsampledControlVariate(
+        (out, x) -> fill!(out, 0.0), grouped_hcv_oracle,
+        grouped_hcv_envelope, anchor, 1)
+    grouped_hcv_state = PDMPState(0.0,
+        SkeletonPoint(copy(anchor), fill(0.25, length(anchor))))
+    grouped_hcv_flow = AdaptiveBoomerang(length(anchor); λref=0.2)
+    PDMPSamplers.initialize_flow_state!(grouped_hcv_state, grouped_hcv_flow)
+    grouped_hcv_state.ξ.x .+= range(0.05, 0.25; length=length(anchor))
+    warmup_pattern_trace = PDMPTrace([
+        PDMPEvent(0.0, copy(anchor), fill(0.10, length(anchor))),
+        PDMPEvent(1.0, copy(grouped_hcv_state.ξ.x),
+            fill(0.25, length(anchor))),
+    ], grouped_hcv_flow)
+    visits_before = model_ctx.counts.event_bound_observation_visits
+    PDMPSamplersRBridge._select_omrf_warmup_pattern_sources!(
+        grouped_hcv_manager, grouped_hcv_cv, warmup_pattern_trace,
+        grouped_hcv_state, grouped_hcv_flow)
+    @test all(1 .<= mixed_hcv_bank.sources .<= 2)
+    @test grouped_hcv_manager.node_source_checks == 1
+    @test model_ctx.counts.event_bound_observation_visits - visits_before ==
+        32 * 3 * 3 * 2
+    @test grouped_hcv_envelope.component_scales!.node_sources ==
+        mixed_hcv_bank.sources
+    mapped_checks = grouped_hcv_manager.node_source_checks
+    mapped_visits = model_ctx.counts.event_bound_observation_visits
+    PDMPSamplersRBridge._select_omrf_warmup_mapped_sources!(
+        grouped_hcv_manager, grouped_hcv_cv, grouped_hcv_state)
+    @test grouped_hcv_manager.node_source_checks == mapped_checks + 1
+    @test model_ctx.counts.event_bound_observation_visits == mapped_visits
+    pattern_checks = grouped_hcv_manager.node_source_checks
+    PDMPSamplersRBridge._select_omrf_pattern_count_sources!(
+        grouped_hcv_manager, grouped_hcv_cv,
+        grouped_hcv_state, grouped_hcv_flow)
+    @test grouped_hcv_manager.node_source_checks == pattern_checks + 1
+    @test model_ctx.counts.event_bound_observation_visits == mapped_visits
+    @test all(sum(mixed_hcv_bank.node_pattern_counts[node]) == 3
+        for node in 1:3)
+    cell_cached_scales = cell_cached_envelope.component_scales!
+    cell_roof = similar(cell_cached_envelope.scales)
+    point_roof = similar(cell_cached_envelope.scales)
+    PDMPSamplers.component_cell_scales!(cell_roof, cell_cached_envelope,
+        grouped_hcv_state, grouped_hcv_flow, 0.0, 0.2)
+    point_calls = cell_cached_oracle.ctx.counts.envelope_point_calls
+    PDMPSamplers.component_scales!(point_roof, cell_cached_envelope,
+        grouped_hcv_state, grouped_hcv_flow, 0.1)
+    @test point_roof == cell_roof
+    @test cell_cached_oracle.ctx.counts.envelope_point_calls == point_calls
+    @test cell_cached_scales.n_cached_cells == 1
+    @test PDMPSamplers.screening_residual_bound(
+        cell_cached_envelope, grouped_hcv_state, grouped_hcv_flow, 0.1) ≈
+        dot(cell_roof, cell_cached_envelope.totals)
+    cell_cached_cv = SubsampledControlVariate(
+        (out, x) -> fill!(out, 0.0), cell_cached_oracle,
+        cell_cached_envelope, anchor, 1)
+    cell_B = PDMPSamplers.screening_residual_bound(
+        cell_cached_envelope, grouped_hcv_state, grouped_hcv_flow, 0.1)
+    cell_M = PDMPSamplers.draw_subset!(
+        Xoshiro(20260814), cell_cached_cv, 0.0, cell_B)
+    @test cell_cached_scales.selected_person_point_bound <= cell_M + 1e-12
+    for person in 1:3, node in 1:3
+        component = cell_cached_envelope.groups[node, person]
+        exact_person_bound =
+            PDMPSamplersRBridge._omrf_node_grouped_person_point_bound(
+                cell_cached_scales.base, person, node)
+        box_bound = PDMPSamplersRBridge._omrf_node_grouped_point_bound(
+            cell_cached_scales.base, component, node)
+        @test exact_person_bound <= box_bound + 1e-12
+    end
+    @test PDMPSamplers.subsampling_residual_subset_bound(
+        cell_cached_oracle, grouped_hcv_state, grouped_hcv_flow, 0.0,
+        cell_M, cell_cached_cv.subset, 3.0) ≈
+        cell_cached_scales.selected_person_point_bound
+    lazy_cv = SubsampledControlVariate(
+        (out, x) -> fill!(out, 0.0), lazy_node_grouped_hcv_oracle,
+        lazy_node_grouped_hcv_envelope, anchor, 1)
+    lazy_B = PDMPSamplers.screening_residual_bound(
+        lazy_cv.envelope, grouped_hcv_state, grouped_hcv_flow, 0.0)
+    @test lazy_B >= 0
+    lazy_scales = lazy_cv.envelope.component_scales!
+    @test lazy_scales.root_totals == lazy_cv.envelope.totals
+    leaf_person_bounds = zeros(3)
+    direct_leaf_person_bounds = zeros(3)
+    for person in 1:3, node in 1:3
+        component = lazy_node_grouped_hcv_spec[
+            "node_box_membership"][node, person]
+        leaf_person_bounds[person] +=
+            PDMPSamplersRBridge._omrf_lazy_component_point_bound(
+                lazy_scales, component)
+        direct_leaf_person_bounds[person] +=
+            PDMPSamplersRBridge._omrf_node_grouped_point_bound(
+                lazy_scales.base, component, node)
+    end
+    @test leaf_person_bounds == direct_leaf_person_bounds
+    leaf_total = sum(leaf_person_bounds)
+    @test lazy_B + 1e-12 >= leaf_total
+    lazy_rng = Xoshiro(20260813)
+    lazy_draws = 20_000
+    lazy_successes = 0
+    lazy_person_counts = zeros(Int, 3)
+    for _ in 1:lazy_draws
+        bound = PDMPSamplers.draw_subset!(lazy_rng, lazy_cv, 0.0, lazy_B)
+        if bound > 0
+            lazy_successes += 1
+            lazy_person_counts[lazy_cv.subset[1]] += 1
+            @test bound + 1e-12 >= 3leaf_person_bounds[lazy_cv.subset[1]]
+        end
+    end
+    if lazy_B > 0
+        @test lazy_successes / lazy_draws ≈ leaf_total / lazy_B atol=0.02
+        @test lazy_person_counts ./ lazy_draws ≈
+            leaf_person_bounds ./ lazy_B atol=0.02
+    end
+    @test lazy_node_grouped_hcv_oracle.ctx.counts.lazy_branch_evaluations > 0
+    @test lazy_node_grouped_hcv_oracle.ctx.counts.lazy_leaf_evaluations > 0
+    proxy_rows_before = copy(mixed_hcv_bank.contexts[1].X)
+    selections_before_direct = grouped_hcv_manager.main_selections
+    PDMPSamplersRBridge._select_omrf_node_local_sources!(
+        grouped_hcv_manager, grouped_hcv_cv,
+        grouped_hcv_state, grouped_hcv_flow)
+    @test grouped_hcv_manager.main_selections == selections_before_direct + 1
+    @test mixed_hcv_bank.contexts[1].X == proxy_rows_before
+    @test grouped_hcv_envelope.component_scales!.node_anchors ===
+        mixed_hcv_bank.candidates
+    grouped_hcv_manager.node_source_check_distance = 1.0
+    copyto!(grouped_hcv_manager.node_source_last_position,
+        grouped_hcv_state.ξ.x)
+    checks_before = grouped_hcv_manager.node_source_checks
+    skips_before = grouped_hcv_manager.node_source_skips
+    PDMPSamplersRBridge._select_omrf_anchor!(
+        grouped_hcv_manager, grouped_hcv_cv, grouped_hcv_state.ξ.x;
+        phase=:main, state=grouped_hcv_state, flow=grouped_hcv_flow)
+    @test grouped_hcv_manager.node_source_checks == checks_before
+    @test grouped_hcv_manager.node_source_skips == skips_before + 1
+    grouped_hcv_state.ξ.x[1] += 2grouped_hcv_manager.distance_scales[1]
+    PDMPSamplersRBridge._select_omrf_anchor!(
+        grouped_hcv_manager, grouped_hcv_cv, grouped_hcv_state.ξ.x;
+        phase=:main, state=grouped_hcv_state, flow=grouped_hcv_flow)
+    @test grouped_hcv_manager.node_source_checks == checks_before + 1
+    @test model_ctx.counts.event_bound_observation_visits == mapped_visits
     covariate_spec = copy(analytic_prior_spec)
     covariate_spec["bound_type"] = "covariate_local_expansion"
     covariate_weights = zeros(27, 3)
@@ -682,6 +1159,7 @@ end
     @test covariate_hcv_prepared.envelope.component_scales! isa
         PDMPSamplersRBridge.OMRFDampedHCVNodeLocalScales
     velocity = collect(range(-0.75, 0.85; length=9))
+    pattern_hcv_residual = zeros(9)
     for flow in (ZigZag(9), BouncyParticle(9, 0.2), Boomerang(9))
         state = PDMPState(0.0,
             SkeletonPoint(copy(position), copy(velocity)))
@@ -692,6 +1170,47 @@ end
         pattern_cell_scales = similar(pattern_envelope.cell_scales)
         PDMPSamplers.component_cell_scales!(pattern_cell_scales,
             pattern_envelope, state, flow, 0.05, 0.35)
+        pattern_hcv_cell_scales = similar(pattern_hcv_envelope.cell_scales)
+        grouped_hcv_cell_scales = similar(grouped_hcv_envelope.cell_scales)
+        node_grouped_hcv_cell_scales =
+            similar(node_grouped_hcv_envelope.cell_scales)
+        factor_pattern_hcv_cell_scales =
+            similar(factor_pattern_hcv_envelope.cell_scales)
+        if flow isa PDMPSamplers.AnyBoomerang
+            PDMPSamplers.component_cell_scales!(pattern_hcv_cell_scales,
+                pattern_hcv_envelope, state, flow, 0.05, 0.35)
+            PDMPSamplers.component_cell_scales!(grouped_hcv_cell_scales,
+                grouped_hcv_envelope, state, flow, 0.05, 0.35)
+            PDMPSamplers.component_cell_scales!(node_grouped_hcv_cell_scales,
+                node_grouped_hcv_envelope, state, flow, 0.05, 0.35)
+            PDMPSamplers.component_cell_scales!(
+                factor_pattern_hcv_cell_scales,
+                factor_pattern_hcv_envelope, state, flow, 0.05, 0.35)
+            PDMPSamplers.component_scales!(pattern_hcv_envelope.scales,
+                pattern_hcv_envelope, state, flow, 0.2)
+            PDMPSamplers.component_scales!(factor_pattern_hcv_envelope.scales,
+                factor_pattern_hcv_envelope, state, flow, 0.2)
+            @test @allocated(PDMPSamplers.component_scales!(
+                pattern_hcv_envelope.scales, pattern_hcv_envelope,
+                state, flow, 0.2)) == 0
+            @test @allocated(PDMPSamplers.component_cell_scales!(
+                pattern_hcv_cell_scales, pattern_hcv_envelope,
+                state, flow, 0.05, 0.35)) == 0
+            @test @allocated(PDMPSamplers.component_cell_scales!(
+                grouped_hcv_cell_scales, grouped_hcv_envelope,
+                state, flow, 0.05, 0.35)) == 0
+            @test @allocated(PDMPSamplers.component_cell_scales!(
+                node_grouped_hcv_cell_scales, node_grouped_hcv_envelope,
+                state, flow, 0.05, 0.35)) == 0
+            @test @allocated(PDMPSamplers.total_residual_bound(
+                pattern_hcv_envelope, state, flow, 0.2)) == 0
+            @test @allocated(PDMPSamplers.component_scales!(
+                factor_pattern_hcv_envelope.scales,
+                factor_pattern_hcv_envelope, state, flow, 0.2)) == 0
+            @test @allocated(PDMPSamplers.component_cell_scales!(
+                factor_pattern_hcv_cell_scales,
+                factor_pattern_hcv_envelope, state, flow, 0.05, 0.35)) == 0
+        end
         covariate_cell_scales = similar(covariate_envelope.cell_scales)
         PDMPSamplers.component_cell_scales!(covariate_cell_scales,
             covariate_envelope, state, flow, 0.05, 0.35)
@@ -711,6 +1230,48 @@ end
             covariate_bound = dot(covariate_cell_scales,
                 @view covariate_weights[:, person])
             @test actual <= covariate_bound * (1 + 2e-7) + 2e-8
+
+            if flow isa PDMPSamplers.AnyBoomerang
+                pattern_hcv_oracle(pattern_hcv_residual,
+                    candidate.ξ.x, [person], anchor)
+                pattern_hcv_actual =
+                    PDMPSamplers.λ(candidate, pattern_hcv_residual, flow) +
+                    PDMPSamplers.λ(candidate, -pattern_hcv_residual, flow)
+                pattern_hcv_bound = sum(partition ->
+                    pattern_hcv_cell_scales[
+                        pattern_hcv_envelope.groups[partition, person]],
+                    axes(pattern_hcv_envelope.groups, 1))
+                @test pattern_hcv_actual <=
+                    pattern_hcv_bound * (1 + 2e-7) + 2e-8
+                grouped_hcv_oracle(pattern_hcv_residual,
+                    candidate.ξ.x, [person], anchor)
+                grouped_hcv_actual =
+                    PDMPSamplers.λ(candidate, pattern_hcv_residual, flow) +
+                    PDMPSamplers.λ(candidate, -pattern_hcv_residual, flow)
+            grouped_hcv_bound = grouped_hcv_cell_scales[
+                grouped_hcv_envelope.groups[1, person]]
+            @test grouped_hcv_actual <=
+                grouped_hcv_bound * (1 + 2e-7) + 2e-8
+            node_grouped_hcv_bound = sum(partition ->
+                node_grouped_hcv_cell_scales[
+                    node_grouped_hcv_envelope.groups[partition, person]],
+                axes(node_grouped_hcv_envelope.groups, 1))
+            @test grouped_hcv_actual <=
+                node_grouped_hcv_bound * (1 + 2e-7) + 2e-8
+
+                factor_node = mod1(person + 1, 3)
+                factor = (factor_node - 1) * 3 + person
+                factor_pattern_hcv_oracle(
+                    factor_residual, candidate.ξ.x, [factor], anchor)
+                factor_pattern_hcv_actual =
+                    PDMPSamplers.λ(candidate, factor_residual, flow) +
+                    PDMPSamplers.λ(candidate, -factor_residual, flow)
+                factor_pattern_hcv_bound =
+                    factor_pattern_hcv_cell_scales[
+                        factor_pattern_hcv_envelope.groups[1, factor]]
+                @test factor_pattern_hcv_actual <=
+                    factor_pattern_hcv_bound * (1 + 2e-7) + 2e-8
+            end
 
             factor_node = mod1(person + 1, 3)
             factor = (factor_node - 1) * 3 + person

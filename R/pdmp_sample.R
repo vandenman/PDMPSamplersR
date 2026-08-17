@@ -775,6 +775,15 @@ pdmp_sample <- function(f, d,
 #' @param subsampling_main_anchor_refresh_distance Positive Euclidean distance
 #'   from the nearest prepared anchor that triggers a new exact OMRF anchor
 #'   during main sampling. The default `Inf` disables main-phase preparation.
+#' @param subsampling_node_source_check_distance Nonnegative scaled Euclidean
+#'   movement required before reconsidering node-local warmup-bank sources.
+#'   Zero preserves checking at every event boundary. Skipped checks retain
+#'   the previous certified node sources and do not change the target.
+#' @param subsampling_require_no_main_full_data If `TRUE`, fail the run when
+#'   retained sampling performs any full-gradient evaluation, prepares an
+#'   anchor, or traverses every OMRF person-node conditional in native Julia.
+#'   Setup and warmup work are allowed. This is intended as a hard benchmark
+#'   invariant for frozen-control-variate and direct-clock experiments.
 #' @param warmup_adaptation_interval Nonnegative time between dynamics
 #'   adaptation attempts during warmup. `NULL` uses ten equally spaced warmup
 #'   windows (`t_warmup / 10`); zero attempts adaptation at every event. The
@@ -795,6 +804,8 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
                         subsampling_use_anchor_bank = FALSE,
                         subsampling_anchor_bank_capacity = 8L,
                         subsampling_main_anchor_refresh_distance = Inf,
+                        subsampling_node_source_check_distance = 0,
+                        subsampling_require_no_main_full_data = FALSE,
                         flow = c("ZigZag", "BouncyParticle", "Boomerang", "AdaptiveBoomerang", "PreconditionedZigZag", "PreconditionedBPS"),
                         algorithm = c("ThinningStrategy", "GridThinningStrategy",
                                       "PositiveVariationGridThinningStrategy", "VectorVariationThinningStrategy",
@@ -868,9 +879,6 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
     if (t_warmup <= 0) {
       cli::cli_abort("Full-gradient subsampling warmup requires positive {.arg t_warmup}.")
     }
-    if (!is.null(slab_prior)) {
-      cli::cli_abort("Full-gradient subsampling warmup does not yet support dependent slab priors.")
-    }
   }
   if (!is.null(full_gradient)) {
     full_gradient$spec <- .attach_omrf_analytic_prior(
@@ -900,6 +908,23 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
   }
   subsampling_main_anchor_refresh_distance <-
     as.numeric(subsampling_main_anchor_refresh_distance)
+  if (!is.numeric(subsampling_node_source_check_distance) ||
+      length(subsampling_node_source_check_distance) != 1L ||
+      !is.finite(subsampling_node_source_check_distance) ||
+      subsampling_node_source_check_distance < 0) {
+    cli::cli_abort(paste0(
+      "Argument {.arg subsampling_node_source_check_distance} must be ",
+      "finite and nonnegative."))
+  }
+  subsampling_node_source_check_distance <-
+    as.numeric(subsampling_node_source_check_distance)
+  if (!is.logical(subsampling_require_no_main_full_data) ||
+      length(subsampling_require_no_main_full_data) != 1L ||
+      is.na(subsampling_require_no_main_full_data)) {
+    cli::cli_abort(paste0(
+      "Argument {.arg subsampling_require_no_main_full_data} must be ",
+      "TRUE or FALSE."))
+  }
   if (isTRUE(subsampling_use_anchor_bank) && subsampling_anchor_updates == 0L &&
       subsampling_warmup != "full") {
     cli::cli_abort(paste0(
@@ -1154,6 +1179,10 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
   JuliaCall::julia_assign("subsampling_anchor_bank_capacity", subsampling_anchor_bank_capacity)
   JuliaCall::julia_assign("subsampling_main_anchor_refresh_distance",
                           subsampling_main_anchor_refresh_distance)
+  JuliaCall::julia_assign("subsampling_node_source_check_distance",
+                          subsampling_node_source_check_distance)
+  JuliaCall::julia_assign("subsampling_require_no_main_full_data",
+                          subsampling_require_no_main_full_data)
   JuliaCall::julia_assign("warmup_adaptation_interval",
                           warmup_adaptation_interval)
   JuliaCall::julia_assign("support_boundary_mode", support_boundary$mode)
@@ -1227,6 +1256,8 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
       use_anchor_bank = subsampling_use_anchor_bank,
       anchor_bank_capacity = subsampling_anchor_bank_capacity,
       main_anchor_refresh_distance = subsampling_main_anchor_refresh_distance,
+      node_source_check_distance = subsampling_node_source_check_distance,
+      require_no_main_full_data = subsampling_require_no_main_full_data,
       support_boundary_mode = support_boundary_mode,
       support_boundary_max_bisection_steps = support_boundary_max_bisection_steps,
       support_boundary_time_rtol = support_boundary_time_rtol,

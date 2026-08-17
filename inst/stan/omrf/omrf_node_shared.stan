@@ -42,8 +42,8 @@ data {
   real<lower=0> prior_threshold_alpha;
   real<lower=0> prior_threshold_beta;
   real<lower=0> slab_base_scale;
-  real<lower=0> prior_log_tau_sd;
-  real<lower=0> prior_log_lambda_sd;
+  real<lower=0> prior_global_scale_sd;
+  real<lower=0> prior_node_scale_sd;
 }
 
 transformed data {
@@ -56,8 +56,8 @@ transformed data {
 parameters {
   vector[noThresholds] thresholds_0;
   vector[E] interactions_0;
-  real log_tau;
-  vector[P] log_lambda;
+  real<lower=0> global_scale;
+  vector<lower=0>[P] node_scale;
 }
 
 transformed parameters {
@@ -84,14 +84,14 @@ model {
   target += sum(prior_threshold_alpha * thresholds_0 -
                 (prior_threshold_alpha + prior_threshold_beta) *
                 log1p_exp(thresholds_0));
-  log_tau ~ normal(0, prior_log_tau_sd);
-  log_lambda ~ normal(0, prior_log_lambda_sd);
+  global_scale ~ normal(0, prior_global_scale_sd);
+  node_scale ~ normal(0, prior_node_scale_sd);
   {
     int edge = 1;
     for (j in 1:(P - 1)) for (k in (j + 1):P) {
-      real log_sd = log(slab_base_scale) + log_tau
-        + 0.5 * log_lambda[j] + 0.5 * log_lambda[k];
-      interactions_0[edge] ~ normal(0, exp(log_sd));
+      real interaction_sd = slab_base_scale * global_scale
+        * sqrt(node_scale[j] * node_scale[k]);
+      interactions_0[edge] ~ normal(0, interaction_sd);
       edge += 1;
     }
   }

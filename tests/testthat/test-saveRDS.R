@@ -55,12 +55,16 @@ test_that("Boomerang round-trip preserves estimators", {
 test_that("AdaptiveBoomerang round-trip preserves estimators", {
   skip_if_no_pdmp_julia_backend()
 
-  neg_grad <- function(x) x
+  neg_grad <- function(x) c(x[[1L]] / 4, x[[2L]] * 2)
   result <- pdmp_sample(neg_grad, d = 2, flow = "AdaptiveBoomerang",
                         algorithm = "GridThinningStrategy",
                         T = 3000, t_warmup = 500, show_progress = FALSE)
 
   m <- materialize(result)
+  expect_equal(dim(m$skeleton[[1L]]$flow_cov), c(2L, 2L))
+  expect_true(isSymmetric(m$skeleton[[1L]]$flow_cov))
+  expect_true(all(eigen(m$skeleton[[1L]]$flow_cov, symmetric = TRUE)$values > 0))
+  expect_false(isTRUE(all.equal(m$skeleton[[1L]]$flow_cov, diag(2))))
   tmp <- tempfile(fileext = ".rds")
   on.exit(unlink(tmp))
   saveRDS(m, tmp)

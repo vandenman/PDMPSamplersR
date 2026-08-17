@@ -107,6 +107,68 @@ test_that("public OMRF diagnostics verify explicit persons and single N/m scalin
     X, full$seen, "thresholds_0", "interactions_0",
     factorization = "person_node", geometry = "covariate_local")
   expect_identical(pattern_envelope$bound_type, "pattern_local_range")
+  pattern_hcv_envelope <- omrf_residual_envelope(
+    X, full$seen, "thresholds_0", "interactions_0",
+    use_hcv = TRUE, hcv_damping = Inf, hcv_warmup = "first_order",
+    geometry = "pattern_local")
+  expect_identical(pattern_hcv_envelope$bound_type,
+                   "pattern_local_hcv_range")
+  expect_true(pattern_hcv_envelope$hcv_after_warmup)
+  grouped_hcv_envelope <- omrf_residual_envelope(
+    X, full$seen, "thresholds_0", "interactions_0",
+    use_hcv = TRUE, hcv_damping = Inf, geometry = "grouped_box",
+    box_groups = 2L)
+  expect_identical(grouped_hcv_envelope$bound_type,
+                   "grouped_person_hcv_box")
+  expect_length(grouped_hcv_envelope$box_membership, nrow(X))
+  expect_equal(ncol(grouped_hcv_envelope$box_minima), ncol(X))
+  expect_equal(dim(grouped_hcv_envelope$box_minima),
+               dim(grouped_hcv_envelope$box_maxima))
+  expect_true(all(grouped_hcv_envelope$box_minima <=
+                  grouped_hcv_envelope$box_maxima))
+  expect_lte(nrow(grouped_hcv_envelope$box_minima), 2L)
+  node_grouped_hcv_envelope <- omrf_residual_envelope(
+    X, full$seen, "thresholds_0", "interactions_0",
+    use_hcv = TRUE, hcv_damping = Inf, geometry = "node_grouped_box",
+    box_groups = 2L)
+  expect_identical(node_grouped_hcv_envelope$bound_type,
+                   "node_grouped_person_hcv_box")
+  cell_cached_node_grouped_hcv_envelope <- omrf_residual_envelope(
+    X, full$seen, "thresholds_0", "interactions_0", backend = "analytic",
+    use_hcv = TRUE, hcv_damping = Inf,
+    geometry = "cell_cached_node_grouped_box", box_groups = 2L)
+  expect_identical(cell_cached_node_grouped_hcv_envelope$bound_type,
+                   "cell_cached_node_grouped_person_hcv_box")
+  expect_equal(dim(node_grouped_hcv_envelope$node_box_membership),
+               c(ncol(X), nrow(X)))
+  expect_length(node_grouped_hcv_envelope$node_box_nodes,
+                nrow(node_grouped_hcv_envelope$node_box_minima))
+  expect_equal(dim(node_grouped_hcv_envelope$node_box_minima),
+               dim(node_grouped_hcv_envelope$node_box_maxima))
+  for (node in seq_len(ncol(X))) {
+    expect_true(all(node_grouped_hcv_envelope$node_box_nodes[
+      node_grouped_hcv_envelope$node_box_membership[node, ]] == node))
+  }
+  lazy_node_grouped_hcv_envelope <- omrf_residual_envelope(
+    X, full$seen, "thresholds_0", "interactions_0",
+    use_hcv = TRUE, hcv_damping = Inf,
+    geometry = "lazy_node_grouped_box", box_groups = 2L,
+    box_root_groups = 1L)
+  expect_identical(lazy_node_grouped_hcv_envelope$bound_type,
+                   "lazy_node_grouped_person_hcv_box")
+  expect_equal(dim(lazy_node_grouped_hcv_envelope$node_box_membership),
+               c(ncol(X), nrow(X)))
+  expect_length(lazy_node_grouped_hcv_envelope$node_box_parents,
+                nrow(lazy_node_grouped_hcv_envelope$node_box_minima))
+  expect_true(length(lazy_node_grouped_hcv_envelope$node_box_roots) >=
+              ncol(X))
+  expect_true(length(lazy_node_grouped_hcv_envelope$node_box_leaves) >=
+              ncol(X))
+  expect_error(
+    omrf_residual_envelope(
+      X, full$seen, "thresholds_0", "interactions_0",
+      geometry = "grouped_box"),
+    "Grouped-box")
   expect_identical(
     covariate_envelope$bound_type, "covariate_local_expansion")
   expect_equal(ncol(covariate_envelope$covariate_weights), nrow(X))
@@ -130,6 +192,25 @@ test_that("public OMRF diagnostics verify explicit persons and single N/m scalin
   expect_identical(
     analytic_prior_subsampling$residual_envelope$analytic_prior$type,
     "gaussian")
+  node_prior <- list(
+    N = nrow(X), P = ncol(X), K = 2L, X = X, seen = full$seen,
+    prior_only = 1L, prior_threshold_alpha = 2,
+    prior_threshold_beta = 2, slab_base_scale = 0.7,
+    prior_global_scale_sd = 1.2, prior_node_scale_sd = 0.8)
+  node_envelope <- omrf_residual_envelope(
+    X, full$seen, "thresholds_0", "interactions_0",
+    prior_backend = "analytic")
+  node_subsampling <- stan_subsampling(
+    nrow(X), 2L, node_prior, node_envelope, anchor = rep(0, 9L))
+  expect_identical(
+    node_subsampling$residual_envelope$analytic_prior$type,
+    "node_scale_gaussian")
+  expect_identical(
+    node_subsampling$residual_envelope$analytic_prior$global_scale,
+    "global_scale")
+  expect_identical(
+    node_subsampling$residual_envelope$analytic_prior$node_scale,
+    "node_scale")
   compiled <- compile_pdmp_stan_model(stan)
   position <- seq(-0.21, 0.27, length.out = 9L)
   subset <- c(1L, 3L)
@@ -308,6 +389,7 @@ test_that("public independent-slab OMRF supports subsampling AdaptiveBoomerang",
       subsampling = subsampling, subsampling_warmup = "full",
       subsampling_use_anchor_bank = TRUE,
       subsampling_anchor_updates = 1L,
+      subsampling_require_no_main_full_data = TRUE,
       seed = 1905L)))
   factor_envelope <- omrf_residual_envelope(
     X, full$seen, "thresholds_0", "interactions_0",
@@ -337,6 +419,8 @@ test_that("public independent-slab OMRF supports subsampling AdaptiveBoomerang",
     hybrid_fit, "subsampling_context_counters")[[1L]]
   if (is.environment(hybrid_counters)) hybrid_counters <- as.list(hybrid_counters)
   expect_equal(hybrid_counters$anchor_preparations, 1L)
+  expect_equal(hybrid_counters$anchor_main_preparations, 0L)
+  expect_equal(hybrid_counters$main_native_full_data_scans, 0L)
   counters <- attr(subsampling_fit, "subsampling_context_counters")[[1L]]
   if (is.environment(counters)) counters <- as.list(counters)
   expect_equal(

@@ -16,6 +16,8 @@ pdmp_sample_from_stanmodel(
   subsampling_use_anchor_bank = FALSE,
   subsampling_anchor_bank_capacity = 8L,
   subsampling_main_anchor_refresh_distance = Inf,
+  subsampling_node_source_check_distance = 0,
+  subsampling_require_no_main_full_data = FALSE,
   flow = c("ZigZag", "BouncyParticle", "Boomerang", "AdaptiveBoomerang",
     "PreconditionedZigZag", "PreconditionedBPS"),
   algorithm = c("ThinningStrategy", "GridThinningStrategy",
@@ -102,6 +104,17 @@ per chain.}
 \item{subsampling_main_anchor_refresh_distance}{Positive Euclidean distance
 from the nearest prepared anchor that triggers a new exact OMRF anchor
 during main sampling. The default `Inf` disables main-phase preparation.}
+
+\item{subsampling_node_source_check_distance}{Nonnegative scaled Euclidean
+movement required before reconsidering node-local warmup-bank sources.
+Zero preserves checking at every event boundary. Skipped checks retain
+the previous certified node sources and do not change the target.}
+
+\item{subsampling_require_no_main_full_data}{If `TRUE`, fail the run when
+retained sampling performs any full-gradient evaluation, prepares an
+anchor, or traverses every OMRF person-node conditional in native Julia.
+Setup and warmup work are allowed. This is intended as a hard benchmark
+invariant for frozen-control-variate and direct-clock experiments.}
 
 \item{flow}{Character string specifying the flow type. One of "ZigZag",
 "BouncyParticle", "Boomerang", "AdaptiveBoomerang", "PreconditionedZigZag",

@@ -16,13 +16,14 @@ node_shared_omrf_fixture <- function() {
   data <- list(
     N = nrow(X), P = P, K = 2L, X = X, seen = rep(2L, P),
     prior_only = 0L, prior_threshold_alpha = 2,
-    prior_threshold_beta = 2, slab_base_scale = 0.35,
-    prior_log_tau_sd = 0.65, prior_log_lambda_sd = 0.75
+    prior_threshold_beta = 2, prior_cauchy_scale = 1,
+    slab_base_scale = 0.35,
+    prior_global_scale_sd = 0.65, prior_node_scale_sd = 0.75
   )
   list(
     data = data, prior = within(data, prior_only <- 1L), design = design,
-    slab = loglinear_gaussian_scale_slab(
-      log(0.35), logscale = c("log_tau", "log_lambda"),
+    slab = PDMPSamplersR::loglinear_gaussian_scale_slab(
+      log(0.35), logscale = c("global_scale", "node_scale"),
       logscale_design = design, coef = "interactions_0")
   )
 }
@@ -41,7 +42,8 @@ test_that("node-shared OMRF gradient closure retains scale-state priors", {
   }
   compiled <- compile_pdmp_stan_model(model)
   envelope <- omrf_residual_envelope(
-    fixture$data$X, fixture$data$seen, "thresholds_0", "interactions_0")
+    fixture$data$X, fixture$data$seen, "thresholds_0", "interactions_0",
+    prior_backend = "analytic")
   anchor <- rep(0, 10L)
   subsampling <- stan_subsampling(
     fixture$data$N, 2L, fixture$prior, envelope, anchor = anchor)
@@ -86,7 +88,8 @@ test_that("public node-shared OMRF samples full and subsampling with ZigZag and 
   }
   compiled <- compile_pdmp_stan_model(model)
   envelope <- omrf_residual_envelope(
-    fixture$data$X, fixture$data$seen, "thresholds_0", "interactions_0")
+    fixture$data$X, fixture$data$seen, "thresholds_0", "interactions_0",
+    prior_backend = "analytic")
   subsampling <- stan_subsampling(
     fixture$data$N, 2L, fixture$prior, envelope, anchor = rep(0, 10L))
   common <- list(
@@ -105,6 +108,7 @@ test_that("public node-shared OMRF samples full and subsampling with ZigZag and 
       common, list(flow = flow, seed = if (flow == "ZigZag") 1801L else 1802L)))
     subsampling_fit <- do.call(pdmp_sample_from_stanmodel, c(
       common, list(flow = flow, subsampling = subsampling,
+                   subsampling_warmup = "full", t_warmup = 0.4,
                    seed = if (flow == "ZigZag") 1811L else 1812L)))
     expect_s3_class(full_fit, "pdmp_result")
     expect_s3_class(subsampling_fit, "pdmp_result")
@@ -123,7 +127,11 @@ test_that("public node-shared OMRF samples full and subsampling with ZigZag and 
     expect_lte(
       subsampling_fit$stats$subsampling_final_reflections[[1L]],
       subsampling_fit$stats$subsampling_subset_evaluations[[1L]])
-    expect_equal(counters$sampling_full_gradient_calls, 0L)
+    # A full-gradient call is expected during initialization/transition when
+    # the node-scale target switches from exact warmup to retained sampling.
+    # The production invariant is the phase-specific main counter.
+    expect_equal(subsampling_fit$stats$main_full_gradient_calls[[1L]], 0L)
+    expect_equal(counters$main_native_full_data_scans, 0L)
     expect_equal(counters$sampling_model_constructions, 0L)
     expect_equal(counters$sampling_data_constructions, 0L)
   }

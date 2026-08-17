@@ -115,16 +115,26 @@ stan_subsampling <- function(n_observations, subsample_size,
   if (!all(required %in% names(standata))) {
     cli::cli_abort("Analytic OMRF priors require threshold alpha and beta data.")
   }
-  interaction <- if (!is.null(standata$prior_cauchy_scale)) {
+  interaction <- if (!is.null(standata$slab_base_scale) &&
+             !is.null(standata$prior_global_scale_sd) &&
+             !is.null(standata$prior_node_scale_sd)) {
+    list(
+      type = "node_scale_gaussian",
+      scale = standata$slab_base_scale,
+      global_scale_sd = standata$prior_global_scale_sd,
+      node_scale_sd = standata$prior_node_scale_sd
+    )
+  } else if (!is.null(standata$prior_cauchy_scale)) {
     list(type = "cauchy", scale = standata$prior_cauchy_scale)
   } else if (!is.null(standata$prior_interaction_sd)) {
     list(type = "gaussian", scale = standata$prior_interaction_sd)
   } else {
     cli::cli_abort(paste0(
-      "The requested analytic OMRF prior is not an independent Cauchy or ",
-      "Gaussian prior."))
+      "The requested analytic OMRF prior is not a supported independent ",
+      "Cauchy/Gaussian or node-scale Gaussian prior."))
   }
-  values <- c(standata[required], interaction$scale)
+  values <- c(standata[required], interaction$scale,
+              interaction$global_scale_sd, interaction$node_scale_sd)
   if (any(!vapply(values, function(value) {
     is.numeric(value) && length(value) == 1L && is.finite(value) && value > 0
   }, logical(1)))) {
@@ -134,7 +144,13 @@ stan_subsampling <- function(n_observations, subsample_size,
     type = interaction$type,
     threshold_alpha = standata$prior_threshold_alpha,
     threshold_beta = standata$prior_threshold_beta,
-    interaction_scale = interaction$scale)
+    interaction_scale = interaction$scale,
+    global_scale = if (identical(interaction$type, "node_scale_gaussian"))
+      "global_scale" else NULL,
+    node_scale = if (identical(interaction$type, "node_scale_gaussian"))
+      "node_scale" else NULL,
+    global_scale_sd = interaction$global_scale_sd,
+    node_scale_sd = interaction$node_scale_sd)
   spec
 }
 
@@ -167,7 +183,10 @@ stan_subsampling <- function(n_observations, subsample_size,
 #'   variate. This requires `backend = "analytic"` and retains a certified
 #'   first-order fallback through damping.
 #' @param hcv_damping Positive damping scale. By default this is the number of
-#'   OMRF likelihood coordinates.
+#'   OMRF likelihood coordinates. `Inf` selects the exact undamped Hessian
+#'   control variate and is currently supported only with
+#'   `geometry = "pattern_local"`, `geometry = "grouped_box"`, or one of
+#'   the node-grouped geometries.
 #' @param hcv_warmup HCV policy during warmup. `"hcv"` preserves the existing
 #'   behavior. Experimental `"first_order"` uses the certified first-order
 #'   residual bound during warmup and activates HCV at the main-phase boundary.
@@ -187,6 +206,29 @@ stan_subsampling <- function(n_observations, subsample_size,
 #'   identical node-neighbour patterns and retains their signed directional
 #'   logit geometry, which is especially tighter for scalar BPS/Boomerang
 #'   rates but is more expensive to construct.
+#'   `"grouped_box"` is the preferred exact HCV clock for non-factorized
+#'   subsampling: setup partitions whole persons into a fixed number of
+#'   covariate boxes and retained sampling evaluates one certificate per box,
+#'   never one certificate per person. It currently requires
+#'   `backend = "analytic"`, `use_hcv = TRUE`, `hcv_damping = Inf`, and
+#'   `factorization = "person"`.
+#'   `"node_grouped_box"` independently partitions each node by its incident
+#'   covariates and reuses the node's trajectory geometry across those boxes.
+#'   Experimental `"cell_cached_node_grouped_box"` uses the same node boxes
+#'   but samples marked persons from the already-certified grid-cell masses,
+#'   then thins only the selected person using its exact observed covariate
+#'   pattern. This avoids a second all-box pointwise traversal at every clock
+#'   proposal while retaining a whole-person stochastic gradient.
+#'   Experimental `"lazy_node_grouped_box"` builds the same recursive leaves
+#'   but exposes a coarser root frontier to GridThinning. At an accepted point
+#'   proposal it descends the certified support tree by exact thinning, so
+#'   child and leaf certificates are evaluated only along the sampled branch.
+#' @param box_root_groups Root boxes per node used by
+#'   `geometry = "lazy_node_grouped_box"`. This must not exceed `box_groups`.
+#' @param box_groups Maximum number of deterministic setup-time covariate
+#'   boxes used by `geometry = "grouped_box"`, or boxes per node for
+#'   `geometry = "node_grouped_box"`. The actual number is capped by the
+#'   number of distinct relevant person patterns.
 #' @return A certified Stan residual-envelope specification.
 #' @rdname stan_subsampling
 #' @export
@@ -198,13 +240,30 @@ omrf_residual_envelope <- function(X, seen, thresholds, interactions,
                                    factor_sampling = c("size_biased", "node_stratified"),
                                    prior_backend = c("stan", "analytic"),
                                    geometry = c("norm_local", "covariate_local",
-                                                "pattern_local")) {
+                                                "pattern_local", "grouped_box",
+                                                "node_grouped_box",
+                                                "cell_cached_node_grouped_box",
+                                                "lazy_node_grouped_box"),
+                                   box_groups = 16L,
+                                   box_root_groups = max(1L, box_groups %/% 2L)) {
   backend <- match.arg(backend)
   hcv_warmup <- match.arg(hcv_warmup)
   factorization <- match.arg(factorization)
   factor_sampling <- match.arg(factor_sampling)
   prior_backend <- match.arg(prior_backend)
   geometry <- match.arg(geometry)
+  if (!rlang::is_integerish(box_groups, n = 1L, finite = TRUE) ||
+      box_groups < 1L) {
+    cli::cli_abort("Argument {.arg box_groups} must be one positive integer.")
+  }
+  box_groups <- as.integer(box_groups)
+  if (!rlang::is_integerish(box_root_groups, n = 1L, finite = TRUE) ||
+      box_root_groups < 1L || box_root_groups > box_groups) {
+    cli::cli_abort(paste0(
+      "Argument {.arg box_root_groups} must be one positive integer no ",
+      "larger than {.arg box_groups}."))
+  }
+  box_root_groups <- as.integer(box_root_groups)
   if (!is.logical(use_hcv) || length(use_hcv) != 1L || is.na(use_hcv)) {
     cli::cli_abort("Argument {.arg use_hcv} must be TRUE or FALSE.")
   }
@@ -247,8 +306,31 @@ omrf_residual_envelope <- function(X, seen, thresholds, interactions,
   d_model <- no_thresholds + nrow(edges)
   if (is.null(hcv_damping)) hcv_damping <- d_model
   if (!is.numeric(hcv_damping) || length(hcv_damping) != 1L ||
-      !is.finite(hcv_damping) || hcv_damping <= 0) {
-    cli::cli_abort("Argument {.arg hcv_damping} must be one finite positive number.")
+      is.na(hcv_damping) || hcv_damping <= 0) {
+    cli::cli_abort("Argument {.arg hcv_damping} must be one positive number.")
+  }
+  if (is.infinite(hcv_damping) &&
+      !(isTRUE(use_hcv) && geometry %in% c(
+        "pattern_local", "grouped_box", "node_grouped_box",
+        "cell_cached_node_grouped_box",
+        "lazy_node_grouped_box"))) {
+    cli::cli_abort(paste0(
+      "Infinite {.arg hcv_damping} (the exact undamped HCV) currently requires ",
+      "{.arg use_hcv = TRUE} and {.arg geometry = \"pattern_local\"} or ",
+      "{.arg geometry = \"grouped_box\"}, \"node_grouped_box\", or ",
+      "\"lazy_node_grouped_box\"."))
+  }
+  if (geometry %in% c("grouped_box", "node_grouped_box",
+                      "cell_cached_node_grouped_box",
+                      "lazy_node_grouped_box") &&
+      !(backend == "analytic" && isTRUE(use_hcv) &&
+        is.infinite(hcv_damping) && factorization == "person" &&
+        factor_sampling == "size_biased")) {
+    cli::cli_abort(paste0(
+      "Grouped-box OMRF clocks currently require {.arg backend = \"analytic\"}, ",
+      "{.arg use_hcv = TRUE}, {.arg hcv_damping = Inf}, ",
+      "{.arg factorization = \"person\"}, and ",
+      "{.arg factor_sampling = \"size_biased\"}."))
   }
   incidence <- lapply(seq_len(P), function(j) {
     incident <- which(edges[, 1L] == j | edges[, 2L] == j)
@@ -397,8 +479,186 @@ omrf_residual_envelope <- function(X, seen, thresholds, interactions,
   } else {
     envelope <- stan_residual_envelope(weights)
   }
+
+  # Deterministic farthest-first seeds avoid changing the caller's RNG state.
+  # The subsequent Lloyd iterations are deterministic because explicit
+  # distinct centers are supplied. Boxes need not approximate a probability
+  # model: any fixed partition is exact because its coordinate extrema
+  # certify every person assigned to it.
+  box_membership <- rep.int(1L, nrow(X))
+  box_minima <- matrix(apply(X, 2L, min), nrow = 1L)
+  box_maxima <- matrix(apply(X, 2L, max), nrow = 1L)
+  partition_boxes <- function(features, group_limit) {
+    if (!ncol(features)) {
+      return(list(membership = rep.int(1L, nrow(features)), groups = 1L))
+    }
+    keys <- apply(features, 1L, paste, collapse = ",")
+    distinct <- features[!duplicated(keys), , drop = FALSE]
+    group_count <- min(group_limit, nrow(distinct))
+    center_rows <- integer(group_count)
+    center_rows[[1L]] <- which.max(rowSums(
+      sweep(distinct, 2L, colMeans(distinct), "-")^2))
+    minimum_distance <- rowSums(
+      sweep(distinct, 2L, distinct[center_rows[[1L]], ], "-")^2)
+    if (group_count > 1L) {
+      for (group in 2:group_count) {
+        center_rows[[group]] <- which.max(minimum_distance)
+        distance <- rowSums(
+          sweep(distinct, 2L, distinct[center_rows[[group]], ], "-")^2)
+        minimum_distance <- pmin(minimum_distance, distance)
+      }
+    }
+    membership <- if (group_count == 1L) rep.int(1L, nrow(features)) else {
+      stats::kmeans(
+        features, centers = distinct[center_rows, , drop = FALSE],
+        iter.max = 100L)$cluster
+    }
+    list(membership = as.integer(membership), groups = group_count)
+  }
+  partition_support_tree <- function(features, group_limit, root_limit) {
+    if (!ncol(features)) {
+      return(list(
+        membership = rep.int(1L, nrow(features)), groups = 1L,
+        boxes = list(seq_len(nrow(features))), parents = 0L,
+        root_nodes = 1L, leaves = 1L))
+    }
+    boxes <- list(seq_len(nrow(features)))
+    parents <- 0L
+    active <- 1L
+    root_nodes <- if (root_limit == 1L) 1L else integer()
+    while (length(active) < group_limit) {
+      candidates <- lapply(active, function(index) {
+        rows <- boxes[[index]]
+        ranges <- apply(features[rows, , drop = FALSE], 2L, function(x) {
+          diff(range(x))
+        })
+        list(index = index, score = sum(ranges) * length(rows), ranges = ranges)
+      })
+      splittable <- which(vapply(
+        candidates, function(candidate) any(candidate$ranges > 0), logical(1L)))
+      if (!length(splittable)) break
+      selected_candidate <- splittable[[which.max(vapply(
+        candidates[splittable], `[[`, numeric(1L), "score"))]]
+      selected <- candidates[[selected_candidate]]$index
+      rows <- boxes[[selected]]
+      dimension <- which.max(candidates[[selected_candidate]]$ranges)
+      ordered <- rows[order(features[rows, dimension], rows)]
+      changes <- which(diff(features[ordered, dimension]) > 0)
+      split <- changes[[which.min(abs(changes - length(rows) / 2))]]
+      left <- ordered[seq_len(split)]
+      right <- ordered[seq.int(split + 1L, length(ordered))]
+      if (!length(left) || !length(right)) {
+        stop("Internal node support-box split failed: selected=", selected,
+             ", rows=", length(rows), ", dimension=", dimension,
+             ", changes=", paste(changes, collapse = ","),
+             ", split=", split, ", boxes=", length(boxes), call. = FALSE)
+      }
+      boxes <- c(boxes, list(left, right))
+      parents <- c(parents, selected, selected)
+      active <- c(active[active != selected], length(boxes) - 1L,
+                  length(boxes))
+      if (!length(root_nodes) && length(active) >= root_limit) {
+        root_nodes <- active
+      }
+    }
+    if (!length(root_nodes)) root_nodes <- active
+    membership <- integer(nrow(features))
+    for (group in active) membership[boxes[[group]]] <- group
+    list(membership = membership, groups = length(boxes), boxes = boxes,
+         parents = parents, root_nodes = root_nodes, leaves = active)
+  }
+  partition_support_boxes <- function(features, group_limit) {
+    tree <- partition_support_tree(features, group_limit, group_limit)
+    leaf_map <- integer(tree$groups)
+    leaf_map[tree$leaves] <- seq_along(tree$leaves)
+    list(membership = leaf_map[tree$membership],
+         groups = length(tree$leaves))
+  }
+  node_box_membership <- matrix(1L, nrow = P, ncol = nrow(X))
+  node_box_nodes <- seq_len(P)
+  node_box_minima <- matrix(0, nrow = P, ncol = P)
+  node_box_maxima <- matrix(0, nrow = P, ncol = P)
+  node_box_parents <- integer()
+  node_box_roots <- integer()
+  node_box_leaves <- integer()
+  if (identical(geometry, "grouped_box")) {
+    partition <- partition_boxes(X, box_groups)
+    group_count <- partition$groups
+    box_membership <- partition$membership
+    box_minima <- do.call(rbind, lapply(seq_len(group_count), function(group) {
+      apply(X[box_membership == group, , drop = FALSE], 2L, min)
+    }))
+    box_maxima <- do.call(rbind, lapply(seq_len(group_count), function(group) {
+      apply(X[box_membership == group, , drop = FALSE], 2L, max)
+    }))
+  } else if (geometry %in% c("node_grouped_box",
+                             "cell_cached_node_grouped_box",
+                             "lazy_node_grouped_box")) {
+    memberships <- vector("list", P)
+    minima <- list()
+    maxima <- list()
+    node_box_nodes <- integer()
+    offset <- 0L
+    for (node in seq_len(P)) {
+      neighbours <- incidence[[node]]$neighbours
+      features <- X[, neighbours, drop = FALSE]
+      lazy <- identical(geometry, "lazy_node_grouped_box")
+      partition <- if (lazy) {
+        partition_support_tree(features, box_groups, box_root_groups)
+      } else {
+        partition_support_boxes(features, box_groups)
+      }
+      local_membership <- partition$membership
+      memberships[[node]] <- offset + local_membership
+      for (group in seq_len(partition$groups)) {
+        rows <- if (lazy) seq_len(nrow(X)) %in% partition$boxes[[group]] else
+          local_membership == group
+        lower <- upper <- numeric(P)
+        if (length(neighbours)) {
+          lower[neighbours] <- apply(
+            features[rows, , drop = FALSE], 2L, min)
+          upper[neighbours] <- apply(
+            features[rows, , drop = FALSE], 2L, max)
+        }
+        minima[[offset + group]] <- lower
+        maxima[[offset + group]] <- upper
+      }
+      node_box_nodes <- c(
+        node_box_nodes, rep.int(node, partition$groups))
+      if (lazy) {
+        node_box_parents <- c(node_box_parents,
+          ifelse(partition$parents == 0L, 0L, offset + partition$parents))
+        node_box_roots <- c(node_box_roots, offset + partition$root_nodes)
+        node_box_leaves <- c(node_box_leaves, offset + partition$leaves)
+      }
+      offset <- offset + partition$groups
+    }
+    node_box_membership <- do.call(rbind, memberships)
+    node_box_minima <- do.call(rbind, minima)
+    node_box_maxima <- do.call(rbind, maxima)
+  }
   envelope$type <- "omrf"
-  envelope$bound_type <- if (backend == "analytic" && !use_hcv &&
+  envelope$bound_type <- if (backend == "analytic" && use_hcv &&
+                             geometry %in% c("node_grouped_box",
+                                             "cell_cached_node_grouped_box",
+                                             "lazy_node_grouped_box") &&
+                             is.infinite(hcv_damping)) {
+    if (geometry == "lazy_node_grouped_box") {
+      "lazy_node_grouped_person_hcv_box"
+    } else if (geometry == "cell_cached_node_grouped_box") {
+      "cell_cached_node_grouped_person_hcv_box"
+    } else {
+      "node_grouped_person_hcv_box"
+    }
+  } else if (backend == "analytic" && use_hcv &&
+                             geometry == "grouped_box" &&
+                             is.infinite(hcv_damping)) {
+    "grouped_person_hcv_box"
+  } else if (backend == "analytic" && use_hcv &&
+                             geometry == "pattern_local" &&
+                             is.infinite(hcv_damping)) {
+    "pattern_local_hcv_range"
+  } else if (backend == "analytic" && !use_hcv &&
                              geometry == "pattern_local") {
     "pattern_local_range"
   } else if (backend == "analytic" && !use_hcv &&
@@ -433,6 +693,16 @@ omrf_residual_envelope <- function(X, seen, thresholds, interactions,
     identical(hcv_warmup, "first_order")
   envelope$hcv_damping <- as.numeric(hcv_damping)
   envelope$hcv_remainder_weights <- unname(hcv_remainder_weights)
+  envelope$box_membership <- as.integer(box_membership)
+  envelope$box_minima <- unname(box_minima)
+  envelope$box_maxima <- unname(box_maxima)
+  envelope$node_box_membership <- unname(node_box_membership)
+  envelope$node_box_nodes <- as.integer(node_box_nodes)
+  envelope$node_box_minima <- unname(node_box_minima)
+  envelope$node_box_maxima <- unname(node_box_maxima)
+  envelope$node_box_parents <- as.integer(node_box_parents)
+  envelope$node_box_roots <- as.integer(node_box_roots)
+  envelope$node_box_leaves <- as.integer(node_box_leaves)
   class(envelope) <- c("omrf_residual_envelope", "stan_residual_envelope")
   envelope
 }

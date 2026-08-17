@@ -212,9 +212,10 @@ pdmpsamplers_status <- function() {
         else
           d = first(entries)
           ver = d.version === nothing ? "unknown" : string(d.version)
-          git_src = isnothing(d.git_source) ? "" : d.git_source
+          package_source = isnothing(d.source) ?
+            (isnothing(d.git_source) ? "" : d.git_source) : d.source
           source_type = d.is_tracking_path ? "local" : (d.is_tracking_repo ? "GitHub" : "registry")
-          join([ver, source_type, git_src], "|||")
+          join([ver, source_type, package_source], "|||")
         end
       end
     '),

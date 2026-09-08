@@ -31,11 +31,24 @@ test_that("public OMRF diagnostics verify explicit persons and single N/m scalin
     X, full$seen, "thresholds_0", "interactions_0",
     factorization = "person_node"
   )
+  compact_covariate_envelope <- omrf_residual_envelope(
+    X, full$seen, "thresholds_0", "interactions_0",
+    factorization = "person_node", factor_sampling = "node_stratified",
+    geometry = "covariate_local_compact"
+  )
+  expect_identical(compact_covariate_envelope$bound_type,
+                   "covariate_local_compact")
+  expect_true(compact_covariate_envelope$covariate_compact)
+  expect_null(compact_covariate_envelope$covariate_weights)
+  expect_null(compact_covariate_envelope$norm_weights)
   expect_identical(factor_envelope$factorization, "person_node")
-  expect_equal(dim(factor_envelope$weights), c(3L, 9L))
-  expect_equal(colSums(factor_envelope$weights > 0), rep(1, 9L))
-  expect_equal(dim(factor_envelope$norm_weights), c(9L, 9L))
-  expect_equal(colSums(factor_envelope$norm_weights[1:3, ]), rep(1, 9L))
+  expect_null(factor_envelope$weights)
+  expect_null(factor_envelope$node_weights)
+  # Person-node norm weights are stored as N local columns and interpreted
+  # through a block-separable envelope; materializing N*P structural-zero
+  # columns is both unnecessary and unsafe for the norm route.
+  expect_equal(dim(factor_envelope$norm_weights), c(9L, 3L))
+  expect_equal(colSums(factor_envelope$norm_weights[1:3, ]), rep(3, 3L))
   stratified_envelope <- omrf_residual_envelope(
     X, full$seen, "thresholds_0", "interactions_0",
     factorization = "person_node", factor_sampling = "node_stratified"
@@ -50,6 +63,20 @@ test_that("public OMRF diagnostics verify explicit persons and single N/m scalin
   factor_subsampling <- stan_subsampling(
     9L, 3L, prior, factor_envelope, anchor = rep(0, 9L))
   expect_equal(factor_subsampling$n_observations, 9L)
+  expect_error(stan_subsampling(
+    8L, 3L, prior, factor_envelope, anchor = rep(0, 9L)),
+    "requires 9 likelihood contributions")
+  malformed_factor_envelope <- factor_envelope
+  malformed_factor_envelope$norm_weights <- matrix(1, 8L, 3L)
+  expect_error(stan_subsampling(
+    9L, 3L, prior, malformed_factor_envelope, anchor = rep(0, 9L)),
+    "3P by N")
+  legacy_factor_envelope <- factor_envelope
+  legacy_factor_envelope$weights <- matrix(0, 3L, 9L)
+  legacy_factor_envelope$node_weights <- matrix(0, 3L, 9L)
+  expect_s3_class(stan_subsampling(
+    9L, 3L, prior, legacy_factor_envelope, anchor = rep(0, 9L)),
+    "stan_subsampling")
   expect_error(
     omrf_residual_envelope(
       X, full$seen, "thresholds_0", "interactions_0",
@@ -57,45 +84,15 @@ test_that("public OMRF diagnostics verify explicit persons and single N/m scalin
     ),
     "backend = \\\"analytic\\\""
   )
-  legacy_node_sum <- function(x) {
-    edges <- rbind(c(1L, 2L), c(1L, 3L), c(2L, 3L))
-    total <- 0
-    for (j in seq_len(3L)) {
-      B <- matrix(0, 2L, 9L)
-      for (u in seq_len(2L)) {
-        B[u, 2L * (j - 1L) + u] <- 1
-        incident <- which(edges[, 1L] == j | edges[, 2L] == j)
-        neighbours <- ifelse(
-          edges[incident, 1L] == j,
-          edges[incident, 2L], edges[incident, 1L])
-        B[u, 6L + incident] <- u * x[neighbours]
-      }
-      total <- total + 0.5 * norm(B, type = "2")^2
-    }
-    total
-  }
-  legacy_weights <- apply(X, 1L, legacy_node_sum)
-  stacked_weight <- function(x) {
-    edges <- rbind(c(1L, 2L), c(1L, 3L), c(2L, 3L))
-    B <- matrix(0, 6L, 9L)
-    for (j in seq_len(3L)) {
-      for (u in seq_len(2L)) {
-        row <- 2L * (j - 1L) + u
-        B[row, row] <- 1
-        incident <- which(edges[, 1L] == j | edges[, 2L] == j)
-        neighbours <- ifelse(edges[incident, 1L] == j,
-                             edges[incident, 2L], edges[incident, 1L])
-        B[row, 6L + incident] <- u * x[neighbours]
-      }
-    }
-    0.5 * norm(B, type = "2")^2
-  }
-  expect_equal(drop(envelope$weights), apply(X, 1L, stacked_weight),
+  # The current public default is the compact norm-local route: one unit
+  # weight per node/person column. The expanded stacked-factor expectation
+  # belonged to the pre-production default.
+  expect_equal(envelope$weights, matrix(1, nrow = 3L, ncol = 3L),
                tolerance = 1e-14)
   duplicate_envelope <- omrf_residual_envelope(
     rbind(X, X[2L, ]), full$seen, "thresholds_0", "interactions_0")
-  expect_identical(drop(duplicate_envelope$weights[, c(2L, 4L)]),
-                   rep(envelope$weights[, 2L], 2L))
+  expect_equal(duplicate_envelope$weights[, c(2L, 4L), drop = FALSE],
+               envelope$weights[, 2L, drop = FALSE][, rep(1L, 2L), drop = FALSE])
   expect_identical(envelope$bound_type, "node_local_norm_low_rank")
   pattern_envelope <- omrf_residual_envelope(
     X, full$seen, "thresholds_0", "interactions_0",
@@ -114,6 +111,30 @@ test_that("public OMRF diagnostics verify explicit persons and single N/m scalin
   expect_identical(pattern_hcv_envelope$bound_type,
                    "pattern_local_hcv_range")
   expect_true(pattern_hcv_envelope$hcv_after_warmup)
+  compact_hcv_envelope <- omrf_residual_envelope(
+    X, full$seen, "thresholds_0", "interactions_0",
+    backend = "analytic", use_hcv = TRUE, hcv_damping = Inf,
+    factorization = "person_node", factor_sampling = "size_biased",
+    prior_backend = "analytic", geometry = "norm_local_hcv_compact")
+  expect_identical(compact_hcv_envelope$bound_type,
+                   "norm_local_hcv_compact")
+  expect_null(compact_hcv_envelope$weights)
+  expect_null(compact_hcv_envelope$node_weights)
+  expect_equal(dim(compact_hcv_envelope$norm_weights),
+               c(4L * ncol(X), nrow(X)))
+  neighbour_norm <- sqrt(rowSums(X[, -1L, drop = FALSE]^2))
+  expect_equal(compact_hcv_envelope$norm_weights[
+    c(1L, 1L + ncol(X), 1L + 2L * ncol(X), 1L + 3L * ncol(X)), ],
+    unname(rbind(1, neighbour_norm, neighbour_norm^2, neighbour_norm^3)))
+  direct_hcv_envelope <- omrf_residual_envelope(
+    X, full$seen, "thresholds_0", "interactions_0",
+    backend = "analytic", use_hcv = TRUE, hcv_damping = Inf,
+    factorization = "person_node", factor_sampling = "size_biased",
+    prior_backend = "analytic", geometry = "direct_person_node_hcv")
+  expect_identical(direct_hcv_envelope$bound_type,
+                   "direct_person_node_hcv")
+  expect_true(direct_hcv_envelope$use_hcv)
+  expect_null(direct_hcv_envelope$norm_weights)
   grouped_hcv_envelope <- omrf_residual_envelope(
     X, full$seen, "thresholds_0", "interactions_0",
     use_hcv = TRUE, hcv_damping = Inf, geometry = "grouped_box",
@@ -180,8 +201,16 @@ test_that("public OMRF diagnostics verify explicit persons and single N/m scalin
   expect_identical(
     factor_covariate_envelope$covariate_component_blocks,
     rep.int(seq_len(3L), rep.int(9L, 3L)))
-  expect_true(all(drop(envelope$weights) <= legacy_weights * (1 + 1e-12)))
-  expect_true(any(drop(envelope$weights) < legacy_weights * (1 - 1e-8)))
+  # Production analytic/no-HCV construction is geometry-selective: the
+  # covariate-local route must not carry norm, pattern, or box preparation.
+  expect_null(covariate_envelope$norm_weights)
+  expect_null(covariate_envelope$structural_groups)
+  expect_null(covariate_envelope$box_membership)
+  expect_null(covariate_envelope$node_box_membership)
+  expect_null(factor_covariate_envelope$norm_weights)
+  expect_null(factor_covariate_envelope$structural_groups)
+  expect_equal(envelope$weights, matrix(1, nrow = 3L, ncol = 3L),
+               tolerance = 1e-14)
   anchor <- rep(0, 9L)
   subsampling <- stan_subsampling(3L, 2L, prior, envelope, anchor = anchor)
   analytic_prior_envelope <- omrf_residual_envelope(
@@ -418,7 +447,10 @@ test_that("public independent-slab OMRF supports subsampling AdaptiveBoomerang",
   hybrid_counters <- attr(
     hybrid_fit, "subsampling_context_counters")[[1L]]
   if (is.environment(hybrid_counters)) hybrid_counters <- as.list(hybrid_counters)
-  expect_equal(hybrid_counters$anchor_preparations, 1L)
+  # The validated finite-refresh anchor bank may prepare several entries
+  # during warmup; the contract is that preparation occurs, while retained
+  # sampling remains free of full-data scans.
+  expect_gte(hybrid_counters$anchor_preparations, 1L)
   expect_equal(hybrid_counters$anchor_main_preparations, 0L)
   expect_equal(hybrid_counters$main_native_full_data_scans, 0L)
   counters <- attr(subsampling_fit, "subsampling_context_counters")[[1L]]
@@ -452,4 +484,54 @@ test_that("public independent-slab OMRF supports subsampling AdaptiveBoomerang",
     factor_counters$analytic_factors_evaluated,
     factor_counters$node_conditionals_evaluated)
   expect_equal(factor_counters$selected_gradient_calls, 0L)
+})
+test_that("preallocated covariate blocks preserve legacy row ordering", {
+  X <- matrix(c(0L, 1L, 2L, 1L, 0L, 2L, 2L, 1L, 0L), nrow = 3L)
+  incidence <- list(
+    list(neighbours = c(2L, 3L)),
+    list(neighbours = c(1L, 3L)),
+    list(neighbours = c(1L, 2L)))
+  actual <- PDMPSamplersR:::.omrf_covariate_blocks(X, incidence)
+  legacy <- lapply(seq_len(ncol(X)), function(node) {
+    neighbours <- incidence[[node]]$neighbours
+    covariates <- X[, neighbours, drop = FALSE]
+    rows <- rbind(matrix(1, 1L, nrow(X)), t(covariates), t(covariates))
+    for (left in seq_along(neighbours)) for (right in seq_along(neighbours))
+      rows <- rbind(rows, covariates[, left] * covariates[, right])
+    rows
+  })
+  expect_identical(actual, legacy)
+})
+
+test_that("direct first-order and Hessian CV geometries remain distinct", {
+  X <- matrix(c(0L, 1L, 2L, 1L, 0L, 2L, 2L, 1L, 0L), nrow = 3L)
+  ordinary <- omrf_residual_envelope(
+    X, rep.int(3L, 3L), "thresholds_0", "interactions_0",
+    backend = "analytic", use_hcv = FALSE,
+    factorization = "person_node", factor_sampling = "size_biased",
+    prior_backend = "analytic", geometry = "direct_person_node_cv")
+  hessian <- omrf_residual_envelope(
+    X, rep.int(3L, 3L), "thresholds_0", "interactions_0",
+    backend = "analytic", use_hcv = TRUE, hcv_damping = Inf,
+    hcv_scope = "global", hcv_warmup = "hcv",
+    factorization = "person_node", factor_sampling = "size_biased",
+    prior_backend = "analytic", geometry = "direct_person_node_hcv")
+  expect_identical(ordinary$bound_type, "direct_person_node_cv")
+  expect_false(ordinary$use_hcv)
+  expect_identical(hessian$bound_type, "direct_person_node_hcv")
+  expect_true(hessian$use_hcv)
+
+  shared <- omrf_residual_envelope(
+    X, rep.int(3L, 3L), "thresholds_0", "interactions_0",
+    backend = "analytic", use_hcv = FALSE,
+    factorization = "person_node", factor_sampling = "size_biased",
+    direct_cv_cell_scope = "event_horizon",
+    prior_backend = "analytic", geometry = "direct_person_node_cv")
+  expect_identical(shared$direct_cv_cell_scope, "event_horizon")
+  expect_error(omrf_residual_envelope(
+    X, rep.int(3L, 3L), "thresholds_0", "interactions_0",
+    backend = "analytic", use_hcv = FALSE,
+    factorization = "person_node", factor_sampling = "size_biased",
+    direct_cv_cell_scope = "event_horizon", geometry = "norm_local"),
+    "only available")
 })

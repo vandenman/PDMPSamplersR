@@ -89,7 +89,72 @@ stan_subsampling <- function(n_observations, subsample_size,
   if (!inherits(residual_envelope, "stan_residual_envelope")) {
     cli::cli_abort("Argument {.arg residual_envelope} must be a certified package residual-envelope object.")
   }
-  if (ncol(residual_envelope$weights) != n_observations) {
+  if (inherits(residual_envelope, "omrf_residual_envelope")) {
+    n_persons <- residual_envelope$n_persons
+    n_nodes <- residual_envelope$n_nodes
+    factorization <- residual_envelope$factorization
+    if (!rlang::is_integerish(n_persons, n = 1L, finite = TRUE) ||
+        n_persons < 1L ||
+        !rlang::is_integerish(n_nodes, n = 1L, finite = TRUE) ||
+        n_nodes < 1L ||
+        !is.character(factorization) || length(factorization) != 1L ||
+        !factorization %in% c("person", "person_node")) {
+      cli::cli_abort(paste0(
+        "Specialized OMRF envelopes require positive integer {.field n_persons} ",
+        "and {.field n_nodes} metadata and a supported {.field factorization}."))
+    }
+    expected <- if (factorization == "person") {
+      as.integer(n_persons)
+    } else {
+      as.integer(n_persons) * as.integer(n_nodes)
+    }
+    if (n_observations != expected) {
+      cli::cli_abort(paste0(
+        "OMRF {.field ", factorization, "} factorization requires ", expected,
+        " likelihood contributions; received ", n_observations, "."))
+    }
+    compact_norm <- factorization == "person_node" && isTRUE(
+      residual_envelope$bound_type %in%
+        c("node_local_norm_low_rank", "norm_local_hcv_compact"))
+    if (compact_norm) {
+      powers <- if (identical(residual_envelope$bound_type,
+                              "norm_local_hcv_compact")) 4L else 3L
+      weights <- residual_envelope$norm_weights
+      if (!is.matrix(weights) || !is.numeric(weights) ||
+          !identical(dim(weights), c(powers * as.integer(n_nodes),
+                                     as.integer(n_persons))) ||
+          any(!is.finite(weights)) || any(weights < 0)) {
+        cli::cli_abort(paste0(
+          "Compact OMRF norm weights must be a finite nonnegative ",
+          powers, "P by N matrix matching {.field n_nodes} and ",
+          "{.field n_persons}."))
+      }
+    }
+    if (factorization == "person_node" &&
+        residual_envelope$bound_type %in%
+          c("node_box_first_order", "cell_marked_node_box_first_order")) {
+      membership <- residual_envelope$node_box_membership
+      nodes <- residual_envelope$node_box_nodes
+      minima <- residual_envelope$node_box_minima
+      maxima <- residual_envelope$node_box_maxima
+      if (!is.matrix(membership) ||
+          !identical(dim(membership), c(as.integer(n_nodes),
+                                        as.integer(n_persons))) ||
+          !is.numeric(membership) || any(!is.finite(membership)) ||
+          any(membership != floor(membership)) || !length(nodes) ||
+          any(membership < 1L | membership > length(nodes)) ||
+          !is.matrix(minima) || !is.matrix(maxima) ||
+          !identical(dim(minima), c(length(nodes), as.integer(n_nodes))) ||
+          !identical(dim(maxima), dim(minima)) ||
+          any(!is.finite(minima)) || any(!is.finite(maxima)) ||
+          any(minima > maxima)) {
+        cli::cli_abort(paste0(
+          "Compact OMRF node-box specifications require P-by-N integer ",
+          "membership and matching finite component-by-P extrema."))
+      }
+    }
+  } else if (is.null(residual_envelope$weights) ||
+             ncol(residual_envelope$weights) != n_observations) {
     cli::cli_abort("Residual-envelope weights must have one column per observation.")
   }
   if (!is.null(anchor) && (!is.numeric(anchor) || any(!is.finite(anchor)))) {
@@ -115,7 +180,15 @@ stan_subsampling <- function(n_observations, subsample_size,
   if (!all(required %in% names(standata))) {
     cli::cli_abort("Analytic OMRF priors require threshold alpha and beta data.")
   }
-  interaction <- if (!is.null(standata$slab_base_scale) &&
+  # The OMRF simulation data can intentionally carry both independent-prior
+  # and node-scale fields so that the same generated data object can be routed
+  # to either Stan model.  For the native full-gradient independent model,
+  # `prior_cauchy_scale` is the model-defining field and must take precedence;
+  # node-scale prior-only data are stripped by `make_prior_stan_data()` before
+  # this helper is called for the dependent route.
+  interaction <- if (!is.null(standata$prior_cauchy_scale)) {
+    list(type = "cauchy", scale = standata$prior_cauchy_scale)
+  } else if (!is.null(standata$slab_base_scale) &&
              !is.null(standata$prior_global_scale_sd) &&
              !is.null(standata$prior_node_scale_sd)) {
     list(
@@ -124,8 +197,6 @@ stan_subsampling <- function(n_observations, subsample_size,
       global_scale_sd = standata$prior_global_scale_sd,
       node_scale_sd = standata$prior_node_scale_sd
     )
-  } else if (!is.null(standata$prior_cauchy_scale)) {
-    list(type = "cauchy", scale = standata$prior_cauchy_scale)
   } else if (!is.null(standata$prior_interaction_sd)) {
     list(type = "gaussian", scale = standata$prior_interaction_sd)
   } else {
@@ -187,6 +258,12 @@ stan_subsampling <- function(n_observations, subsample_size,
 #'   control variate and is currently supported only with
 #'   `geometry = "pattern_local"`, `geometry = "grouped_box"`, or one of
 #'   the node-grouped geometries.
+#' @param hcv_scope HCV damping scope. The default `"global"` uses one
+#'   displacement scale for the complete OMRF likelihood. `"node"` uses a
+#'   separate displacement and Hessian action for each OMRF node, so a distant
+#'   interaction only damps the HCV correction for its incident nodes.
+#' @param zigzag_sign_aware Whether to use coordinatewise deterministic-sign
+#'   subset bounds for Zig-Zag. This is an experimental analytic-OMRF option.
 #' @param hcv_warmup HCV policy during warmup. `"hcv"` preserves the existing
 #'   behavior. Experimental `"first_order"` uses the certified first-order
 #'   residual bound during warmup and activates HCV at the main-phase boundary.
@@ -196,6 +273,11 @@ stan_subsampling <- function(n_observations, subsample_size,
 #' @param factor_sampling Factor-subset design. `"size_biased"` uses the
 #'   generic contribution design; `"node_stratified"` draws an equal number
 #'   from every node while retaining exact size-biased proposal mixing.
+#' @param direct_cv_cell_scope Research-only scope for
+#'   `geometry = "direct_person_node_cv"`. `"cell"` constructs one residual
+#'   table per deterministic grid cell. `"event_horizon"` constructs one
+#'   certified table over the complete finite event-search horizon and reuses
+#'   it for every internal deterministic cell.
 #' @param prior_backend Deterministic prior-gradient backend. `"stan"` supports
 #'   arbitrary custom priors. `"analytic"` recognizes the package OMRF
 #'   independent Gaussian and Cauchy prior contracts from `prior_standata`.
@@ -232,14 +314,115 @@ stan_subsampling <- function(n_observations, subsample_size,
 #' @return A certified Stan residual-envelope specification.
 #' @rdname stan_subsampling
 #' @export
+.omrf_covariate_blocks <- function(X, incidence) {
+  P <- ncol(X)
+  N <- nrow(X)
+  blocks <- vector("list", P)
+  for (node in seq_len(P)) {
+    neighbours <- incidence[[node]]$neighbours
+    degree <- length(neighbours)
+    node_rows <- matrix(1, nrow = 1L + 2L * degree + degree^2,
+                        ncol = N)
+    if (degree) {
+      node_covariates <- X[, neighbours, drop = FALSE]
+      node_rows[1L + seq_len(degree), ] <- t(node_covariates)
+      node_rows[1L + degree + seq_len(degree), ] <- t(node_covariates)
+      destination <- 1L + 2L * degree
+      for (left_edge in seq_len(degree)) {
+        for (right_edge in seq_len(degree)) {
+          destination <- destination + 1L
+          node_rows[destination, ] <- node_covariates[, left_edge] *
+            node_covariates[, right_edge]
+        }
+      }
+    }
+    blocks[[node]] <- node_rows
+  }
+  blocks
+}
+
+.omrf_node_support_boxes <- function(X, incidence, group_limit) {
+  split_boxes <- function(features) {
+    if (!ncol(features)) {
+      return(list(membership = rep.int(1L, nrow(features)), boxes = list(
+        seq_len(nrow(features)))))
+    }
+    boxes <- list(seq_len(nrow(features)))
+    while (length(boxes) < group_limit) {
+      candidates <- lapply(boxes, function(rows) {
+        ranges <- apply(features[rows, , drop = FALSE], 2L, function(x) {
+          diff(range(x))
+        })
+        list(score = sum(ranges) * length(rows), ranges = ranges)
+      })
+      splittable <- which(vapply(
+        candidates, function(x) any(x$ranges > 0), logical(1L)))
+      if (!length(splittable)) break
+      selected <- splittable[[which.max(vapply(
+        candidates[splittable], `[[`, numeric(1L), "score"))]]
+      rows <- boxes[[selected]]
+      dimension <- which.max(candidates[[selected]]$ranges)
+      ordered <- rows[order(features[rows, dimension], rows)]
+      changes <- which(diff(features[ordered, dimension]) > 0)
+      cut <- changes[[which.min(abs(changes - length(rows) / 2))]]
+      boxes[[selected]] <- ordered[seq_len(cut)]
+      boxes[[length(boxes) + 1L]] <- ordered[seq.int(cut + 1L,
+                                                     length(ordered))]
+    }
+    membership <- integer(nrow(features))
+    for (group in seq_along(boxes)) membership[boxes[[group]]] <- group
+    list(membership = membership, boxes = boxes)
+  }
+
+  P <- ncol(X)
+  N <- nrow(X)
+  membership <- matrix(0L, nrow = P, ncol = N)
+  nodes <- integer()
+  minima <- list()
+  maxima <- list()
+  offset <- 0L
+  for (node in seq_len(P)) {
+    neighbours <- incidence[[node]]$neighbours
+    features <- X[, neighbours, drop = FALSE]
+    partition <- split_boxes(features)
+    membership[node, ] <- offset + partition$membership
+    for (group in seq_along(partition$boxes)) {
+      lower <- upper <- numeric(P)
+      if (length(neighbours)) {
+        rows <- partition$boxes[[group]]
+        lower[neighbours] <- apply(features[rows, , drop = FALSE], 2L, min)
+        upper[neighbours] <- apply(features[rows, , drop = FALSE], 2L, max)
+      }
+      minima[[offset + group]] <- lower
+      maxima[[offset + group]] <- upper
+    }
+    nodes <- c(nodes, rep.int(node, length(partition$boxes)))
+    offset <- offset + length(partition$boxes)
+  }
+  list(membership = membership, nodes = nodes,
+       minima = do.call(rbind, minima), maxima = do.call(rbind, maxima))
+}
+
 omrf_residual_envelope <- function(X, seen, thresholds, interactions,
                                    backend = c("analytic", "stan"),
                                    use_hcv = FALSE, hcv_damping = NULL,
+                                   hcv_scope = c("global", "node"),
+                                   zigzag_sign_aware = FALSE,
                                    hcv_warmup = c("hcv", "first_order"),
                                    factorization = c("person", "person_node"),
                                    factor_sampling = c("size_biased", "node_stratified"),
+                                   direct_cv_cell_scope = c("cell", "event_horizon"),
                                    prior_backend = c("stan", "analytic"),
-                                   geometry = c("norm_local", "covariate_local",
+                                   exact_selected_refinement = FALSE,
+                                   signed_bps = FALSE,
+                                   signed_harmonic = FALSE,
+                                   geometry = c("norm_local", "norm_local_hcv_compact",
+                                                "node_box_first_order",
+                                                "cell_marked_node_box_first_order",
+                                                "direct_person_node_hcv",
+                                                "direct_person_node_cv",
+                                                "covariate_local",
+                                                "covariate_local_compact",
                                                 "pattern_local", "grouped_box",
                                                 "node_grouped_box",
                                                 "cell_cached_node_grouped_box",
@@ -247,9 +430,11 @@ omrf_residual_envelope <- function(X, seen, thresholds, interactions,
                                    box_groups = 16L,
                                    box_root_groups = max(1L, box_groups %/% 2L)) {
   backend <- match.arg(backend)
+  hcv_scope <- match.arg(hcv_scope)
   hcv_warmup <- match.arg(hcv_warmup)
   factorization <- match.arg(factorization)
   factor_sampling <- match.arg(factor_sampling)
+  direct_cv_cell_scope <- match.arg(direct_cv_cell_scope)
   prior_backend <- match.arg(prior_backend)
   geometry <- match.arg(geometry)
   if (!rlang::is_integerish(box_groups, n = 1L, finite = TRUE) ||
@@ -267,14 +452,86 @@ omrf_residual_envelope <- function(X, seen, thresholds, interactions,
   if (!is.logical(use_hcv) || length(use_hcv) != 1L || is.na(use_hcv)) {
     cli::cli_abort("Argument {.arg use_hcv} must be TRUE or FALSE.")
   }
+  if (!is.logical(zigzag_sign_aware) || length(zigzag_sign_aware) != 1L ||
+      is.na(zigzag_sign_aware)) {
+    cli::cli_abort("Argument {.arg zigzag_sign_aware} must be TRUE or FALSE.")
+  }
+  if (!is.logical(exact_selected_refinement) ||
+      length(exact_selected_refinement) != 1L ||
+      is.na(exact_selected_refinement)) {
+    cli::cli_abort(
+      "Argument {.arg exact_selected_refinement} must be TRUE or FALSE.")
+  }
+  if (!is.logical(signed_bps) || length(signed_bps) != 1L ||
+      is.na(signed_bps)) {
+    cli::cli_abort("Argument {.arg signed_bps} must be TRUE or FALSE.")
+  }
+  if (!is.logical(signed_harmonic) || length(signed_harmonic) != 1L ||
+      is.na(signed_harmonic)) {
+    cli::cli_abort("Argument {.arg signed_harmonic} must be TRUE or FALSE.")
+  }
+  if (isTRUE(signed_bps) &&
+      (backend != "analytic" || factorization != "person_node" ||
+       isTRUE(use_hcv) || geometry != "covariate_local_compact")) {
+    cli::cli_abort(paste0(
+      "Research {.arg signed_bps} requires analytic, no-HCV, person-node, ",
+      "covariate_local_compact OMRF controls."))
+  }
   if (isTRUE(use_hcv) && backend != "analytic") {
     cli::cli_abort("OMRF Hessian control variates require {.arg backend = \"analytic\"}.")
+  }
+  if (hcv_scope == "node" && !isTRUE(use_hcv)) {
+    cli::cli_abort("Node-local HCV requires {.arg use_hcv = TRUE}.")
   }
   if (factorization == "person_node" && backend != "analytic") {
     cli::cli_abort("Person-node OMRF factorization requires {.arg backend = \"analytic\"}.")
   }
   if (factorization == "person" && factor_sampling != "size_biased") {
     cli::cli_abort("Node-stratified sampling requires {.arg factorization = \"person_node\"}.")
+  }
+  if (geometry == "covariate_local_compact" &&
+      factorization != "person_node") {
+    cli::cli_abort("Compact covariate-local envelopes require {.arg factorization = \"person_node\"}.")
+  }
+  if (geometry %in% c("norm_local_hcv_compact", "direct_person_node_hcv") &&
+      !(backend == "analytic" && isTRUE(use_hcv) &&
+        is.infinite(hcv_damping) && hcv_scope == "global" &&
+        hcv_warmup == "hcv" &&
+        factorization == "person_node" &&
+        factor_sampling == "size_biased")) {
+    cli::cli_abort(paste0(
+      "Research HCV geometry requires ",
+      "analytic, undamped global HCV, person-node factorization, and ",
+      "size-biased factor sampling, active from warmup."))
+  }
+  if (geometry == "direct_person_node_cv" &&
+      !(backend == "analytic" && !isTRUE(use_hcv) &&
+        factorization == "person_node" &&
+        factor_sampling == "size_biased")) {
+    cli::cli_abort(paste0(
+      "Research direct first-order geometry requires analytic, no-HCV, ",
+      "person-node factorization and size-biased factor sampling."))
+  }
+  if (geometry %in% c("node_box_first_order",
+                      "cell_marked_node_box_first_order") &&
+      !(backend == "analytic" && !isTRUE(use_hcv) &&
+        factorization == "person_node" &&
+        factor_sampling == "size_biased")) {
+    cli::cli_abort(paste0(
+      "Research node-box first-order geometry requires analytic, no-HCV, ",
+      "person-node factorization and size-biased factor sampling."))
+  }
+  if (geometry == "cell_marked_node_box_first_order" &&
+      !identical(as.integer(box_groups), 2L)) {
+    cli::cli_abort(paste0(
+      "Research cell-marked node-box geometry currently requires ",
+      "{.arg box_groups = 2}."))
+  }
+  if (direct_cv_cell_scope == "event_horizon" &&
+      geometry != "direct_person_node_cv") {
+    cli::cli_abort(paste0(
+      "Research {.arg direct_cv_cell_scope = \"event_horizon\"} is only ",
+      "available for {.arg geometry = \"direct_person_node_cv\"}."))
   }
   if (!is.matrix(X) || !is.numeric(X) || any(!is.finite(X)) || any(X != floor(X))) {
     cli::cli_abort("Argument {.arg X} must be a finite integer-valued person-by-node matrix.")
@@ -311,12 +568,14 @@ omrf_residual_envelope <- function(X, seen, thresholds, interactions,
   }
   if (is.infinite(hcv_damping) &&
       !(isTRUE(use_hcv) && geometry %in% c(
-        "pattern_local", "grouped_box", "node_grouped_box",
+        "pattern_local", "norm_local_hcv_compact", "direct_person_node_hcv",
+        "grouped_box", "node_grouped_box",
         "cell_cached_node_grouped_box",
         "lazy_node_grouped_box"))) {
     cli::cli_abort(paste0(
       "Infinite {.arg hcv_damping} (the exact undamped HCV) currently requires ",
-      "{.arg use_hcv = TRUE} and {.arg geometry = \"pattern_local\"} or ",
+      "{.arg use_hcv = TRUE} and {.arg geometry = \"pattern_local\", ",
+      "\"norm_local_hcv_compact\", \"direct_person_node_hcv\", or ",
       "{.arg geometry = \"grouped_box\"}, \"node_grouped_box\", or ",
       "\"lazy_node_grouped_box\"."))
   }
@@ -340,6 +599,143 @@ omrf_residual_envelope <- function(X, seen, thresholds, interactions,
                           edges[incident, 2L], edges[incident, 1L])
     )
   })
+
+  # The production analytic/no-HCV routes only need one selected geometry.
+  # Keep this compact path before the legacy all-geometry preparation below:
+  # norm-local needs the node norm weights, while covariate-local additionally
+  # needs its node-wise polynomial covariate weights.  Pattern, HCV, and box
+  # routes intentionally continue through the complete preparation path.
+  compact_hcv <- identical(geometry, "norm_local_hcv_compact")
+  direct_hcv <- identical(geometry, "direct_person_node_hcv")
+  direct_cv <- identical(geometry, "direct_person_node_cv")
+  if (backend == "analytic" &&
+      ((!isTRUE(use_hcv) && geometry %in% c(
+        "norm_local", "direct_person_node_cv", "node_box_first_order",
+        "cell_marked_node_box_first_order",
+        "covariate_local",
+        "covariate_local_compact")) ||
+       (isTRUE(use_hcv) && (compact_hcv || direct_hcv)))) {
+    neighbour_norms <- NULL
+    if (geometry %in% c("norm_local", "norm_local_hcv_compact",
+                        "covariate_local", "covariate_local_compact")) {
+      neighbour_norms <- matrix(0, nrow = P, ncol = nrow(X))
+      for (node in seq_len(P)) {
+        neighbours <- incidence[[node]]$neighbours
+        if (length(neighbours)) {
+          neighbour_norms[node, ] <- sqrt(rowSums(
+            X[, neighbours, drop = FALSE]^2))
+        }
+      }
+    }
+    compact_person_node <- factorization == "person_node" &&
+      geometry %in% c("norm_local", "norm_local_hcv_compact",
+                      "node_box_first_order", "cell_marked_node_box_first_order")
+    factor_weights <- if (compact_person_node) {
+      NULL
+    } else if (factorization == "person_node") {
+      matrix(0, nrow = P, ncol = nrow(X) * P)
+    } else {
+      matrix(1, nrow = P, ncol = nrow(X))
+    }
+    if (factorization == "person_node" && !compact_person_node) {
+      for (node in seq_len(P)) {
+        columns <- (node - 1L) * nrow(X) + seq_len(nrow(X))
+        factor_weights[node, columns] <- 1
+      }
+    }
+    node_weights <- factor_weights
+    norm_weights <- NULL
+    if (geometry %in% c("norm_local", "norm_local_hcv_compact")) {
+      powers <- if (compact_hcv) 0:3 else 0:2
+      norm_weights <- matrix(0, nrow = length(powers) * P,
+                             ncol = nrow(X))
+      if (factorization == "person_node") {
+        for (node in seq_len(P)) {
+          columns <- seq_len(nrow(X))
+          for (power in powers) {
+            norm_weights[power * P + node, columns] <-
+              neighbour_norms[node, ]^power
+          }
+        }
+      } else {
+        for (power in powers) {
+          norm_weights[power * P + seq_len(P), ] <- neighbour_norms^power
+        }
+      }
+    }
+    envelope <- if (compact_person_node) {
+      structure(list(type = "omrf"),
+                class = c("omrf_residual_envelope", "stan_residual_envelope"))
+    } else {
+      stan_residual_envelope(factor_weights)
+    }
+    covariate_weights <- NULL
+    covariate_component_blocks <- NULL
+    if (geometry == "covariate_local") {
+      covariate_blocks <- .omrf_covariate_blocks(X, incidence)
+      covariate_weights <- do.call(rbind, covariate_blocks)
+      covariate_component_blocks <- rep.int(
+        seq_len(P), vapply(covariate_blocks, nrow, integer(1L)))
+    }
+    envelope$type <- "omrf"
+    envelope$bound_type <- if (geometry %in% c(
+        "node_box_first_order", "cell_marked_node_box_first_order")) {
+      geometry
+    } else if (direct_hcv) {
+      "direct_person_node_hcv"
+    } else if (direct_cv) {
+      "direct_person_node_cv"
+    } else if (compact_hcv) {
+      "norm_local_hcv_compact"
+    } else if (geometry == "covariate_local_compact") {
+      "covariate_local_compact"
+    } else if (geometry == "covariate_local") {
+      "covariate_local_expansion"
+    } else {
+      "node_local_norm_low_rank"
+    }
+    envelope$X <- X
+    envelope$seen <- seen
+    envelope$thresholds <- thresholds
+    envelope$interactions <- interactions
+    envelope$backend <- backend
+    envelope$factorization <- factorization
+    envelope$factor_sampling <- factor_sampling
+    envelope$prior_backend <- prior_backend
+    envelope$n_persons <- nrow(X)
+    envelope$n_nodes <- P
+    envelope$edge_order <- edges
+    envelope$node_weights <- unname(node_weights)
+    envelope$norm_weights <- unname(norm_weights)
+    envelope$covariate_weights <- unname(covariate_weights)
+    envelope$covariate_component_blocks <- covariate_component_blocks
+    envelope$covariate_compact <- identical(
+      geometry, "covariate_local_compact")
+    envelope$use_hcv <- compact_hcv || direct_hcv
+    envelope$hcv_after_warmup <- (compact_hcv || direct_hcv) &&
+      identical(hcv_warmup, "first_order")
+    envelope$hcv_damping <- as.numeric(hcv_damping)
+    envelope$hcv_scope <- hcv_scope
+    envelope$zigzag_sign_aware <- isTRUE(zigzag_sign_aware)
+    envelope$exact_selected_refinement <-
+      isTRUE(exact_selected_refinement)
+    envelope$signed_bps <- isTRUE(signed_bps)
+    envelope$signed_harmonic <- isTRUE(signed_harmonic)
+    envelope$direct_cv_cell_scope <- direct_cv_cell_scope
+    envelope$hcv_remainder_weights <- NULL
+    if (geometry %in% c("node_box_first_order",
+                        "cell_marked_node_box_first_order")) {
+      boxes <- .omrf_node_support_boxes(X, incidence, box_groups)
+      envelope$node_box_membership <- unname(boxes$membership)
+      envelope$node_box_nodes <- unname(boxes$nodes)
+      envelope$node_box_minima <- unname(boxes$minima)
+      envelope$node_box_maxima <- unname(boxes$maxima)
+      # Exact selected-factor evaluation is intrinsic to this research route.
+      envelope$exact_selected_refinement <- TRUE
+    }
+    class(envelope) <- c("omrf_residual_envelope", "stan_residual_envelope")
+    return(envelope)
+  }
   row_keys <- apply(X, 1L, paste, collapse = ",")
   unique_rows <- which(!duplicated(row_keys))
   unique_weights <- numeric(length(unique_rows))
@@ -386,10 +782,10 @@ omrf_residual_envelope <- function(X, seen, thresholds, interactions,
     }
   }
   norm_weights <- matrix(0, nrow = 3L * P,
-                         ncol = if (factorization == "person_node") nrow(X) * P else nrow(X))
+                         ncol = nrow(X))
   if (factorization == "person_node") {
     for (node in seq_len(P)) {
-      columns <- (node - 1L) * nrow(X) + seq_len(nrow(X))
+      columns <- seq_len(nrow(X))
       norm_weights[node, columns] <- 1
       norm_weights[P + node, columns] <- neighbour_norms[node, ]
       norm_weights[2L * P + node, columns] <- neighbour_norms[node, ]^2
@@ -399,22 +795,7 @@ omrf_residual_envelope <- function(X, seen, thresholds, interactions,
     norm_weights[P + seq_len(P), ] <- neighbour_norms
     norm_weights[2L * P + seq_len(P), ] <- neighbour_norms^2
   }
-  covariate_blocks <- vector("list", P)
-  for (node in seq_len(P)) {
-    neighbours <- incidence[[node]]$neighbours
-    node_covariates <- X[, neighbours, drop = FALSE]
-    node_rows <- matrix(1, nrow = 1L, ncol = nrow(X))
-    if (length(neighbours)) {
-      node_rows <- rbind(node_rows, t(node_covariates), t(node_covariates))
-      for (left_edge in seq_along(neighbours)) {
-        for (right_edge in seq_along(neighbours)) {
-          node_rows <- rbind(node_rows,
-            node_covariates[, left_edge] * node_covariates[, right_edge])
-        }
-      }
-    }
-    covariate_blocks[[node]] <- node_rows
-  }
+  covariate_blocks <- .omrf_covariate_blocks(X, incidence)
   # Person-node factors form a block-diagonal conceptual matrix. Store only
   # its N local columns; Julia combines these weights with the row-to-node map
   # below, avoiding P-fold structural-zero storage and alias tables.
@@ -692,6 +1073,12 @@ omrf_residual_envelope <- function(X, seen, thresholds, interactions,
   envelope$hcv_after_warmup <- isTRUE(use_hcv) &&
     identical(hcv_warmup, "first_order")
   envelope$hcv_damping <- as.numeric(hcv_damping)
+  envelope$hcv_scope <- hcv_scope
+  envelope$zigzag_sign_aware <- isTRUE(zigzag_sign_aware)
+  envelope$exact_selected_refinement <-
+    isTRUE(exact_selected_refinement)
+  envelope$signed_bps <- isTRUE(signed_bps)
+  envelope$signed_harmonic <- isTRUE(signed_harmonic)
   envelope$hcv_remainder_weights <- unname(hcv_remainder_weights)
   envelope$box_membership <- as.integer(box_membership)
   envelope$box_minima <- unname(box_minima)
@@ -707,7 +1094,7 @@ omrf_residual_envelope <- function(X, seen, thresholds, interactions,
   envelope
 }
 
-#' Native full-gradient backend for an independent-prior OMRF
+#' Native full-gradient backend for an analytic-prior OMRF
 #'
 #' Constructs a native Julia backend for the complete, non-factorized OMRF
 #' negative gradient and Hessian-vector product. It is intended for full
@@ -716,20 +1103,30 @@ omrf_residual_envelope <- function(X, seen, thresholds, interactions,
 #' unconstrained parameter metadata and output conversion.
 #'
 #' The model data passed to [pdmp_sample_from_stanmodel()] must contain the
-#' independent threshold-prior parameters and either `prior_cauchy_scale` or
-#' `prior_interaction_sd`. Threshold and interaction blocks must cover the
-#' complete unconstrained state.
+#' threshold-prior parameters and either the independent interaction scale or
+#' the node-scale Gaussian parameters. For data objects carrying both prior
+#' families, pass the prior-only data through `prior_standata` so the analytic
+#' node-scale branch is selected explicitly. Threshold, interaction, and
+#' node-scale blocks must cover the complete unconstrained state.
 #'
 #' @inheritParams omrf_residual_envelope
+#' @param prior_standata Optional prior-only OMRF data. Supplying this is
+#'   required when the full data object carries both independent and dependent
+#'   prior fields and the node-scale Gaussian branch is intended.
 #' @return An OMRF full-gradient backend specification for the
 #'   `full_gradient` argument of [pdmp_sample_from_stanmodel()].
 #' @export
-omrf_full_gradient <- function(X, seen, thresholds, interactions) {
+omrf_full_gradient <- function(X, seen, thresholds, interactions,
+                               prior_standata = NULL) {
   spec <- omrf_residual_envelope(
     X, seen, thresholds, interactions,
     backend = "analytic", use_hcv = FALSE,
     factorization = "person", factor_sampling = "size_biased",
     prior_backend = "analytic")
+  if (!is.null(prior_standata)) {
+    spec <- .attach_omrf_analytic_prior(
+      spec, prior_standata, "prior_standata")
+  }
   structure(list(spec = spec), class = "omrf_full_gradient")
 }
 

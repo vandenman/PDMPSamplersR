@@ -4,6 +4,12 @@ using PDMPSamplers, LinearAlgebra, BridgeStan, Random, SparseArrays, Statistics,
 using FileWatching
 const LogExpFunctions = PDMPSamplers.LogExpFunctions
 
+# Research-only timing/allocation diagnostics are deliberately opt-in.  The
+# ordinary production path still retains event/provenance counters, but does
+# not query Julia's GC allocator counters at every instrumented operation.
+const _OMRF_RESEARCH_DIAGNOSTICS = lowercase(get(ENV,
+    "OMRF_RESEARCH_DIAGNOSTICS", "false")) in ("1", "true", "yes", "on")
+
 # BridgeStan/Stan Math autodiff state is serialized consistently for every
 # Stan-backed provider used by this bridge.
 const _BRIDGESTAN_CALL_LOCK = ReentrantLock()
@@ -12,7 +18,8 @@ export build_flow, build_algorithm, wrap_sticky
 export build_model_prior_odds, build_slab_provider, wrap_dependent_sticky
 export r_discretize, r_mean, r_var, r_std, r_cov, r_cor, r_quantile, r_median, r_cdf, r_ess, r_summary_all
 export r_inclusion_probs, extract_stats
-export r_chain_times, r_chain_positions, r_chain_velocities, r_chain_is_boomerang, r_chain_is_mutable_boomerang, r_chain_mu, r_chain_flow_cov
+export r_chain_times, r_chain_positions, r_chain_velocities, r_chain_free_masks, r_chain_is_boomerang, r_chain_is_mutable_boomerang, r_chain_mu, r_chain_flow_cov
+export r_resolve_flow_spec, r_chain_flow_spec
 export r_from_skeleton
 export r_chain_is_factorized
 export r_chain_sparse_initial_time, r_chain_sparse_initial_position, r_chain_sparse_initial_velocity
@@ -25,6 +32,46 @@ export write_cmdstan_csv, r_constrain_and_write_csv
 export r_pdmp_brms_subsampling, r_pdmp_stan_for_brms
 export r_get_param_unc_names
 export r_threading_available
+export r_cleanup_worker_state
+
+# Condition-specific objects are assigned in Main by JuliaCall for historical
+# API compatibility.  A Mirai daemon is reused across conditions, so those
+# roots must be cleared explicitly after the checkpoint is written.  Keeping
+# the list here gives the R scheduler a stable cleanup API without duplicating
+# Julia variable knowledge in simulation code.
+const _WORKER_STATE_ROOTS = (
+    :_stan_model, :_pdmp_model, :_prepared_stan_subsampling, :_subsampling,
+    :_full_gradient_spec, :_path_to_stan_model, :_path_to_stan_data,
+    :_path_to_prior_stan_data_full, :_n_chains, :_curvature_backend,
+    :flow, :algorithm, :x0, :theta0, :flow_cov, :flow_mean, :c0, :grid_n, :grid_t_max,
+    :grid_bound, :grid_curvature_bound, :linear_area_threshold,
+    :linear_min_area_gain, :post_warmup_simplify,
+    :t0, :T, :t_warmup, :f, :hessian_f, :hessian, :sticky, :can_stick, :model_prior,
+    :parameter_prior, :slab_prior, :show_progress, :seed, :adaptive_scheme,
+    :refresh_rate, :unc_names, :_unc_names, :subsampling_anchor_updates,
+    :subsampling_warmup, :subsampling_use_anchor_bank,
+    :subsampling_anchor_bank_capacity, :subsampling_main_anchor_refresh_distance,
+    :subsampling_node_source_check_distance,
+    :subsampling_require_no_main_full_data, :subsampling_diagnostic_window,
+    :warmup_adaptation_interval, :subsampling_diagnostic_window,
+    :support_boundary_mode, :support_boundary_max_bisection_steps,
+    :support_boundary_time_rtol, :support_boundary_time_atol,
+    :support_boundary_clip_fraction, :support_boundary_max_refresh_attempts,
+    :support_boundary_refresh_probe_time, :support_boundary_min_safe_time,
+    :_diagnostic_model, :_diagnostic_full_data, :_diagnostic_prior_data,
+    :_diagnostic_subsampling, :_diagnostic_position, :_diagnostic_subset,
+    :_diagnostic_velocity, :_diagnostic_flow, :_diagnostic_flow_mean,
+    :_diagnostic_flow_cov, :_diagnostic_phase)
+
+function r_cleanup_worker_state()
+    for name in _WORKER_STATE_ROOTS
+        if isdefined(Main, name)
+            Core.eval(Main, Expr(:(=), name, nothing))
+        end
+    end
+    GC.gc(true)
+    return nothing
+end
 
 _subsampling_collection_values(values::Union{AbstractVector,Tuple}) = values
 _subsampling_collection_values(values::NamedTuple) = Base.values(values)
@@ -35,23 +82,28 @@ _subsampling_float_vector(value::Number) = [Float64(value)]
 _subsampling_float_vector(values) = collect(Float64, vec(values))
 
 function build_flow(flow_type::String, prec::AbstractMatrix{Float64}, flow_mean::AbstractVector{Float64};
-                    adaptive_scheme::String="diagonal")
+                    adaptive_scheme::String="diagonal", refresh_rate::Float64=1.0)
     if flow_type == "ZigZag"
         return ZigZag(prec, flow_mean)
     elseif flow_type == "BouncyParticle"
-        return BouncyParticle(prec, flow_mean)
+        return BouncyParticle(prec, flow_mean, refresh_rate)
     elseif flow_type == "Boomerang"
         return Boomerang(prec, flow_mean)
     elseif flow_type == "AdaptiveBoomerang"
-        d = length(flow_mean)
         λref = parse(Float64, get(ENV, "PDMP_ADAPTIVE_BOOMERANG_LAMBDA_REF", "0.1"))
-        return AdaptiveBoomerang(d; λref=λref, scheme=Symbol(adaptive_scheme))
+        # `flow_mean` and `prec` are an initial adaptive specification, not a
+        # promise that warmup leaves the flow unchanged.  Starting from the
+        # supplied values is nevertheless essential for honest provenance and
+        # for reproducible adaptive initialization.
+        return AdaptiveBoomerang(prec, flow_mean; λref=λref)
     elseif flow_type == "PreconditionedZigZag"
-        d = length(flow_mean)
-        return PreconditionedZigZag(prec, flow_mean)
+        scale = prec isa Diagonal ? inv.(sqrt.(prec.diag)) :
+            ones(Float64, length(flow_mean))
+        return PreconditionedZigZag(prec, flow_mean; scale)
     elseif flow_type == "PreconditionedBPS"
-        d = length(flow_mean)
-        return PreconditionedBPS(prec, flow_mean)
+        scale = prec isa Diagonal ? inv.(sqrt.(prec.diag)) :
+            ones(Float64, length(flow_mean))
+        return PreconditionedBPS(prec, flow_mean; refresh_rate, scale)
     elseif flow_type == "DensePreconditionedZigZag"
         flow = DensePreconditionedZigZag(prec, flow_mean)
         set_dense_preconditioner!(flow.metric,
@@ -65,6 +117,73 @@ function build_flow(flow_type::String, prec::AbstractMatrix{Float64}, flow_mean:
     else
         throw(ArgumentError("Unknown flow type: $flow_type"))
     end
+end
+
+# Full-gradient warmup and ordinary full sampling must resolve the same target
+# and sticky event wrapper.  Keep these constructors independent of the
+# retained subsampling representation so the switching-phase path cannot
+# silently acquire a different prior or boundary clock.
+function _build_sticky_target(base_model::PDMPModel, model_prior, slab_prior,
+        can_stick_vec, unc_names_vec)
+    return isnothing(slab_prior) ? base_model :
+        _build_dependent_slab_model(base_model, model_prior, slab_prior,
+            can_stick_vec, unc_names_vec)
+end
+
+function _build_sticky_event_algorithm(alg0, sticky::Bool, model_prior,
+        parameter_prior_vec, slab_prior, can_stick_vec, flow, unc_names_vec)
+    return isnothing(slab_prior) ?
+        wrap_sticky(alg0, sticky, model_prior, parameter_prior_vec,
+            can_stick_vec) :
+        wrap_dependent_sticky(alg0, sticky, model_prior, slab_prior,
+            can_stick_vec, flow, unc_names_vec)
+end
+
+function _resolved_flow_mean(flow)
+    base = PDMPSamplers._underlying_flow(flow)
+    return hasproperty(base, :μ) ? Vector{Float64}(getproperty(base, :μ)) : Float64[]
+end
+
+
+function _resolved_flow_covariance(flow)
+    d = length(_resolved_flow_mean(flow))
+    if flow isa PDMPSamplers.PreconditionedDynamics
+        metric = flow.metric
+        if metric isa PDMPSamplers.DiagonalPreconditioner
+            return Matrix{Float64}(Diagonal(abs2.(metric.scale)))
+        elseif metric isa PDMPSamplers.DensePreconditioner
+            return Matrix{Float64}(metric.L * transpose(metric.L))
+        elseif metric isa PDMPSamplers.IdentityPreconditioner
+            return Matrix{Float64}(I, d, d)
+        end
+    end
+    base = PDMPSamplers._underlying_flow(flow)
+    if hasproperty(base, :ΣL)
+        factor = getproperty(base, :ΣL)
+        return Matrix{Float64}(factor * transpose(factor))
+    elseif hasproperty(base, :Γ)
+        return Matrix{Float64}(inv(Symmetric(Matrix(getproperty(base, :Γ)))))
+    end
+    return Matrix{Float64}(I, d, d)
+end
+
+
+function _flow_spec(flow)
+    Dict("flow_type" => string(typeof(flow)),
+         "inner_flow_type" => string(typeof(PDMPSamplers._underlying_flow(flow))),
+         "mean" => _resolved_flow_mean(flow),
+         "covariance" => _resolved_flow_covariance(flow))
+end
+
+
+function r_resolve_flow_spec(flow_type::String, flow_mean, flow_cov;
+        adaptive_scheme::String="diagonal", refresh_rate::Float64=1.0)
+    d = length(flow_mean)
+    covariance = _as_flow_cov(flow_cov, d)
+    mean = _as_flow_mean(flow_mean, d)
+    flow = build_flow(flow_type, _to_precision(covariance, d), mean;
+                      adaptive_scheme, refresh_rate)
+    return _flow_spec(flow)
 end
 
 function build_algorithm(algorithm_type::String; c0::Float64, d::Integer, grid_n::Int, grid_t_max::Float64,
@@ -456,13 +575,18 @@ function _build_dependent_slab_model(
     d = posterior_model.d
     provider = build_slab_provider(slab_prior, unc_names, can_stick, d)
     odds = build_model_prior_odds(model_prior, PDMPSamplers.beta_indices(provider), d)
-    target = DependentSlabTarget(d, posterior_model.grad, provider, odds)
+    target = DependentSlabTarget(d, posterior_model.grad, provider, odds;
+        posterior_hvp=posterior_model.hvp)
     return PDMPModel(target; hvp=true)
 end
 
 function _to_precision(flow_cov::AbstractMatrix{Float64}, d::Int)
-    if isdiag(flow_cov) && all(i -> @inbounds(flow_cov[i, i]) ≈ 1.0, 1:d)
-        return Diagonal(ones(d))
+    if isdiag(flow_cov)
+        diagonal = Vector{Float64}(undef, d)
+        @inbounds for i in 1:d
+            diagonal[i] = inv(flow_cov[i, i])
+        end
+        return Diagonal(diagonal)
     end
     return inv(Symmetric(flow_cov))
 end
@@ -581,14 +705,87 @@ function _compile_model_with_header(path_to_stan_model::String, hpp_path::String
     end
 end
 
-function _pack_result(chains::PDMPChains)
+function _flow_provenance(chains::PDMPChains, requested_flow::String,
+        adaptive_scheme::String, initial_refresh_rate::Float64,
+        warmup_adaptation_interval::Union{Nothing,Float64}=nothing,
+        t_warmup::Float64=0.0)
+    trace = chains.traces[1]
+    flow = trace.flow
+    underlying = PDMPSamplers._underlying_flow(flow)
+    preconditioner = flow isa PDMPSamplers.PreconditionedDynamics ?
+        string(typeof(flow.metric)) : "None"
+    adaptation_class = if flow isa PDMPSamplers.PreconditionedDynamics &&
+            flow.metric isa PDMPSamplers.DiagonalPreconditioner
+        "diagonal_preconditioner_warmup"
+    elseif underlying isa PDMPSamplers.MutableBoomerang
+        "adaptive_boomerang_diagonal"
+    else
+        "none"
+    end
+    dynamics_adaptive = adaptation_class != "none"
+    resolved_interval = isnothing(warmup_adaptation_interval) ?
+        (t_warmup > 0 ? t_warmup / 10 : 0.0) : warmup_adaptation_interval
+    return (
+        requested_flow = requested_flow,
+        concrete_flow_type = string(typeof(flow)),
+        underlying_dynamics_type = string(typeof(underlying)),
+        preconditioner_type = preconditioner,
+        adaptive_scheme = adaptation_class == "adaptive_boomerang_diagonal" ?
+            adaptive_scheme : "none",
+        adaptation_class = adaptation_class,
+        resolved_adaptation_interval = resolved_interval,
+        dynamics_adaptive = dynamics_adaptive,
+        initial_refresh_rate = initial_refresh_rate,
+        final_refresh_rate = try Float64(PDMPSamplers.refresh_rate(flow)) catch; NaN end,
+    )
+end
+
+function _pack_result(chains::PDMPChains; requested_flow::String="",
+        adaptive_scheme::String="none", initial_refresh_rate::Float64=NaN,
+        warmup_adaptation_interval::Union{Nothing,Float64}=nothing,
+        t_warmup::Float64=0.0)
     stats = extract_stats(chains)
     d = length(first(chains.traces[1]).position)
+    provenance = _flow_provenance(chains, requested_flow, adaptive_scheme,
+        initial_refresh_rate, warmup_adaptation_interval, t_warmup)
+    n = length(chains.traces)
+    stats["requested_flow"] = fill(provenance.requested_flow, n)
+    stats["concrete_flow_type"] = fill(provenance.concrete_flow_type, n)
+    stats["underlying_dynamics_type"] = fill(provenance.underlying_dynamics_type, n)
+    stats["preconditioner_type"] = fill(provenance.preconditioner_type, n)
+    stats["resolved_adaptive_scheme"] = fill(provenance.adaptive_scheme, n)
+    stats["dynamics_adaptive"] = fill(
+        provenance.dynamics_adaptive ? "true" : "false", n)
+    stats["adaptation_class"] = fill(provenance.adaptation_class, n)
+    stats["resolved_adaptation_interval"] = fill(
+        provenance.resolved_adaptation_interval, n)
+    stats["initial_refresh_rate"] = fill(provenance.initial_refresh_rate, n)
+    stats["final_refresh_rate"] = fill(provenance.final_refresh_rate, n)
+    # `extract_stats` uses a compact R-bridge value union (Float64 vectors,
+    # String vectors, and matrices).  Store integer thread counts as numeric
+    # vectors so provenance cannot make result packing fail after sampling.
+    stats["julia_threads"] = fill(Float64(Threads.nthreads()), n)
+    stats["blas_threads"] = fill(Float64(LinearAlgebra.BLAS.get_num_threads()), n)
+    stats["openmp_threads"] = fill(get(ENV, "OMP_NUM_THREADS", "unset"), n)
+    stats["mkl_threads"] = fill(get(ENV, "MKL_NUM_THREADS", "unset"), n)
+    stats["openblas_threads"] = fill(get(ENV, "OPENBLAS_NUM_THREADS", "unset"), n)
     return Dict{String,Any}(
         "chains"   => chains,
         "stats"    => stats,
         "d"        => d,
-        "n_chains" => PDMPSamplers.n_chains(chains)
+        "n_chains" => PDMPSamplers.n_chains(chains),
+        "flow_provenance" => Dict{String,Any}(
+            "requested_flow" => provenance.requested_flow,
+            "concrete_flow_type" => provenance.concrete_flow_type,
+            "underlying_dynamics_type" => provenance.underlying_dynamics_type,
+            "preconditioner_type" => provenance.preconditioner_type,
+            "adaptive_scheme" => provenance.adaptive_scheme,
+            "dynamics_adaptive" => provenance.dynamics_adaptive,
+            "adaptation_class" => provenance.adaptation_class,
+            "resolved_adaptation_interval" =>
+                provenance.resolved_adaptation_interval,
+            "initial_refresh_rate" => provenance.initial_refresh_rate,
+            "final_refresh_rate" => provenance.final_refresh_rate)
     )
 end
 
@@ -634,12 +831,15 @@ function r_quantile(chains::PDMPChains, p::AbstractVector{<:Real};
 
     d = length(first(trace).position)
     result = Matrix{Float64}(undef, length(probabilities), d)
+    gc_interval = max(1, tryparse(Int, get(ENV,
+        "OMRF_QUANTILE_GC_INTERVAL", "16")) === nothing ? 16 :
+        tryparse(Int, get(ENV, "OMRF_QUANTILE_GC_INTERVAL", "16")))
     for j in 1:d
         result[:, j] .= Statistics.quantile(trace, probabilities; coordinate=j)
         # Sweep events can be O(length(trace)) and are not reused by another
         # coordinate.  An explicit incremental collection prevents them from
         # accumulating until the enclosing all-coordinate call returns.
-        GC.gc(false)
+        (j == d || j % gc_interval == 0) && GC.gc(false)
     end
     return result
 end
@@ -826,6 +1026,12 @@ function r_chain_velocities(chains::PDMPChains; chain::Int)
     Matrix{Float64}(_dense_compact(chains, chain).velocities)
 end
 
+function r_chain_free_masks(chains::PDMPChains; chain::Int)
+    masks = _dense_compact(chains, chain).free_masks
+    masks === nothing && return falses(0, 0)
+    return Matrix{Bool}(masks)
+end
+
 function r_chain_is_boomerang(chains::PDMPChains; chain::Int)
     PDMPSamplers._underlying_flow(chains.traces[chain].flow) isa AnyBoomerang
 end
@@ -835,20 +1041,15 @@ function r_chain_is_mutable_boomerang(chains::PDMPChains; chain::Int)
 end
 
 function r_chain_mu(chains::PDMPChains; chain::Int)
-    base = PDMPSamplers._underlying_flow(chains.traces[chain].flow)
-    base isa AnyBoomerang ? Vector{Float64}(base.μ) : Float64[]
+    Vector{Float64}(_resolved_flow_mean(chains.traces[chain].flow))
 end
 
 function r_chain_flow_cov(chains::PDMPChains; chain::Int)
-    base = PDMPSamplers._underlying_flow(chains.traces[chain].flow)
-    base isa AnyBoomerang || return zeros(Float64, 0, 0)
-    if base.Γ isa LowRankPrecision
-        covariance = Diagonal(base.Γ.D) +
-            base.Γ.V * Diagonal(base.Γ.Λ) * transpose(base.Γ.V)
-        return Matrix{Float64}(covariance)
-    end
-    return Matrix{Float64}(base.ΣL * transpose(base.ΣL))
+    Matrix{Float64}(_resolved_flow_covariance(chains.traces[chain].flow))
 end
+
+r_chain_flow_spec(chains::PDMPChains; chain::Int) =
+    _flow_spec(chains.traces[chain].flow)
 
 function _final_lambda_ref(chains::PDMPChains, chain::Int)
     base = PDMPSamplers._underlying_flow(chains.traces[chain].flow)
@@ -858,7 +1059,7 @@ end
 function r_from_skeleton(times_list::AbstractVector, positions_list::AbstractVector,
                           velocities_list::AbstractVector, is_boomerang_list::AbstractVector,
                           mu_list::AbstractVector, is_mutable_boomerang_list::AbstractVector,
-                          flow_cov_list=nothing)
+                          flow_cov_list=nothing, free_masks_list=nothing)
     n = length(times_list)
     traces = PDMPTrace[]
     sizehint!(traces, n)
@@ -883,7 +1084,14 @@ function r_from_skeleton(times_list::AbstractVector, positions_list::AbstractVec
         else
             ZigZag(I(d), zeros(d))
         end
-        push!(traces, PDMPTrace(times, positions, velocities, flow))
+        masks = if free_masks_list === nothing || isempty(free_masks_list[i])
+            nothing
+        else
+            Matrix{Bool}(free_masks_list[i])
+        end
+        masks === nothing || size(masks) == size(positions) ||
+            throw(DimensionMismatch("free-mask dimensions must match positions"))
+        push!(traces, PDMPTrace(times, positions, velocities, flow, masks))
     end
     PDMPChains(traces, PDMPSamplers.StatisticCounter[])
 end
@@ -998,6 +1206,102 @@ function extract_stats(chains::PDMPChains)
         "subsampling_aggregate_accepts" => vals(:subsampling_aggregate_accepts),
         "subsampling_subset_evaluations" => vals(:subsampling_subset_evaluations),
         "subsampling_final_reflections" => vals(:subsampling_final_reflections),
+        # Exact research pipeline counters. The cumulative values are retained
+        # for compatibility; the phase-local values are recorded by the Julia
+        # sampler at the warmup/main boundary and are the authoritative
+        # retained-phase values.
+        "clock_candidates" => vals(:clock_candidates),
+        "grid_bound_evaluations" => vals(:grid_bound_evaluations),
+        "pointwise_screen_evaluations" => vals(:pointwise_screen_evaluations),
+        "pointwise_screen_passes" => vals(:pointwise_screen_passes),
+        "subset_draws" => vals(:subset_draws),
+        "selected_subset_bound_evaluations" => vals(:selected_subset_bound_evaluations),
+        "selected_subset_bound_passes" => vals(:selected_subset_bound_passes),
+        "residual_oracle_evaluations" => vals(:residual_oracle_evaluations),
+        "final_thinning_acceptances" => vals(:final_thinning_acceptances),
+        "reflection_events" => vals(:reflection_events),
+        "sticky_events" => vals(:sticky_events),
+        "warmup_clock_candidates" => vals(:warmup_clock_candidates),
+        "main_clock_candidates" => vals(:main_clock_candidates),
+        "warmup_grid_bound_evaluations" => vals(:warmup_grid_bound_evaluations),
+        "main_grid_bound_evaluations" => vals(:main_grid_bound_evaluations),
+        "warmup_pointwise_screen_evaluations" => vals(:warmup_pointwise_screen_evaluations),
+        "main_pointwise_screen_evaluations" => vals(:main_pointwise_screen_evaluations),
+        "warmup_pointwise_screen_passes" => vals(:warmup_pointwise_screen_passes),
+        "main_pointwise_screen_passes" => vals(:main_pointwise_screen_passes),
+        "warmup_subset_draws" => vals(:warmup_subset_draws),
+        "main_subset_draws" => vals(:main_subset_draws),
+        "warmup_selected_subset_bound_evaluations" => vals(:warmup_selected_subset_bound_evaluations),
+        "main_selected_subset_bound_evaluations" => vals(:main_selected_subset_bound_evaluations),
+        "warmup_selected_subset_bound_passes" => vals(:warmup_selected_subset_bound_passes),
+        "main_selected_subset_bound_passes" => vals(:main_selected_subset_bound_passes),
+        "warmup_residual_oracle_evaluations" => vals(:warmup_residual_oracle_evaluations),
+        "main_residual_oracle_evaluations" => vals(:main_residual_oracle_evaluations),
+        "warmup_final_thinning_acceptances" => vals(:warmup_final_thinning_acceptances),
+        "main_final_thinning_acceptances" => vals(:main_final_thinning_acceptances),
+        "warmup_reflection_events" => vals(:warmup_reflection_events),
+        "main_reflection_events" => vals(:main_reflection_events),
+        "warmup_sticky_events" => vals(:warmup_sticky_events),
+        "main_sticky_events" => vals(:main_sticky_events),
+        "warmup_grid_schedule_builds" => vals(:warmup_grid_schedule_builds),
+        "main_grid_schedule_builds" => vals(:main_grid_schedule_builds),
+        "warmup_grid_schedule_searches" => vals(:warmup_grid_schedule_searches),
+        "main_grid_schedule_searches" => vals(:main_grid_schedule_searches),
+        "warmup_poisson_time_generations" => vals(:warmup_poisson_time_generations),
+        "main_poisson_time_generations" => vals(:main_poisson_time_generations),
+        "warmup_candidate_state_copies" => vals(:warmup_candidate_state_copies),
+        "main_candidate_state_copies" => vals(:main_candidate_state_copies),
+        "warmup_candidate_move_forwards" => vals(:warmup_candidate_move_forwards),
+        "main_candidate_move_forwards" => vals(:main_candidate_move_forwards),
+        "warmup_candidate_loop_iterations" => vals(:warmup_candidate_loop_iterations),
+        "main_candidate_loop_iterations" => vals(:main_candidate_loop_iterations),
+        "warmup_statistic_recordings" => vals(:warmup_statistic_recordings),
+        "main_statistic_recordings" => vals(:main_statistic_recordings),
+        "warmup_grid_bound_seconds" => vals(:warmup_grid_bound_seconds),
+        "main_grid_bound_seconds" => vals(:main_grid_bound_seconds),
+        "warmup_pointwise_screen_seconds" => vals(:warmup_pointwise_screen_seconds),
+        "main_pointwise_screen_seconds" => vals(:main_pointwise_screen_seconds),
+        "warmup_subset_draw_seconds" => vals(:warmup_subset_draw_seconds),
+        "main_subset_draw_seconds" => vals(:main_subset_draw_seconds),
+        "warmup_selected_subset_refinement_seconds" => vals(:warmup_selected_subset_refinement_seconds),
+        "main_selected_subset_refinement_seconds" => vals(:main_selected_subset_refinement_seconds),
+        "warmup_residual_oracle_seconds" => vals(:warmup_residual_oracle_seconds),
+        "main_residual_oracle_seconds" => vals(:main_residual_oracle_seconds),
+        "warmup_final_thinning_seconds" => vals(:warmup_final_thinning_seconds),
+        "main_final_thinning_seconds" => vals(:main_final_thinning_seconds),
+        "warmup_reflection_update_seconds" => vals(:warmup_reflection_update_seconds),
+        "main_reflection_update_seconds" => vals(:main_reflection_update_seconds),
+        "warmup_reflection_gradient_seconds" => vals(:warmup_reflection_gradient_seconds),
+        "main_reflection_gradient_seconds" => vals(:main_reflection_gradient_seconds),
+        "warmup_reflection_covariance_seconds" => vals(:warmup_reflection_covariance_seconds),
+        "main_reflection_covariance_seconds" => vals(:main_reflection_covariance_seconds),
+        "warmup_reflection_sticky_schedule_seconds" => vals(:warmup_reflection_sticky_schedule_seconds),
+        "main_reflection_sticky_schedule_seconds" => vals(:main_reflection_sticky_schedule_seconds),
+        "warmup_reflection_state_validation_seconds" => vals(:warmup_reflection_state_validation_seconds),
+        "main_reflection_state_validation_seconds" => vals(:main_reflection_state_validation_seconds),
+        "warmup_sticky_update_seconds" => vals(:warmup_sticky_update_seconds),
+        "main_sticky_update_seconds" => vals(:main_sticky_update_seconds),
+        "warmup_grid_schedule_build_seconds" => vals(:warmup_grid_schedule_build_seconds),
+        "main_grid_schedule_build_seconds" => vals(:main_grid_schedule_build_seconds),
+        "warmup_grid_schedule_search_seconds" => vals(:warmup_grid_schedule_search_seconds),
+        "main_grid_schedule_search_seconds" => vals(:main_grid_schedule_search_seconds),
+        "warmup_poisson_time_generation_seconds" => vals(:warmup_poisson_time_generation_seconds),
+        "main_poisson_time_generation_seconds" => vals(:main_poisson_time_generation_seconds),
+        "warmup_candidate_state_copy_seconds" => vals(:warmup_candidate_state_copy_seconds),
+        "main_candidate_state_copy_seconds" => vals(:main_candidate_state_copy_seconds),
+        "warmup_candidate_move_forward_seconds" => vals(:warmup_candidate_move_forward_seconds),
+        "main_candidate_move_forward_seconds" => vals(:main_candidate_move_forward_seconds),
+        "warmup_candidate_loop_overhead_seconds" => vals(:warmup_candidate_loop_overhead_seconds),
+        "main_candidate_loop_overhead_seconds" => vals(:main_candidate_loop_overhead_seconds),
+        "warmup_statistic_recording_seconds" => vals(:warmup_statistic_recording_seconds),
+        "main_statistic_recording_seconds" => vals(:main_statistic_recording_seconds),
+        "warmup_phase_elapsed_seconds" => vals(:warmup_phase_elapsed_time),
+        "main_phase_elapsed_seconds" => vals(:main_phase_elapsed_time),
+        "main_phase_allocated_bytes" => vals(:main_phase_allocated_bytes),
+        "initialization_allocated_bytes" => vals(:initialization_allocated_bytes),
+        "main_sampler_initialization_allocated_bytes" =>
+            vals(:main_sampler_initialization_allocated_bytes),
+        "other_main_loop_seconds" => vals(:other_main_loop_seconds),
         "grid_horizon_hits" => vals(:grid_horizon_hits),
         "grid_budget_tail_restarts" => vals(:grid_budget_tail_restarts),
         "constant_bound_attempts" => vals(:constant_bound_attempts),
@@ -1016,6 +1320,13 @@ function extract_stats(chains::PDMPChains)
         "sticky_all_frozen_events" => vals(:sticky_all_frozen_events),
         "warmup_events" => vals(:warmup_events),
         "main_events" => vals(:main_events),
+        "final_metric_scale_min" => vals(:final_metric_scale_min),
+        "final_metric_scale_max" => vals(:final_metric_scale_max),
+        "adaptation_updates" => vals(:adaptation_updates),
+        "preconditioner_updates" => vals(:preconditioner_updates),
+        "boomerang_updates" => vals(:boomerang_updates),
+        "adaptation_free_time_min" => vals(:adaptation_free_time_min),
+        "adaptation_free_time_max" => vals(:adaptation_free_time_max),
         "warmup_gradient_calls" => vals(:warmup_gradient_calls),
         "main_gradient_calls" => vals(:main_gradient_calls),
         "warmup_hessian_calls" => vals(:warmup_hessian_calls),
@@ -1138,6 +1449,7 @@ function r_pdmp_stan(
         threaded::Bool = false,
         seed::Union{Integer, Nothing} = nothing,
         adaptive_scheme::String = "diagonal",
+        refresh_rate::Float64 = 1.0,
         support_boundary_mode::String = "error",
         support_boundary_max_bisection_steps::Int = 60,
         support_boundary_time_rtol::Float64 = 1e-8,
@@ -1155,22 +1467,19 @@ function r_pdmp_stan(
     can_stick_vec = _as_bool_vector(can_stick)
     parameter_prior_vec = isnothing(parameter_prior) ? nothing : _as_float_vector(parameter_prior)
     unc_names_vec = _as_string_vector(unc_names)
-    sampling_model = if isnothing(slab_prior)
-        model
-    else
-        _build_dependent_slab_model(model, model_prior, slab_prior, can_stick_vec, unc_names_vec)
-    end
+    sampling_model = _build_sticky_target(model, model_prior, slab_prior,
+        can_stick_vec, unc_names_vec)
 
     prec = _to_precision(flow_cov_mat, d)
-    flow = build_flow(flow_type, prec, flow_mean_vec; adaptive_scheme)
+    flow = build_flow(flow_type, prec, flow_mean_vec; adaptive_scheme, refresh_rate)
+    initial_refresh_rate = try Float64(PDMPSamplers.refresh_rate(flow)) catch; NaN end
     alg0 = build_algorithm(algorithm_type; c0, d, grid_n, grid_t_max, use_fd_hvp, curvature_backend,
         post_warmup_simplify, grid_bound, grid_curvature_bound,
         linear_area_threshold, linear_min_area_gain,
         lazy_low_tightness_threshold, lazy_max_low_tightness_rejections,
         lazy_max_rejections)
-    alg = isnothing(slab_prior) ?
-        wrap_sticky(alg0, sticky, model_prior, parameter_prior_vec, can_stick_vec) :
-        wrap_dependent_sticky(alg0, sticky, model_prior, slab_prior, can_stick_vec, flow, unc_names_vec)
+    alg = _build_sticky_event_algorithm(alg0, sticky, model_prior,
+        parameter_prior_vec, slab_prior, can_stick_vec, flow, unc_names_vec)
 
     sbopts = SupportBoundaryOptions(;
         detect_boundaries = support_boundary_mode != "error",
@@ -1184,8 +1493,21 @@ function r_pdmp_stan(
         min_safe_time = support_boundary_min_safe_time,
     )
 
-    initial = isnothing(theta0) ? x0_vec :
+    initial = if isnothing(theta0)
+        # Preserve the package's seeded, flow-specific velocity law. Sticky
+        # coordinates initialized exactly on their face start inactive; all
+        # other coordinates retain the generated invariant velocity.
+        velocity = PDMPSamplers.initialize_velocity(
+            PDMPSamplers._make_initial_rng(seed, n_chains), flow, d)
+        if sticky
+            @inbounds for i in eachindex(velocity, x0_vec, can_stick_vec)
+                can_stick_vec[i] && iszero(x0_vec[i]) && (velocity[i] = 0.0)
+            end
+        end
+        SkeletonPoint(x0_vec, velocity)
+    else
         SkeletonPoint(x0_vec, _as_float_vector(theta0))
+    end
     adapter = PDMPSamplers.default_warmup_adapter(
         flow, sampling_model.grad, t_warmup, t0;
         warmup_adaptation_interval,
@@ -1197,7 +1519,9 @@ function r_pdmp_stan(
                          warmup_stop = build_warmup_stop(t_warmup),
                          support_boundary_options = sbopts,
                          statistic_counter = PDMPSamplers.DevelStatisticCounter)
-    return _pack_result(chains)
+    return _pack_result(chains; requested_flow=flow_type,
+        adaptive_scheme, initial_refresh_rate,
+        warmup_adaptation_interval, t_warmup)
 end
 
 function r_pdmp_custom(
@@ -1230,6 +1554,7 @@ function r_pdmp_custom(
         threaded::Bool = false,
         seed::Union{Integer, Nothing} = nothing,
         adaptive_scheme::String = "diagonal",
+        refresh_rate::Float64 = 1.0,
         support_boundary_mode::String = "error",
         support_boundary_max_bisection_steps::Int = 60,
         support_boundary_time_rtol::Float64 = 1e-8,
@@ -1269,12 +1594,14 @@ function r_pdmp_custom(
         _validate_sampling_slab_prior(slab_prior)
         provider = build_slab_provider(slab_prior, String[], can_stick_vec, d)
         odds = build_model_prior_odds(model_prior, PDMPSamplers.beta_indices(provider), d)
-        target = DependentSlabTarget(d, grad!, provider, odds)
+        target = DependentSlabTarget(d, grad!, provider, odds;
+            posterior_hvp=PDMPSamplers.InplaceHVP(hvp, zeros(d)))
         PDMPModel(target; hvp=true)
     end
 
     prec = _to_precision(flow_cov_mat, d)
-    flow = build_flow(flow_type, prec, flow_mean_vec; adaptive_scheme)
+    flow = build_flow(flow_type, prec, flow_mean_vec; adaptive_scheme, refresh_rate)
+    initial_refresh_rate = try Float64(PDMPSamplers.refresh_rate(flow)) catch; NaN end
     alg0 = build_algorithm(algorithm_type; c0, d, grid_n, grid_t_max,
         post_warmup_simplify, grid_bound, grid_curvature_bound,
         linear_area_threshold, linear_min_area_gain)
@@ -1298,7 +1625,9 @@ function r_pdmp_custom(
                          progress = show_progress, n_chains = n_chains, threaded = threaded,
                          seed = seed,
                          support_boundary_options = sbopts)
-    return _pack_result(chains)
+    return _pack_result(chains; requested_flow=flow_type,
+        adaptive_scheme, initial_refresh_rate,
+        warmup_adaptation_interval=nothing, t_warmup)
 end
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -1459,6 +1788,7 @@ function _run_subsampling_brms_subsampled(lib_path_std::String,
 
     prec = inv(Symmetric(_as_flow_cov(flow_cov, d)))
     flow = build_flow(flow_type, prec, fmean; adaptive_scheme)
+    initial_refresh_rate = try Float64(PDMPSamplers.refresh_rate(flow)) catch; NaN end
     alg = build_algorithm(algorithm_type; c0, d, grid_n, grid_t_max,
         use_fd_hvp, post_warmup_simplify, grid_bound, grid_curvature_bound,
         linear_area_threshold, linear_min_area_gain)
@@ -1503,7 +1833,9 @@ function _run_subsampling_brms_subsampled(lib_path_std::String,
         push!(csv_paths, csv_path)
     end
 
-    result = _pack_result(chains)
+    result = _pack_result(chains; requested_flow=flow_type,
+        adaptive_scheme, initial_refresh_rate,
+        warmup_adaptation_interval, t_warmup)
     result["csv_paths"] = csv_paths
     result["bridge_call_counts"] = [_subsampling_call_counts(ctx, manager)
         for (ctx, manager) in zip(contexts, anchor_managers)]
@@ -1635,6 +1967,7 @@ function r_pdmp_stan_for_brms(
     prec = _to_precision(flow_cov_mat, d)
 
     flow = build_flow(flow_type, prec, fmean; adaptive_scheme)
+    initial_refresh_rate = try Float64(PDMPSamplers.refresh_rate(flow)) catch; NaN end
     alg0 = build_algorithm(algorithm_type; c0, d, grid_n, grid_t_max,
         use_fd_hvp, post_warmup_simplify, grid_bound, grid_curvature_bound,
         linear_area_threshold,
@@ -1659,7 +1992,9 @@ function r_pdmp_stan_for_brms(
         push!(csv_paths, csv_path)
     end
 
-    result = _pack_result(chains)
+    result = _pack_result(chains; requested_flow=flow_type,
+        adaptive_scheme, initial_refresh_rate,
+        warmup_adaptation_interval, t_warmup)
     result["csv_paths"] = csv_paths
     if sticky
         incl = Dict{Int,Vector{Float64}}()

@@ -16,7 +16,7 @@ node_shared_omrf_fixture <- function() {
   data <- list(
     N = nrow(X), P = P, K = 2L, X = X, seen = rep(2L, P),
     prior_only = 0L, prior_threshold_alpha = 2,
-    prior_threshold_beta = 2, prior_cauchy_scale = 1,
+    prior_threshold_beta = 2,
     slab_base_scale = 0.35,
     prior_global_scale_sd = 0.65, prior_node_scale_sd = 0.75
   )
@@ -47,6 +47,9 @@ test_that("node-shared OMRF gradient closure retains scale-state priors", {
   anchor <- rep(0, 10L)
   subsampling <- stan_subsampling(
     fixture$data$N, 2L, fixture$prior, envelope, anchor = anchor)
+  expect_identical(
+    subsampling$residual_envelope$analytic_prior$type,
+    "node_scale_gaussian")
   position <- seq(-0.18, 0.27, length.out = 10L)
   subsets <- combn(fixture$data$N, 2L, simplify = FALSE)
   diagnostics <- lapply(subsets, function(subset) {
@@ -74,7 +77,7 @@ test_that("node-shared OMRF gradient closure retains scale-state priors", {
   expect_equal(length(fixture$slab$logscale_design$x), 9L)
 })
 
-test_that("public node-shared OMRF samples full and subsampling with ZigZag and BPS", {
+test_that("public node-shared OMRF samples all PDMP routes full and subsampled", {
   skip_on_cran()
   skip_if_no_pdmp_julia_backend()
   skip_if_not_installed("Matrix")
@@ -102,16 +105,26 @@ test_that("public node-shared OMRF samples full and subsampling with ZigZag and 
     model_prior = betabernoulli(1, 2), slab_prior = fixture$slab,
     show_progress = FALSE, materialize = FALSE
   )
+  native_full_gradient <- omrf_full_gradient(
+    fixture$data$X, fixture$data$seen, "thresholds_0", "interactions_0",
+    prior_standata = fixture$prior)
 
-  for (flow in c("ZigZag", "BouncyParticle")) {
+  for (flow in c("ZigZag", "BouncyParticle", "AdaptiveBoomerang")) {
     full_fit <- do.call(pdmp_sample_from_stanmodel, c(
-      common, list(flow = flow, seed = if (flow == "ZigZag") 1801L else 1802L)))
+      common, list(flow = flow, full_gradient = native_full_gradient,
+                  seed = if (flow == "ZigZag") 1801L else 1802L)))
     subsampling_fit <- do.call(pdmp_sample_from_stanmodel, c(
       common, list(flow = flow, subsampling = subsampling,
                    subsampling_warmup = "full", t_warmup = 0.4,
                    seed = if (flow == "ZigZag") 1811L else 1812L)))
     expect_s3_class(full_fit, "pdmp_result")
     expect_s3_class(subsampling_fit, "pdmp_result")
+    backend <- attr(full_fit, "backend_provenance")
+    expect_identical(backend$resolved_backend, "native")
+    expect_match(backend$gradient_provider_type,
+                 "OMRFFullGradientProvider", fixed = TRUE)
+    expect_match(backend$hvp_provider_type,
+                 "OMRFFullHVPProvider", fixed = TRUE)
     expect_gt(full_fit$stats$sticky_events[[1L]], 0)
     expect_gt(subsampling_fit$stats$sticky_events[[1L]], 0)
     counters <- attr(subsampling_fit, "subsampling_context_counters")[[1L]]
@@ -123,6 +136,15 @@ test_that("public node-shared OMRF samples full and subsampling with ZigZag and 
       counters$analytic_residual_calls,
       subsampling_fit$stats$residual_oracle_calls[[1L]])
     expect_equal(counters$selected_gradient_calls, 0L)
+    expect_identical(counters$resolved_full_gradient_backend, "native")
+    expect_match(counters$warmup_gradient_provider_type,
+                 "OMRFFullGradientProvider", fixed = TRUE)
+    expect_match(counters$warmup_hvp_provider_type,
+                 "_DependentSlabAnalyticHVP", fixed = TRUE)
+    expect_match(counters$native_warmup_hvp_provider_type,
+                 "OMRFFullHVPProvider", fixed = TRUE)
+    expect_match(counters$deterministic_hvp_provider_type,
+                 "StanSubsamplingSlabDeterministic", fixed = TRUE)
     expect_equal(counters$anchor_cache_gradient_calls, 0L)
     expect_lte(
       subsampling_fit$stats$subsampling_final_reflections[[1L]],

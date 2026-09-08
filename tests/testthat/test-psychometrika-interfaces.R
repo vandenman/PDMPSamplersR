@@ -114,6 +114,28 @@ test_that("OMRF provider uses persons and finite categorical curvature weights",
   )
 })
 
+test_that("OMRF analytic prior routing prefers an explicit independent prior", {
+  X <- matrix(0L, nrow = 2L, ncol = 2L)
+  spec <- omrf_full_gradient(
+    X, seen = c(2L, 2L),
+    thresholds = "thresholds_0", interactions = "interactions_0")$spec
+  standata <- list(
+    prior_threshold_alpha = 1,
+    prior_threshold_beta = 1,
+    prior_cauchy_scale = 1,
+    # These fields are also present in the shared OMRF simulation data, but
+    # belong to the dependent node-scale Stan model.
+    slab_base_scale = 1,
+    prior_global_scale_sd = 1,
+    prior_node_scale_sd = 1
+  )
+  attach_prior <- get(".attach_omrf_analytic_prior", asNamespace("PDMPSamplersR"))
+  resolved <- attach_prior(spec, standata)
+  expect_identical(resolved$analytic_prior$type, "cauchy")
+  expect_null(resolved$analytic_prior$global_scale)
+  expect_null(resolved$analytic_prior$node_scale)
+})
+
 test_that("parameter blocks resolve to ordered unconstrained coordinates", {
   names <- c("thresholds_0.1", "thresholds_0.2",
              "interactions_0.1", "log_tau")

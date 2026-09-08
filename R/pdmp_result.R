@@ -45,7 +45,8 @@ materialize <- function(x) {
         event_positions    = .pdmpsamplers_julia_call("r_chain_sparse_event_positions",   chains, chain = i_int),
         event_velocities   = .pdmpsamplers_julia_call("r_chain_sparse_event_velocities",  chains, chain = i_int),
         is_boomerang       = .pdmpsamplers_julia_call("r_chain_is_boomerang",             chains, chain = i_int),
-        mu                 = .pdmpsamplers_julia_call("r_chain_mu",                       chains, chain = i_int)
+        mu                 = .pdmpsamplers_julia_call("r_chain_mu",                       chains, chain = i_int),
+        flow_cov           = .pdmpsamplers_julia_call("r_chain_flow_cov",                 chains, chain = i_int)
       )
     })
   } else {
@@ -56,6 +57,7 @@ materialize <- function(x) {
         times         = .pdmpsamplers_julia_call("r_chain_times",                chains, chain = i_int),
         positions     = .pdmpsamplers_julia_call("r_chain_positions",            chains, chain = i_int),
         velocities    = .pdmpsamplers_julia_call("r_chain_velocities",           chains, chain = i_int),
+        free_masks    = .pdmpsamplers_julia_call("r_chain_free_masks",           chains, chain = i_int),
         is_boomerang  = .pdmpsamplers_julia_call("r_chain_is_boomerang",         chains, chain = i_int),
         is_mutable    = .pdmpsamplers_julia_call("r_chain_is_mutable_boomerang", chains, chain = i_int),
         mu            = .pdmpsamplers_julia_call("r_chain_mu",                   chains, chain = i_int),

@@ -32,6 +32,9 @@
       lapply(x$skeleton, `[[`, "is_mutable"),
       lapply(x$skeleton, function(s) {
         if (is.null(s$flow_cov)) matrix(numeric(0), 0L, 0L) else s$flow_cov
+      }),
+      lapply(x$skeleton, function(s) {
+        if (is.null(s$free_masks)) matrix(FALSE, 0L, 0L) else s$free_masks
       })
     )
   }

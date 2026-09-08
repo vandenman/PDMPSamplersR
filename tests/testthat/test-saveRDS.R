@@ -164,3 +164,34 @@ test_that("Boomerang with non-zero centering round-trip preserves estimators", {
   expect_equal(var(rel),                     var(result),                     tolerance = 1e-8)
   expect_equal(cdf(rel, 0.5, coordinate = 1L), cdf(result, 0.5, coordinate = 1L), tolerance = 1e-8)
 })
+
+test_that("sticky Boomerang round-trip preserves segment masks and moments", {
+  skip_on_cran()
+  skip_if_no_pdmp_julia_backend()
+
+  result <- pdmp_sample(
+    function(x) x - c(1, -0.5), d = 2,
+    flow = "AdaptiveBoomerang", algorithm = "GridThinningStrategy",
+    flow_mean = c(1, -0.5), flow_cov = diag(c(2, 0.5)),
+    x0 = c(0, 0.4), T = 8, t_warmup = 2,
+    sticky = TRUE, can_stick = c(TRUE, TRUE),
+    model_prior = bernoulli(0.8),
+    slab_prior = dense_gaussian_slab(c(0, 0), diag(2)),
+    seed = 94012L, show_progress = FALSE, materialize = FALSE)
+  expected_mean <- mean(result)
+  expected_pip <- inclusion_probs(result)
+
+  saved <- materialize(result)
+  masks <- saved$skeleton[[1L]]$free_masks
+  expect_type(masks, "logical")
+  expect_equal(dim(masks), dim(saved$skeleton[[1L]]$positions))
+  expect_true(any(!masks))
+  tmp <- tempfile(fileext = ".rds")
+  on.exit(unlink(tmp))
+  saveRDS(saved, tmp)
+  restored <- readRDS(tmp)
+
+  expect_equal(mean(restored), expected_mean, tolerance = 1e-10)
+  expect_equal(inclusion_probs(restored), expected_pip, tolerance = 1e-10)
+  expect_identical(restored$skeleton[[1L]]$free_masks, masks)
+})

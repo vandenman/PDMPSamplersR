@@ -1,5 +1,45 @@
 # Persistent selected-gradient backend for public custom-Stan subsampling sampling.
 
+mutable struct OMRFSignedBPSCallCounts
+    cell_preparations::Int
+    endpoint_fills::Int
+    person_node_masses_filled::Int
+    endpoint_reuses::Int
+    interaction_field_preparations::Int
+    endpoint_range_fills::Int
+    point_screens::Int
+    screen_copy_checks::Int
+    component_draws::Int
+    cell_preparation_seconds::Float64
+    endpoint_fill_seconds::Float64
+    interaction_field_seconds::Float64
+    endpoint_range_seconds::Float64
+    point_screen_seconds::Float64
+    screen_copy_seconds::Float64
+    component_draw_seconds::Float64
+    cell_preparation_allocated_bytes::UInt
+    endpoint_fill_allocated_bytes::UInt
+    interaction_field_allocated_bytes::UInt
+    endpoint_range_allocated_bytes::UInt
+    point_screen_allocated_bytes::UInt
+    screen_copy_allocated_bytes::UInt
+    component_draw_allocated_bytes::UInt
+    harmonic_cell_mass_constructions::Int
+    harmonic_factor_masses_filled::Int
+    harmonic_all_factor_point_scans::Int
+    harmonic_selected_point_bounds::Int
+    harmonic_cell_mass_seconds::Float64
+    harmonic_selected_point_seconds::Float64
+    harmonic_cell_mass_allocated_bytes::UInt
+    harmonic_selected_point_allocated_bytes::UInt
+end
+
+OMRFSignedBPSCallCounts() = OMRFSignedBPSCallCounts(
+    0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+    UInt(0), UInt(0), UInt(0), UInt(0), UInt(0), UInt(0), UInt(0),
+    0, 0, 0, 0, 0.0, 0.0, UInt(0), UInt(0))
+
 mutable struct StanSubsamplingCallCounts
     full_gradient::Int
     prior_gradient::Int
@@ -8,9 +48,17 @@ mutable struct StanSubsamplingCallCounts
     anchor_cache_gradient::Int
     anchor_cache_persons::Int
     analytic_residual::Int
+    selected_refinement_calls::Int
     analytic_persons::Int
     analytic_factors::Int
     analytic_node_conditionals::Int
+    compact_person_bounds::Int
+    compact_static_constructions::Int
+    compact_aggregate_point_calls::Int
+    compact_cell_bound_calls::Int
+    compact_term_selection_calls::Int
+    compact_person_selection_calls::Int
+    compact_observation_bound_calls::Int
     model_constructions::Int
     data_constructions::Int
     native_full_data_scans::Int
@@ -38,13 +86,53 @@ mutable struct StanSubsamplingCallCounts
     lazy_leaf_evaluations::Int
     lazy_sampling_seconds::Float64
     cell_cached_point_screen_seconds::Float64
+    compact_static_seconds::Float64
+    compact_aggregate_point_seconds::Float64
+    compact_cell_bound_seconds::Float64
+    compact_term_selection_seconds::Float64
+    compact_person_selection_seconds::Float64
+    compact_observation_bound_seconds::Float64
+    compact_anchor_likelihood_seconds::Float64
+    signed_bps::OMRFSignedBPSCallCounts
+    harmonic_coefficient_preparations::Int
+    harmonic_coefficient_cache_hits::Int
+    harmonic_coefficient_seconds::Float64
+    direct_factor_bound_scans::Int
+    direct_factors_evaluated::Int
+    direct_cell_certificate_seconds::Float64
+    direct_cached_cell_hits::Int
+    direct_selected_factor_exact_evaluations::Int
+    direct_path_preparations::Int
+    direct_path_factors_prepared::Int
+    direct_path_preparation_seconds::Float64
+    direct_adjacent_endpoint_reuses::Int
+    direct_left_endpoint_evaluations::Int
+    direct_right_endpoint_evaluations::Int
+    direct_residual_table_constructions::Int
+    direct_horizon_table_hits::Int
+    direct_internal_cell_uses::Int
+    deterministic_hvp_calls::Int
+    deterministic_hvp_seconds::Float64
+    last_mark_residual::Bool
+    deterministic_source_proposals::Int
+    residual_source_proposals::Int
+    deterministic_source_acceptances::Int
+    residual_source_acceptances::Int
 end
 StanSubsamplingCallCounts() = StanSubsamplingCallCounts(
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    # 4:24 are integer counters.
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    # native/analytic timing, point/cell counters and their timings.
     0.0, 0.0, 0, 0.0, 0, 0.0,
-    0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
-    0, 0.0, 0.0, 0.0,
-    0, 0, 0, 0.0, 0.0)
+    0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+    # proposal count, proposal summaries, lazy counters/timing.
+    0, 0.0, 0.0, 0.0, 0, 0, 0, 0.0, 0.0,
+    # compact timing counters and signed-BPS diagnostics.
+    0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+    OMRFSignedBPSCallCounts(), 0, 0, 0.0,
+    0, 0, 0.0, 0, 0,
+    0, 0, 0.0, 0, 0, 0, 0, 0, 0,
+    0, 0.0, false, 0, 0, 0, 0)
 
 mutable struct StanSubsamplingContext
     full::PDMPModel
@@ -221,10 +309,71 @@ mutable struct OMRFResidualContext
     hcv_damping::Float64
     displacement::Vector{Float64}
     hcv_product::Vector{Float64}
+    hcv_nodewise::Bool
+    node_likelihood_hessians::Union{Nothing,Array{Float64,3}}
+    node_hcv_product::Matrix{Float64}
+    node_hcv_direction_product::Matrix{Float64}
+    node_hcv_alphas::Vector{Float64}
+    node_supports::Vector{Vector{Int}}
     factorization::Symbol
     touched_positions::Vector{Int}
     touched_mask::BitVector
     counts::StanSubsamplingCallCounts
+    active_pattern_compression::Bool
+    active_free::BitVector
+    active_generation::Int
+    zigzag_sign_aware::Bool
+    signed_coordinate_bounds::Vector{Float64}
+    active_rebuilds::Int
+    active_rebuild_seconds::Float64
+    active_group_count_sum::Int
+    active_group_count_min::Int
+    active_group_count_max::Int
+    direct_person_node_hcv::Bool
+    node_box_first_order::Bool
+end
+
+# Compatibility constructor for Julia-only tests and small pilots that build
+# the pre-nodewise context positionally.
+function OMRFResidualContext(X::Matrix{Int}, X_float::Matrix{Float64},
+        seen::Vector{Int}, threshold_indices::Vector{Int},
+        interaction_indices::Vector{Int}, global_scale_index::Int,
+        node_scale_indices::Vector{Int}, threshold_starts::Vector{Int},
+        incident_edges::Vector{Vector{Int}},
+        incident_neighbours::Vector{Vector{Int}},
+        anchor_probabilities::Matrix{Float64},
+        anchor_expected_scores::Matrix{Float64},
+        expected_scores_workspace::Matrix{Float64},
+        interaction_matrix::Matrix{Float64}, linear_fields::Matrix{Float64},
+        score_crossproducts::Matrix{Float64},
+        observed_threshold_counts::Vector{Float64},
+        observed_interaction_sums::Vector{Float64},
+        probability_buffer::Vector{Float64}, hcv_buffer::Vector{Float64},
+        likelihood_hessian::Union{Nothing,Matrix{Float64}}, use_hcv::Bool,
+        hcv_active::Bool, hcv_damping::Float64, displacement::Vector{Float64},
+        hcv_product::Vector{Float64}, factorization::Symbol,
+        touched_positions::Vector{Int}, touched_mask::BitVector,
+        counts::StanSubsamplingCallCounts, active_pattern_compression::Bool,
+        active_free::BitVector, active_generation::Int, active_rebuilds::Int,
+        active_rebuild_seconds::Float64, active_group_count_sum::Int,
+        active_group_count_min::Int, active_group_count_max::Int)
+    d = length(displacement)
+    P = length(seen)
+    context = OMRFResidualContext(X, X_float, seen, threshold_indices,
+        interaction_indices, global_scale_index, node_scale_indices,
+        threshold_starts, incident_edges, incident_neighbours,
+        anchor_probabilities, anchor_expected_scores, expected_scores_workspace,
+        interaction_matrix, linear_fields, score_crossproducts,
+        observed_threshold_counts, observed_interaction_sums, probability_buffer,
+        hcv_buffer, likelihood_hessian, use_hcv, hcv_active, hcv_damping,
+        displacement, hcv_product, false, nothing, zeros(d, P), zeros(d, P),
+        zeros(P), Vector{Vector{Int}}(), factorization, touched_positions,
+        touched_mask, counts, active_pattern_compression, active_free,
+        active_generation, false, zeros(d), active_rebuilds,
+        active_rebuild_seconds, active_group_count_sum, active_group_count_min,
+        active_group_count_max, false, false)
+    context.node_supports = _omrf_node_supports(context)
+    return context
 end
 
 struct OMRFIndependentAnalyticPrior
@@ -359,6 +508,19 @@ negative log posterior.
 mutable struct OMRFFullGradientProvider <: Function
     context::OMRFResidualContext
     prior::OMRFAnalyticPrior
+    xlo::Vector{Float64}
+    xhi::Vector{Float64}
+    vlo::Vector{Float64}
+    vhi::Vector{Float64}
+    glo::Vector{Float64}
+    ghi::Vector{Float64}
+end
+
+OMRFFullGradientProvider(context::OMRFResidualContext,
+        prior::OMRFAnalyticPrior) = begin
+    d = length(context.displacement)
+    OMRFFullGradientProvider(context, prior, zeros(d), zeros(d), zeros(d),
+        zeros(d), zeros(d), zeros(d))
 end
 
 function Base.copy(provider::OMRFFullGradientProvider)
@@ -455,6 +617,205 @@ function (provider::OMRFFullGradientProvider)(out, x)
     return out
 end
 
+@inline function _omrf_softmax_probability_interval(logit_lo, logit_hi,
+        category::Int, q::Int)
+    target_lo = category == 0 ? 0.0 : logit_lo[category]
+    target_hi = category == 0 ? 0.0 : logit_hi[category]
+    lower_den = 1.0
+    upper_den = 1.0
+    for other in 0:q
+        other == category && continue
+        other_lo = other == 0 ? 0.0 : logit_lo[other]
+        other_hi = other == 0 ? 0.0 : logit_hi[other]
+        lo_term = exp(other_lo - target_hi)
+        hi_term = exp(other_hi - target_lo)
+        isfinite(lo_term) && isfinite(hi_term) || throw(OverflowError(
+            "OMRF softmax interval overflow; subdivide the cell"))
+        lower_den = _omrf_up(lower_den + hi_term)
+        upper_den = _omrf_down(upper_den + lo_term)
+    end
+    return _omrf_down(inv(lower_den)), _omrf_up(inv(upper_den))
+end
+
+function _omrf_full_likelihood_intervals!(glo, ghi,
+        context::OMRFResidualContext, xlo, xhi)
+    N, P = size(context.X)
+    logit_lo, logit_hi = context.probability_buffer, context.hcv_buffer
+    @inbounds for node in 1:P
+        q = context.seen[node] - 1
+        start = context.threshold_starts[node]
+        for n in 1:N
+            field_lo = 0.0; field_hi = 0.0
+            for k in eachindex(context.incident_edges[node])
+                edge = context.incident_edges[node][k]
+                neighbour = context.incident_neighbours[node][k]
+                weight = context.X[n, neighbour]
+                index = context.interaction_indices[edge]
+                field_lo = _omrf_down(field_lo + weight * xlo[index])
+                field_hi = _omrf_up(field_hi + weight * xhi[index])
+            end
+            for u in 1:q
+                ti = context.threshold_indices[start + u - 1]
+                logit_lo[u] = _omrf_down(xlo[ti] + u * field_lo)
+                logit_hi[u] = _omrf_up(xhi[ti] + u * field_hi)
+            end
+            expected_lo = 0.0; expected_hi = 0.0
+            for u in 1:q
+                pl, ph = _omrf_softmax_probability_interval(
+                    logit_lo, logit_hi, u, q)
+                ti = context.threshold_indices[start + u - 1]
+                glo[ti] = _omrf_down(glo[ti] + pl)
+                ghi[ti] = _omrf_up(ghi[ti] + ph)
+                expected_lo = _omrf_down(expected_lo + u * pl)
+                expected_hi = _omrf_up(expected_hi + u * ph)
+            end
+            for k in eachindex(context.incident_edges[node])
+                edge = context.incident_edges[node][k]
+                neighbour = context.incident_neighbours[node][k]
+                weight = context.X[n, neighbour]
+                index = context.interaction_indices[edge]
+                glo[index] = _omrf_down(glo[index] + weight * expected_lo)
+                ghi[index] = _omrf_up(ghi[index] + weight * expected_hi)
+            end
+        end
+        for u in 1:q
+            ti = context.threshold_indices[start + u - 1]
+            constant = context.observed_threshold_counts[start + u - 1]
+            glo[ti] = _omrf_down(glo[ti] - constant)
+            ghi[ti] = _omrf_up(ghi[ti] - constant)
+        end
+    end
+    @inbounds for (edge, index) in pairs(context.interaction_indices)
+        constant = context.observed_interaction_sums[edge]
+        glo[index] = _omrf_down(glo[index] - constant)
+        ghi[index] = _omrf_up(ghi[index] - constant)
+    end
+    context.counts.event_bound_observation_visits += N * P
+    return nothing
+end
+
+function _omrf_full_deterministic_cell_bound_general(provider::OMRFFullGradientProvider,
+        active, state, flow, left::Real, right::Real)
+    _omrf_fill_path_intervals!(provider.xlo, provider.xhi,
+        provider.vlo, provider.vhi, state, flow, Float64(left), Float64(right))
+    _omrf_prior_intervals!(provider.glo, provider.ghi, provider.prior,
+        provider.xlo, provider.xhi, active)
+    _omrf_full_likelihood_intervals!(provider.glo, provider.ghi,
+        provider.context, provider.xlo, provider.xhi)
+    return _omrf_interval_rate_bound(nothing, nothing,
+        provider.glo, provider.ghi, provider.xlo, provider.xhi,
+        provider.vlo, provider.vhi, state, flow)
+end
+
+@inline function _omrf_signed_interval_upper(glo, ghi, vlo, vhi)
+    upper = 0.0
+    scale = 0.0
+    @inbounds for i in eachindex(glo, ghi, vlo, vhi)
+        _, hi = _omrf_imul(vlo[i], vhi[i], glo[i], ghi[i])
+        upper += hi
+        scale += abs(hi)
+    end
+    return upper, scale
+end
+
+"""
+Certified full-gradient deterministic roof for a linear OMRF BPS cell.
+
+Write the negative log pseudo-likelihood as `L`.  Every conditional
+log-sum-exp is convex and the observed sufficient-statistic numerator is
+linear, hence along `x(t)=x+t*v`,
+
+    d/dt dot(v, grad(L)(x(t))) = dot(v, Hessian(L)(x(t))*v) >= 0.
+
+The signed likelihood rate is therefore maximized at the right endpoint.  We
+evaluate that complete endpoint likelihood gradient (including the exact
+numerator) once and add a separate interval upper bound for the prior rate.
+The final `eps`-scale padding covers ordinary Float64 summation/evaluation
+roundoff; it is scale-aware and is not a substitute for either mathematical
+bound.  Nonlinear flows and coordinatewise Zig-Zag rates continue to use the
+general coordinate interval construction.
+"""
+function _omrf_bps_full_deterministic_cell_bound(
+        provider::OMRFFullGradientProvider, active, state, flow,
+        left::Real, right::Real)
+    actual = _omrf_actual_flow(flow)
+    actual isa BouncyParticle || throw(ArgumentError(
+        "convex endpoint OMRF certificate is restricted to linear BPS"))
+
+    _omrf_fill_path_intervals!(provider.xlo, provider.xhi,
+        provider.vlo, provider.vhi, state, flow, Float64(left), Float64(right))
+    _omrf_prior_intervals!(provider.glo, provider.ghi, provider.prior,
+        provider.xlo, provider.xhi, active)
+    prior_upper, prior_scale = _omrf_signed_interval_upper(
+        provider.glo, provider.ghi, provider.vlo, provider.vhi)
+
+    # Reuse the provider-owned interval buffers after the prior upper bound has
+    # been reduced.  This keeps the prewarmed cell-construction path allocation
+    # free without adding another d-vector to every provider.
+    endpoint = provider.xlo
+    likelihood_gradient = provider.glo
+    fill!(likelihood_gradient, 0.0)
+    t = Float64(right)
+    likelihood_rate = 0.0
+    likelihood_scale = 0.0
+    @inbounds for i in eachindex(endpoint)
+        endpoint[i] = _omrf_is_free(state, i) ?
+            muladd(t, state.ξ.θ[i], state.ξ.x[i]) : state.ξ.x[i]
+    end
+    _omrf_add_likelihood_gradient!(likelihood_gradient, provider.context,
+        endpoint)
+    @inbounds for i in eachindex(likelihood_gradient)
+        term = _omrf_is_free(state, i) ?
+            state.ξ.θ[i] * likelihood_gradient[i] : 0.0
+        likelihood_rate += term
+        likelihood_scale += abs(term)
+    end
+    provider.context.counts.event_bound_observation_visits +=
+        size(provider.context.X, 1) * size(provider.context.X, 2)
+
+    signed_upper = likelihood_rate + prior_upper
+    numerical_scale = max(1.0, likelihood_scale + prior_scale,
+        abs(signed_upper))
+    result = max(0.0, signed_upper + 64eps(Float64) * numerical_scale)
+    isfinite(result) || throw(OverflowError(
+        "OMRF convex-endpoint BPS rate is not finite; subdivide or reject the state"))
+    return nextfloat(result)
+end
+
+function _omrf_full_deterministic_cell_bound(provider::OMRFFullGradientProvider,
+        active, state, flow, left::Real, right::Real)
+    if _omrf_actual_flow(flow) isa BouncyParticle
+        return _omrf_bps_full_deterministic_cell_bound(
+            provider, active, state, flow, left, right)
+    end
+    return _omrf_full_deterministic_cell_bound_general(
+        provider, active, state, flow, left, right)
+end
+
+function PDMPSamplers.deterministic_rate_cell_bound(
+        provider::OMRFFullGradientProvider,
+        state::PDMPSamplers.AbstractPDMPState,
+        flow::PDMPSamplers.ContinuousDynamics, left::Real, right::Real)
+    return _omrf_full_deterministic_cell_bound(
+        provider, nothing, state, flow, left, right)
+end
+PDMPSamplers.has_direct_deterministic_rate_cell_bound(
+    ::OMRFFullGradientProvider) = true
+
+function PDMPSamplers.deterministic_rate_cell_bound(
+        target::PDMPSamplers.DependentSlabTarget{PG,PH,S,O},
+        state::PDMPSamplers.AbstractPDMPState,
+        flow::PDMPSamplers.ContinuousDynamics, left::Real, right::Real
+        ) where {PG<:FullGradient{<:OMRFFullGradientProvider},PH,
+                 S<:LogLinearGaussianScaleSlab,O}
+    return _omrf_full_deterministic_cell_bound(
+        target.posterior_grad!.f, target.free, state, flow, left, right)
+end
+PDMPSamplers.has_direct_deterministic_rate_cell_bound(
+    ::PDMPSamplers.DependentSlabTarget{PG,PH,S,O}
+    ) where {PG<:FullGradient{<:OMRFFullGradientProvider},PH,
+             S<:LogLinearGaussianScaleSlab,O} = true
+
 """Refresh an OMRF anchor cache and its exact full gradient in one pass."""
 function _cache_omrf_anchor_and_full_gradient!(context::OMRFResidualContext,
         full, prior::OMRFAnalyticPrior, anchor)
@@ -526,13 +887,18 @@ function _omrf_prior_hvp!(out, prior::OMRFNodeScaleAnalyticPrior, x, direction)
             node_scales[left] * node_scales[right]
         inv_scale2 = inv(scale2)
         ratio = interaction^2 * inv_scale2
-        scale_direction = global_direction +
+        # The edge variance is proportional to
+        # `global_scale^2 * node_scale[left] * node_scale[right]`.  Its
+        # log-variance directional derivative therefore has coefficient two
+        # only for the global log scale; the incident node log scales enter
+        # once each.
+        log_variance_direction = 2 * global_direction +
             direction[prior.node_scale_indices[left]] +
             direction[prior.node_scale_indices[right]]
         out[interaction_index] = inv_scale2 * direction[interaction_index] -
-            2 * interaction * inv_scale2 * scale_direction
+            interaction * inv_scale2 * log_variance_direction
         dc = -2 * interaction * inv_scale2 * direction[interaction_index] +
-            2 * ratio * scale_direction
+            ratio * log_variance_direction
         out[global_index] += dc
         out[prior.node_scale_indices[left]] += 0.5 * dc
         out[prior.node_scale_indices[right]] += 0.5 * dc
@@ -645,6 +1011,231 @@ function _omrf_deterministic_gradient!(out,
     return out
 end
 
+# Direct interval certificate for the position-constant first-order OMRF
+# control variate.  Every primitive is rounded outwards by one representable
+# Float64 value.  This is deliberately restricted to the ordinary CV: an HCV
+# has an additional position-dependent deterministic likelihood term.
+@inline _omrf_down(x::Float64) = isfinite(x) ? prevfloat(x) : x
+@inline _omrf_up(x::Float64) = isfinite(x) ? nextfloat(x) : x
+@inline _omrf_iadd(al, ah, bl, bh) =
+    (_omrf_down(al + bl), _omrf_up(ah + bh))
+@inline _omrf_iscale(al, ah, c) = c >= 0 ?
+    (_omrf_down(c * al), _omrf_up(c * ah)) :
+    (_omrf_down(c * ah), _omrf_up(c * al))
+@inline function _omrf_imul(al, ah, bl, bh)
+    p1, p2, p3, p4 = al * bl, al * bh, ah * bl, ah * bh
+    return _omrf_down(min(p1, p2, p3, p4)),
+        _omrf_up(max(p1, p2, p3, p4))
+end
+@inline function _omrf_isquare(al, ah)
+    lo = al <= 0 <= ah ? 0.0 : min(al * al, ah * ah)
+    hi = max(al * al, ah * ah)
+    return _omrf_down(lo), _omrf_up(hi)
+end
+@inline function _omrf_iexp(al, ah)
+    lo, hi = exp(al), exp(ah)
+    isfinite(lo) && isfinite(hi) || throw(OverflowError(
+        "OMRF deterministic interval exponential overflow; subdivide the cell"))
+    return _omrf_down(lo), _omrf_up(hi)
+end
+
+@inline function _omrf_harmonic_range(offset::Float64, cosine::Float64,
+        sine::Float64, left::Float64, right::Float64)
+    left <= right || throw(ArgumentError("cell endpoints are reversed"))
+    function endpoint(t)
+        cl, ch = _omrf_down(cos(t)), _omrf_up(cos(t))
+        sl, sh = _omrf_down(sin(t)), _omrf_up(sin(t))
+        al, ah = _omrf_iscale(cl, ch, cosine)
+        bl, bh = _omrf_iscale(sl, sh, sine)
+        yl, yh = _omrf_iadd(al, ah, bl, bh)
+        return _omrf_iadd(yl, yh, offset, offset)
+    end
+    ll, lh = endpoint(left); rl, rh = endpoint(right)
+    lo = min(ll, rl); hi = max(lh, rh)
+    if !iszero(cosine) || !iszero(sine)
+        phase = atan(sine, cosine)
+        # Search one critical point beyond either rounded quotient and admit a
+        # small ULP neighbourhood at the cell boundary.  At an admitted
+        # critical point use offset +/- hypot directly; evaluating sin/cos at
+        # the rounded critical time could otherwise underestimate an extremum.
+        first = floor(Int, (left - phase) / π) - 1
+        last = ceil(Int, (right - phase) / π) + 1
+        radius = hypot(cosine, sine)
+        tolerance = 16eps(max(abs(left), abs(right), 1.0))
+        for k in first:last
+            critical = phase + k * π
+            if left - tolerance <= critical <= right + tolerance
+                y = iseven(k) ? offset + radius : offset - radius
+                lo = min(lo, _omrf_down(y)); hi = max(hi, _omrf_up(y))
+            end
+        end
+    end
+    return _omrf_down(lo), _omrf_up(hi)
+end
+
+@inline _omrf_actual_flow(flow) = flow isa PDMPSamplers.PreconditionedDynamics ?
+    flow.dynamics : flow
+@inline _omrf_is_free(state, i) = !hasproperty(state, :free) || state.free[i]
+
+function _omrf_fill_path_intervals!(xlo, xhi, vlo, vhi, state, flow,
+        left::Float64, right::Float64)
+    actual = _omrf_actual_flow(flow)
+    @inbounds for i in eachindex(xlo)
+        if !_omrf_is_free(state, i)
+            xlo[i] = _omrf_down(state.ξ.x[i]); xhi[i] = _omrf_up(state.ξ.x[i])
+            vlo[i] = -0.0; vhi[i] = 0.0
+        elseif actual isa PDMPSamplers.AnyBoomerang
+            y = state.ξ.x[i] - actual.μ[i]
+            xlo[i], xhi[i] = _omrf_harmonic_range(
+                actual.μ[i], y, state.ξ.θ[i], left, right)
+            vlo[i], vhi[i] = _omrf_harmonic_range(
+                0.0, state.ξ.θ[i], -y, left, right)
+        else
+            ll, lh = _omrf_iscale(state.ξ.θ[i], state.ξ.θ[i], left)
+            rl, rh = _omrf_iscale(state.ξ.θ[i], state.ξ.θ[i], right)
+            ll, lh = _omrf_iadd(ll, lh, state.ξ.x[i], state.ξ.x[i])
+            rl, rh = _omrf_iadd(rl, rh, state.ξ.x[i], state.ξ.x[i])
+            xlo[i] = min(ll, rl); xhi[i] = max(lh, rh)
+            vlo[i] = _omrf_down(state.ξ.θ[i]); vhi[i] = _omrf_up(state.ξ.θ[i])
+        end
+    end
+    return nothing
+end
+
+function _omrf_prior_intervals!(glo, ghi, prior::OMRFIndependentAnalyticPrior,
+        xlo, xhi, active=nothing)
+    fill!(glo, 0.0); fill!(ghi, 0.0)
+    α, β = prior.threshold_alpha, prior.threshold_beta
+    @inbounds for i in prior.threshold_indices
+        gl = (α + β) * _omrf_logistic(xlo[i]) - α
+        gh = (α + β) * _omrf_logistic(xhi[i]) - α
+        glo[i] = _omrf_down(gl); ghi[i] = _omrf_up(gh)
+    end
+    s = prior.interaction_scale
+    s2 = s * s
+    @inbounds for (edge, i) in pairs(prior.interaction_indices)
+        active !== nothing && !active[edge] && continue
+        if prior.interaction_type === :gaussian
+            glo[i] = _omrf_down(xlo[i] / s2)
+            ghi[i] = _omrf_up(xhi[i] / s2)
+        else
+            f(x) = 2x / (s2 + x * x)
+            lo = min(f(xlo[i]), f(xhi[i])); hi = max(f(xlo[i]), f(xhi[i]))
+            xlo[i] <= -s <= xhi[i] && (lo = min(lo, -inv(s)))
+            xlo[i] <=  s <= xhi[i] && (hi = max(hi,  inv(s)))
+            glo[i] = _omrf_down(lo); ghi[i] = _omrf_up(hi)
+        end
+    end
+    return nothing
+end
+
+function _omrf_prior_intervals!(glo, ghi, prior::OMRFNodeScaleAnalyticPrior,
+        xlo, xhi, active)
+    fill!(glo, 0.0); fill!(ghi, 0.0)
+    α, β = prior.threshold_alpha, prior.threshold_beta
+    @inbounds for i in prior.threshold_indices
+        glo[i] = _omrf_down((α + β) * _omrf_logistic(xlo[i]) - α)
+        ghi[i] = _omrf_up((α + β) * _omrf_logistic(xhi[i]) - α)
+    end
+    gi = prior.global_scale_index
+    hglo, hghi = _omrf_iexp(2xlo[gi] - 2log(prior.global_scale_sd),
+                             2xhi[gi] - 2log(prior.global_scale_sd))
+    glo[gi], ghi[gi] = _omrf_down(hglo - 1), _omrf_up(hghi - 1)
+    @inbounds for (node, ni) in pairs(prior.node_scale_indices)
+        hlo, hhi = _omrf_iexp(2xlo[ni] - 2log(prior.node_scale_sd),
+                               2xhi[ni] - 2log(prior.node_scale_sd))
+        glo[ni], ghi[ni] = _omrf_down(hlo - 1), _omrf_up(hhi - 1)
+    end
+    edge = 1
+    @inbounds for u in 1:(length(prior.node_scale_indices) - 1),
+            v in (u + 1):length(prior.node_scale_indices)
+        bi = prior.interaction_indices[edge]
+        if active === nothing || active[bi]
+            eta_lo = log(prior.interaction_scale) + xlo[gi] +
+                0.5xlo[prior.node_scale_indices[u]] +
+                0.5xlo[prior.node_scale_indices[v]]
+            eta_hi = log(prior.interaction_scale) + xhi[gi] +
+                0.5xhi[prior.node_scale_indices[u]] +
+                0.5xhi[prior.node_scale_indices[v]]
+            wlo, whi = _omrf_iexp(-2eta_hi, -2eta_lo)
+            glo[bi], ghi[bi] = _omrf_imul(xlo[bi], xhi[bi], wlo, whi)
+            b2lo, b2hi = _omrf_isquare(xlo[bi], xhi[bi])
+            rlo, rhi = _omrf_imul(b2lo, b2hi, wlo, whi)
+            elo, ehi = _omrf_down(1 - rhi), _omrf_up(1 - rlo)
+            glo[gi], ghi[gi] = _omrf_iadd(glo[gi], ghi[gi], elo, ehi)
+            for node in (u, v)
+                ni = prior.node_scale_indices[node]
+                sl, sh = _omrf_iscale(elo, ehi, 0.5)
+                glo[ni], ghi[ni] = _omrf_iadd(glo[ni], ghi[ni], sl, sh)
+            end
+        end
+        edge += 1
+    end
+    return nothing
+end
+
+function _omrf_interval_rate_bound(full_anchor, prior_anchor,
+        glo, ghi, xlo, xhi, vlo, vhi,
+        state, flow)
+    actual = _omrf_actual_flow(flow)
+    zigzag = actual isa ZigZag
+    signed_lo = 0.0; signed_hi = 0.0; total = 0.0
+    indices = full_anchor === nothing ? eachindex(glo) : eachindex(full_anchor)
+    @inbounds for i in indices
+        c = full_anchor === nothing ? 0.0 : full_anchor[i] - prior_anchor[i]
+        gl, gh = _omrf_iadd(glo[i], ghi[i], c, c)
+        if actual isa PDMPSamplers.AnyBoomerang
+            gamma = actual.Γ isa Diagonal ? actual.Γ.diag[i] : throw(ArgumentError(
+                "direct OMRF deterministic certificate requires diagonal Boomerang precision"))
+            rl, rh = _omrf_iscale(xlo[i] - actual.μ[i],
+                                   xhi[i] - actual.μ[i], gamma)
+            gl, gh = _omrf_iadd(gl, gh, -rh, -rl)
+        end
+        pl, ph = _omrf_imul(vlo[i], vhi[i], gl, gh)
+        if zigzag
+            total = _omrf_up(total + max(0.0, ph))
+        else
+            signed_lo = _omrf_down(signed_lo + pl)
+            signed_hi = _omrf_up(signed_hi + ph)
+        end
+    end
+    result = zigzag ? total : max(0.0, signed_hi)
+    isfinite(result) || throw(OverflowError(
+        "OMRF deterministic cell rate is not finite; subdivide or reject the state"))
+    return _omrf_up(result)
+end
+
+function _omrf_direct_deterministic_cell_bound(oracle, active, state, flow,
+        left::Real, right::Real)
+    context = oracle.residual_context
+    context.use_hcv && throw(ArgumentError(
+        "direct first-order deterministic certificate does not support HCV routes"))
+    xlo, xhi = oracle.interval_xlo, oracle.interval_xhi
+    vlo, vhi = oracle.interval_vlo, oracle.interval_vhi
+    glo, ghi = oracle.interval_glo, oracle.interval_ghi
+    _omrf_fill_path_intervals!(xlo, xhi, vlo, vhi, state, flow,
+        Float64(left), Float64(right))
+    prior = something(oracle.analytic_prior)
+    _omrf_prior_intervals!(glo, ghi, prior, xlo, xhi, active)
+    return _omrf_interval_rate_bound(oracle.full_anchor, oracle.prior_anchor,
+        glo, ghi, xlo, xhi,
+        vlo, vhi, state, flow)
+end
+
+@inline function _omrf_node_hcv_alpha!(context::OMRFResidualContext,
+        x, node::Int)
+    support = context.node_supports[node]
+    displacement2 = 0.0
+    @inbounds for index in support
+        delta = context.displacement[index]
+        displacement2 += delta * delta
+    end
+    α = isinf(context.hcv_damping) ? 1.0 :
+        context.hcv_damping / (context.hcv_damping + displacement2)
+    context.node_hcv_alphas[node] = α
+    return α
+end
+
 function _omrf_residual_context(envelope_spec, unc_names, anchor,
         counts::StanSubsamplingCallCounts)
     X = Matrix{Int}(_rget(envelope_spec, :X))
@@ -715,11 +1306,21 @@ function _omrf_residual_context(envelope_spec, unc_names, anchor,
     hcv_damping = use_hcv ? Float64(_rget(envelope_spec, :hcv_damping)) : 1.0
     !isnan(hcv_damping) && hcv_damping > 0 || throw(ArgumentError(
         "OMRF HCV damping must be positive"))
+    hcv_scope = use_hcv && _haskey(envelope_spec, :hcv_scope) ?
+        Symbol(String(_rget(envelope_spec, :hcv_scope))) : :global
+    hcv_scope in (:global, :node) || throw(ArgumentError(
+        "unknown OMRF HCV scope: $hcv_scope"))
+    hcv_nodewise = use_hcv && hcv_scope === :node
     d = length(anchor)
     factorization = _haskey(envelope_spec, :factorization) ?
         Symbol(String(_rget(envelope_spec, :factorization))) : :person
     factorization in (:person, :person_node) || throw(ArgumentError(
         "unknown OMRF factorization: $factorization"))
+    active_pattern_compression = _haskey(
+        envelope_spec, :active_set_compression) &&
+        Bool(_rget(envelope_spec, :active_set_compression))
+    zigzag_sign_aware = _haskey(envelope_spec, :zigzag_sign_aware) &&
+        Bool(_rget(envelope_spec, :zigzag_sign_aware))
     X_float = Matrix{Float64}(X)
     observed_threshold_counts = zeros(no_thresholds)
     @inbounds for node in 1:P, n in 1:N
@@ -746,17 +1347,93 @@ function _omrf_residual_context(envelope_spec, unc_names, anchor,
         observed_interaction_sums, zeros(maximum(seen) - 1),
         zeros(maximum(seen) - 1), nothing, use_hcv,
         use_hcv && !hcv_after_warmup, hcv_damping,
-        zeros(d), zeros(d), factorization, Int[], falses(d), counts)
+        zeros(d), zeros(d), hcv_nodewise, nothing,
+        zeros(d, P), zeros(d, P), zeros(P), Vector{Vector{Int}}(),
+        factorization, Int[], falses(d), counts,
+        active_pattern_compression, trues(d), 0, zigzag_sign_aware,
+        zeros(d), 0, 0.0, 0, 0, 0,
+        _haskey(envelope_spec, :bound_type) &&
+            String(_rget(envelope_spec, :bound_type)) in
+                ("direct_person_node_hcv", "direct_person_node_cv"),
+        _haskey(envelope_spec, :bound_type) &&
+            String(_rget(envelope_spec, :bound_type)) in
+                ("node_box_first_order", "cell_marked_node_box_first_order"))
+    context.node_supports = _omrf_node_supports(context)
     _cache_omrf_anchor!(context, anchor)
-    use_hcv && (context.likelihood_hessian =
-        _omrf_likelihood_hessian(context, anchor))
+    if use_hcv
+        if hcv_nodewise
+            context.likelihood_hessian, context.node_likelihood_hessians =
+                _omrf_likelihood_hessians(context, anchor)
+        else
+            context.likelihood_hessian =
+                _omrf_likelihood_hessian(context, anchor)
+        end
+    end
     return context
 end
 
 function _omrf_likelihood_hessian(context::OMRFResidualContext, anchor)
+    hessian = zeros(length(anchor), length(anchor))
+    _omrf_likelihood_hessian!(hessian, context)
+    return hessian
+end
+
+"""Fill the aggregate anchor likelihood Hessian from cached probabilities."""
+function _omrf_likelihood_hessian!(hessian::Matrix{Float64},
+        context::OMRFResidualContext)
+    fill!(hessian, 0.0)
+    N, P = size(context.X)
+    @inbounds for n in 1:N, node in 1:P
+        q = context.seen[node] - 1
+        iszero(q) && continue
+        start = context.threshold_starts[node]
+        expected = context.anchor_expected_scores[node, n]
+        expected2 = 0.0
+        for u in 1:q
+            probability = context.anchor_probabilities[start + u - 1, n]
+            expected2 += u * u * probability
+        end
+        variance = expected2 - expected * expected
+        for u in 1:q
+            row = context.threshold_indices[start + u - 1]
+            probability_u = context.anchor_probabilities[start + u - 1, n]
+            for v in 1:q
+                col = context.threshold_indices[start + v - 1]
+                probability_v =
+                    context.anchor_probabilities[start + v - 1, n]
+                hessian[row, col] += probability_u *
+                    ((u == v ? 1.0 : 0.0) - probability_v)
+            end
+            covariance_score = probability_u * (u - expected)
+            for k in eachindex(context.incident_edges[node])
+                edge_index = context.interaction_indices[
+                    context.incident_edges[node][k]]
+                value = covariance_score * context.X[n,
+                    context.incident_neighbours[node][k]]
+                hessian[row, edge_index] += value
+                hessian[edge_index, row] += value
+            end
+        end
+        for k in eachindex(context.incident_edges[node])
+            row = context.interaction_indices[context.incident_edges[node][k]]
+            xk = context.X[n, context.incident_neighbours[node][k]]
+            for l in eachindex(context.incident_edges[node])
+                col = context.interaction_indices[
+                    context.incident_edges[node][l]]
+                xl = context.X[n, context.incident_neighbours[node][l]]
+                hessian[row, col] += variance * xk * xl
+            end
+        end
+    end
+    context.counts.native_full_data_scans += 1
+    return hessian
+end
+
+function _omrf_likelihood_hessians(context::OMRFResidualContext, anchor)
     d = length(anchor)
     hessian = zeros(d, d)
     N, P = size(context.X)
+    node_hessians = zeros(d, d, P)
     max_support = maximum(context.seen .- 1) + max(P - 1, 0)
     design = zeros(maximum(context.seen) - 1, max_support)
     support = zeros(Int, max_support)
@@ -796,10 +1473,11 @@ function _omrf_likelihood_hessian(context::OMRFResidualContext, anchor)
                     design[u, row] * design[u, col]
             end
             hessian[support[row], support[col]] += value
+            node_hessians[support[row], support[col], node] += value
         end
     end
     context.counts.native_full_data_scans += 1
-    return hessian
+    return hessian, node_hessians
 end
 
 @inline function _omrf_node_probabilities!(context::OMRFResidualContext,
@@ -904,9 +1582,16 @@ function omrf_residual!(context::OMRFResidualContext, out, x, subset)
     empty!(context.touched_positions)
     N, P = size(context.X)
     α = if context.hcv_active
-        displacement2 = dot(context.displacement, context.displacement)
-        isinf(context.hcv_damping) ? 1.0 :
-            context.hcv_damping / (context.hcv_damping + displacement2)
+        if context.hcv_nodewise
+            @inbounds for node in eachindex(context.node_supports)
+                _omrf_node_hcv_alpha!(context, x, node)
+            end
+            0.0
+        else
+            displacement2 = dot(context.displacement, context.displacement)
+            isinf(context.hcv_damping) ? 1.0 :
+                context.hcv_damping / (context.hcv_damping + displacement2)
+        end
     else
         0.0
     end
@@ -915,7 +1600,9 @@ function omrf_residual!(context::OMRFResidualContext, out, x, subset)
             1 <= n <= N || throw(BoundsError(context.X, (n, :)))
             for node in 1:P
                 _record_omrf_touched_support!(context, node)
-                _omrf_node_residual!(context, out, x, n, node, α)
+                node_α = context.hcv_nodewise && context.hcv_active ?
+                    context.node_hcv_alphas[node] : α
+                _omrf_node_residual!(context, out, x, n, node, node_α)
             end
         end
         context.counts.analytic_persons += length(subset)
@@ -925,7 +1612,10 @@ function omrf_residual!(context::OMRFResidualContext, out, x, subset)
             1 <= factor <= N * P || throw(BoundsError(1:(N * P), factor))
             node0, n = divrem(factor - 1, N)
             _record_omrf_touched_support!(context, node0 + 1)
-            _omrf_node_residual!(context, out, x, n + 1, node0 + 1, α)
+            node = node0 + 1
+            node_α = context.hcv_nodewise && context.hcv_active ?
+                context.node_hcv_alphas[node] : α
+            _omrf_node_residual!(context, out, x, n + 1, node, node_α)
         end
         context.counts.analytic_factors += length(subset)
         context.counts.analytic_node_conditionals += length(subset)
@@ -1551,6 +2241,93 @@ mutable struct OMRFAnalyticSubsamplingOracle
     analytic_prior::Union{Nothing,OMRFAnalyticPrior}
     node_local_hcv::Union{Nothing,OMRFNodeLocalHCVBank}
     lazy_residual_subset_bound::Float64
+    exact_selected_refinement::Bool
+    cached_residual::Vector{Float64}
+    cached_residual_valid::Bool
+    active_free::BitVector
+    active_generation::Int
+    interval_xlo::Vector{Float64}
+    interval_xhi::Vector{Float64}
+    interval_vlo::Vector{Float64}
+    interval_vhi::Vector{Float64}
+    interval_glo::Vector{Float64}
+    interval_ghi::Vector{Float64}
+end
+
+# Opt-in research sidecar. It is disabled by default and records only scalar
+# proposal quantities, so ordinary sampling has one predictable branch and no
+# per-candidate allocation.
+const _OMRF_CANDIDATE_RECORD_LIMIT = Ref(0)
+const _OMRF_CANDIDATE_RECORDS =
+    IdDict{OMRFAnalyticSubsamplingOracle,Vector{NTuple{7,Float64}}}()
+const _OMRF_CANDIDATE_RECORD_SECONDS = Ref(0.0)
+const _OMRF_CANDIDATE_RECORD_CALLS = Ref(0)
+
+function set_omrf_candidate_record_limit!(limit::Integer)
+    limit >= 0 || throw(ArgumentError("candidate record limit must be nonnegative"))
+    _OMRF_CANDIDATE_RECORD_LIMIT[] = Int(limit)
+    empty!(_OMRF_CANDIDATE_RECORDS)
+    _OMRF_CANDIDATE_RECORD_SECONDS[] = 0.0
+    _OMRF_CANDIDATE_RECORD_CALLS[] = 0
+    return nothing
+end
+
+omrf_candidate_record_diagnostics() = (
+    seconds=_OMRF_CANDIDATE_RECORD_SECONDS[],
+    calls=_OMRF_CANDIDATE_RECORD_CALLS[])
+
+import Profile
+const _OMRF_PROFILE_REPORT = Ref("")
+function set_omrf_main_profile_enabled!(enabled::Bool)
+    if enabled
+        start_hook = () -> begin
+            Profile.clear()
+            Profile.init(n=10^7, delay=0.0005)
+            Profile.start_timer()
+        end
+        stop_hook = () -> begin
+            Profile.stop_timer()
+            io = IOBuffer()
+            Profile.print(io; format=:flat, sortedby=:count, mincount=2)
+            _OMRF_PROFILE_REPORT[] = String(take!(io))
+        end
+        PDMPSamplers.set_main_phase_profile_hooks!(start_hook, stop_hook)
+    else
+        PDMPSamplers.set_main_phase_profile_hooks!(nothing, nothing)
+    end
+    return nothing
+end
+omrf_main_profile_report() = _OMRF_PROFILE_REPORT[]
+
+function PDMPSamplers.record_subsampling_candidate!(
+        oracle::OMRFAnalyticSubsamplingOracle,
+        cell_roof, aggregate_bound, aggregate_passed, subset_probability,
+        selected_subset_bound, exact_selected_intensity, accepted)
+    limit = _OMRF_CANDIDATE_RECORD_LIMIT[]
+    iszero(limit) && return nothing
+    started = time_ns()
+    _OMRF_CANDIDATE_RECORD_CALLS[] += 1
+    rows = get!(() -> NTuple{7,Float64}[], _OMRF_CANDIDATE_RECORDS, oracle)
+    if length(rows) >= limit
+        _OMRF_CANDIDATE_RECORD_SECONDS[] += (time_ns() - started) * 1e-9
+        return nothing
+    end
+    push!(rows, (Float64(cell_roof), Float64(aggregate_bound),
+        Float64(aggregate_passed), Float64(subset_probability),
+        Float64(selected_subset_bound), Float64(exact_selected_intensity),
+        Float64(accepted)))
+    _OMRF_CANDIDATE_RECORD_SECONDS[] += (time_ns() - started) * 1e-9
+    return nothing
+end
+
+function _omrf_candidate_record_matrix(oracle::OMRFAnalyticSubsamplingOracle)
+    rows = get(_OMRF_CANDIDATE_RECORDS, oracle, NTuple{7,Float64}[])
+    isempty(rows) && return zeros(Float64, 0, 7)
+    matrix = Matrix{Float64}(undef, length(rows), 7)
+    @inbounds for i in eachindex(rows), j in 1:7
+        matrix[i, j] = rows[i][j]
+    end
+    return matrix
 end
 
 function OMRFAnalyticSubsamplingOracle(ctx::StanSubsamplingContext,
@@ -1559,9 +2336,12 @@ function OMRFAnalyticSubsamplingOracle(ctx::StanSubsamplingContext,
     residual_context = _omrf_residual_context(
         envelope_spec, unc_names, anchor, ctx.counts)
     analytic_prior = _omrf_analytic_prior(envelope_spec, residual_context)
+    exact_selected_refinement = get(
+        envelope_spec, "exact_selected_refinement", false)
     oracle = OMRFAnalyticSubsamplingOracle(ctx, copy(anchor), zeros(d), zeros(d),
         zeros(d), zeros(d), false, residual_context, analytic_prior, nothing,
-        NaN)
+        NaN, exact_selected_refinement, zeros(d), false, trues(d), 0,
+        zeros(d), zeros(d), zeros(d), zeros(d), zeros(d), zeros(d))
     _clear_gradient!(ctx, :full, oracle.full_anchor, anchor)
     if analytic_prior === nothing
         _clear_gradient!(ctx, :prior, oracle.prior_anchor, anchor)
@@ -1570,6 +2350,59 @@ function OMRFAnalyticSubsamplingOracle(ctx::StanSubsamplingContext,
     end
     return oracle
 end
+
+# Backward-compatible constructor for small Julia-only pilots and tests that
+# construct the oracle from already prepared contexts.  The experimental
+# exact selected-factor refinement is opt-in in that form.
+function OMRFAnalyticSubsamplingOracle(ctx::StanSubsamplingContext,
+        anchor::Vector{Float64}, full_anchor::Vector{Float64},
+        prior_anchor::Vector{Float64}, prior_x::Vector{Float64},
+        prior_x_position::Vector{Float64}, prior_x_valid::Bool,
+        residual_context::OMRFResidualContext,
+        analytic_prior::Union{Nothing,OMRFAnalyticPrior},
+        node_local_hcv::Union{Nothing,OMRFNodeLocalHCVBank},
+        lazy_residual_subset_bound::Float64)
+    return OMRFAnalyticSubsamplingOracle(ctx, anchor, full_anchor,
+        prior_anchor, prior_x, prior_x_position, prior_x_valid,
+        residual_context, analytic_prior, node_local_hcv,
+        lazy_residual_subset_bound, false, zeros(length(anchor)), false,
+        trues(length(anchor)), 0,
+        zeros(length(anchor)), zeros(length(anchor)), zeros(length(anchor)),
+        zeros(length(anchor)), zeros(length(anchor)), zeros(length(anchor)))
+end
+
+function PDMPSamplers.set_active_set!(
+        oracle::OMRFAnalyticSubsamplingOracle, free::BitVector)
+    length(free) == length(oracle.active_free) || throw(DimensionMismatch(
+        "active OMRF set has the wrong dimension"))
+    changed = false
+    @inbounds for index in eachindex(free, oracle.active_free)
+        changed |= free[index] != oracle.active_free[index]
+    end
+    changed || return nothing
+    copyto!(oracle.active_free, free)
+    oracle.active_generation += 1
+    context = oracle.residual_context
+    if context.active_pattern_compression || context.direct_person_node_hcv
+        copyto!(context.active_free, free)
+        context.active_generation = oracle.active_generation
+    end
+    return nothing
+end
+
+function PDMPSamplers.deterministic_rate_cell_bound(
+        oracle::OMRFAnalyticSubsamplingOracle,
+        state::PDMPSamplers.AbstractPDMPState,
+        flow::PDMPSamplers.ContinuousDynamics, left::Real, right::Real)
+    oracle.residual_context.use_hcv && return nothing
+    active = oracle.analytic_prior isa OMRFNodeScaleAnalyticPrior ?
+        oracle.active_free : nothing
+    return _omrf_direct_deterministic_cell_bound(
+        oracle, active, state, flow, left, right)
+end
+PDMPSamplers.has_direct_deterministic_rate_cell_bound(
+    oracle::OMRFAnalyticSubsamplingOracle) =
+    !oracle.residual_context.use_hcv
 
 function _prior_gradient_at_x!(oracle::OMRFAnalyticSubsamplingOracle, x)
     if !oracle.prior_x_valid || oracle.prior_x_position != x
@@ -1602,12 +2435,71 @@ function (oracle::OMRFAnalyticSubsamplingOracle)(out, x)
     context = oracle.residual_context
     if context.hcv_active
         @. context.displacement = x - oracle.anchor
-        displacement2 = dot(context.displacement, context.displacement)
+        if context.hcv_nodewise
+            node_hessians = something(context.node_likelihood_hessians)
+            @inbounds for node in axes(node_hessians, 3)
+                α = _omrf_node_hcv_alpha!(context, x, node)
+                support = context.node_supports[node]
+                for row in support
+                    product = 0.0
+                    for col in support
+                        product += node_hessians[row, col, node] *
+                            context.displacement[col]
+                    end
+                    context.node_hcv_product[row, node] = product
+                    out[row] += α * product
+                end
+            end
+        else
+            displacement2 = dot(context.displacement, context.displacement)
+            α = isinf(context.hcv_damping) ? 1.0 :
+                context.hcv_damping / (context.hcv_damping + displacement2)
+            mul!(context.hcv_product, something(context.likelihood_hessian),
+                context.displacement)
+            @. out += α * context.hcv_product
+        end
+    end
+    return out
+end
+
+function (oracle::OMRFAnalyticSubsamplingOracle)(out, x, direction)
+    context = oracle.residual_context
+    context.hcv_nodewise || throw(ArgumentError(
+        "OMRF deterministic HVP is only defined for node-local HCV"))
+    prior = oracle.analytic_prior
+    prior === nothing && throw(ArgumentError(
+        "node-local OMRF HCV requires an analytic prior HVP"))
+    _omrf_prior_hvp!(out, prior, x, direction)
+    @. context.displacement = x - oracle.anchor
+    node_hessians = something(context.node_likelihood_hessians)
+    @inbounds for node in axes(node_hessians, 3)
+        displacement2 = 0.0
+        dot_displacement_direction = 0.0
+        for index in context.node_supports[node]
+            displacement2 += context.displacement[index] *
+                context.displacement[index]
+            dot_displacement_direction +=
+                context.displacement[index] * direction[index]
+        end
+        denominator = context.hcv_damping + displacement2
         α = isinf(context.hcv_damping) ? 1.0 :
-            context.hcv_damping / (context.hcv_damping + displacement2)
-        mul!(context.hcv_product, something(context.likelihood_hessian),
-            context.displacement)
-        @. out += α * context.hcv_product
+            context.hcv_damping / denominator
+        dα = isinf(context.hcv_damping) ? 0.0 :
+            -2 * context.hcv_damping * dot_displacement_direction /
+            (denominator * denominator)
+        support = context.node_supports[node]
+        for row in support
+            product = 0.0
+            direction_product = 0.0
+            for col in support
+                hessian = node_hessians[row, col, node]
+                product += hessian * context.displacement[col]
+                direction_product += hessian * direction[col]
+            end
+            context.node_hcv_product[row, node] = product
+            context.node_hcv_direction_product[row, node] = direction_product
+            out[row] += α * direction_product + dα * product
+        end
     end
     return out
 end
@@ -1623,6 +2515,9 @@ function (oracle::OMRFAnalyticSubsamplingOracle)(out, x, subset, anchor)
         return out
     end
     context = oracle.residual_context
+    context.direct_person_node_hcv &&
+        (context.counts.direct_selected_factor_exact_evaluations +=
+            length(subset))
     context.hcv_active && (@. context.displacement = x - oracle.anchor)
     return omrf_residual!(oracle.residual_context, out, x, subset)
 end
@@ -1664,6 +2559,23 @@ function PDMPSamplers.record_subsampling_proposal!(
     if accepted
         counts.accepted_proposal_bound_sum += subset_bound
         counts.accepted_actual_rate_sum += actual
+        if counts.last_mark_residual
+            counts.residual_source_acceptances += 1
+        else
+            counts.deterministic_source_acceptances += 1
+        end
+    end
+    return nothing
+end
+
+function PDMPSamplers.record_subsampling_mark_source!(
+        oracle::OMRFAnalyticSubsamplingOracle, residual_source::Bool)
+    counts = oracle.residual_context.counts
+    counts.last_mark_residual = residual_source
+    if residual_source
+        counts.residual_source_proposals += 1
+    else
+        counts.deterministic_source_proposals += 1
     end
     return nothing
 end
@@ -1708,13 +2620,36 @@ mutable struct OMRFPatternLocalScales
     anchor::Vector{Float64}
     component_nodes::Vector{Int}
     component_covariates::Matrix{Int}
+    node_component_starts::Vector{Int}
+    node_component_ends::Vector{Int}
+    node_edge_starts::Vector{Int}
+    node_edge_ends::Vector{Int}
+    node_edge_indices::Vector{Int}
+    component_edge_offsets::Vector{Int}
+    component_edge_covariates::Vector{Int}
     context::OMRFResidualContext
+    active_compression::Bool
+    active_component_count::Int
+    active_generation::Int
+    active_all_free::BitVector
+    active_effective_full::Bool
+    active_groups::Union{Nothing,Matrix{Int}}
+    active_members::Union{Nothing,Vector{Vector{Int}}}
+    active_totals::Union{Nothing,Vector{Float64}}
+    active_hash_keys::Vector{UInt64}
+    active_hash_values::Vector{Int}
+    active_hash_stamps::Vector{Int}
+    active_hash_epoch::Int
+    active_representatives::Vector{Int}
     offsets::Vector{Float64}
     cosines::Vector{Float64}
     sines::Vector{Float64}
     coordinate_offsets::Vector{Float64}
     coordinate_cosines::Vector{Float64}
     coordinate_sines::Vector{Float64}
+    cell_left_offsets::Vector{Float64}
+    cell_right_offsets::Vector{Float64}
+    cell_velocities::Vector{Float64}
 end
 
 """
@@ -1819,6 +2754,57 @@ mutable struct OMRFNodeGroupedPersonHCVBoxScales
 end
 
 """
+Research-only first-order person-node certificate over deterministic
+node-specific covariate boxes. For each node/box, the callback bounds the
+range of every categorical logit displacement and directional velocity,
+including the zero reference category, and returns `range(a)*range(b)/4`.
+The four coordinate workspaces are owned by the envelope and recycled.
+"""
+mutable struct OMRFNodeBoxFirstOrderScales
+    anchor::Vector{Float64}
+    component_nodes::Vector{Int}
+    minima::Matrix{Float64}
+    maxima::Matrix{Float64}
+    context::OMRFResidualContext
+    displacement_lower::Vector{Float64}
+    displacement_upper::Vector{Float64}
+    velocity_lower::Vector{Float64}
+    velocity_upper::Vector{Float64}
+end
+
+"""
+Research-only component-first node-box clock for batch-one person-node
+Adaptive Boomerang or linear BPS subsampling. Closed-cell component roofs and their marked
+mass distribution are cached during grid construction. At a proposal the
+callback retrieves that cell without rebuilding the global point geometry;
+only the selected person-node factor is evaluated at the proposal time.
+"""
+mutable struct OMRFCellMarkedNodeBoxFirstOrderScales
+    base::OMRFNodeBoxFirstOrderScales
+    component_totals::Vector{Float64}
+    cell_lefts::Vector{Float64}
+    cell_rights::Vector{Float64}
+    cell_scales::Matrix{Float64}
+    cell_cumulative_masses::Matrix{Float64}
+    cell_total_masses::Vector{Float64}
+    n_cached_cells::Int
+    cached_time::Float64
+    active_cell::Int
+    point_x::Vector{Float64}
+    point_theta::Vector{Float64}
+    point_free::BitVector
+    point_is_sticky::Bool
+    point_mu::Vector{Float64}
+    point_harmonic::Bool
+    selected_factor_point_bound::Float64
+    component_marks::Int
+    factor_point_evaluations::Int
+    factor_point_seconds::Float64
+    cell_cache_hits::Int
+    cell_cache_misses::Int
+end
+
+"""
 Exact cell-cached node-aware whole-person HCV clock.
 
 Grid construction has already certified every node/support component over the
@@ -1916,7 +2902,780 @@ end
 struct OMRFNormLocalScales
     anchor::Vector{Float64}
     context::OMRFResidualContext
+    # Per-envelope scratch: the harmonic closed-cell callback must not create
+    # a threshold-coefficient vector for every node and every cell.
+    threshold_coefficients::Vector{NTuple{3,Float64}}
+    coordinate_displacements::Vector{Float64}
+    coordinate_velocities::Vector{Float64}
 end
+
+OMRFNormLocalScales(anchor::Vector{Float64}, context::OMRFResidualContext) =
+    OMRFNormLocalScales(anchor, context,
+        Vector{NTuple{3,Float64}}(undef, maximum(context.seen)),
+        zeros(length(anchor)), zeros(length(anchor)))
+
+"""
+Research-only compact certificate for the undamped person-node Hessian control
+variate. For one categorical conditional, with the reference logit included
+as zero, the third derivative of log-sum-exp in directions `(z, delta, delta)`
+is their mixed categorical third central moment. Hoeffding's covariance bound
+gives `abs(D^3 A[z,delta,delta]) <= R(z)R(delta)^2/4`; the integral Taylor
+remainder supplies another factor `1/2`. Hence the directional remainder is
+at most `R(z)R(delta)^2/8`.
+
+The four component rows multiply the static person weights `r^0,...,r^3`.
+Thus storage is `O(NP + P)` and point/cell callbacks never scan people.
+"""
+struct OMRFCompactHCVNormLocalScales
+    anchor::Vector{Float64}
+    context::OMRFResidualContext
+end
+
+@inline function _omrf_range_with_reference(values)
+    lower = 0.0
+    upper = 0.0
+    @inbounds for value in values
+        lower = min(lower, value)
+        upper = max(upper, value)
+    end
+    return upper - lower
+end
+
+"""Direct categorical directional Taylor remainder and its certified bound."""
+function _omrf_categorical_hcv_remainder(anchor_logits, delta, z)
+    q = length(anchor_logits)
+    length(delta) == q == length(z) || throw(DimensionMismatch(
+        "categorical HCV vectors must have equal lengths"))
+    maximum_logit = 0.0
+    displaced_maximum = 0.0
+    @inbounds for u in 1:q
+        maximum_logit = max(maximum_logit, anchor_logits[u])
+        displaced_maximum = max(displaced_maximum,
+            anchor_logits[u] + delta[u])
+    end
+    anchor_denominator = exp(-maximum_logit)
+    displaced_denominator = exp(-displaced_maximum)
+    anchor_mean_delta = 0.0
+    anchor_mean_z = 0.0
+    displaced_mean_z = 0.0
+    @inbounds for u in 1:q
+        anchor_weight = exp(anchor_logits[u] - maximum_logit)
+        displaced_weight = exp(
+            anchor_logits[u] + delta[u] - displaced_maximum)
+        anchor_denominator += anchor_weight
+        displaced_denominator += displaced_weight
+        anchor_mean_delta += anchor_weight * delta[u]
+        anchor_mean_z += anchor_weight * z[u]
+        displaced_mean_z += displaced_weight * z[u]
+    end
+    anchor_mean_delta /= anchor_denominator
+    anchor_mean_z /= anchor_denominator
+    displaced_mean_z /= displaced_denominator
+    # Include the reference category explicitly: its z and delta values are
+    # zero, but its centered-product contribution is generally nonzero.
+    covariance = exp(-maximum_logit) / anchor_denominator *
+        anchor_mean_z * anchor_mean_delta
+    @inbounds for u in 1:q
+        probability = exp(anchor_logits[u] - maximum_logit) /
+            anchor_denominator
+        covariance += probability *
+            (z[u] - anchor_mean_z) * (delta[u] - anchor_mean_delta)
+    end
+    remainder = displaced_mean_z - anchor_mean_z - covariance
+    bound = _omrf_range_with_reference(z) *
+        _omrf_range_with_reference(delta)^2 / 8
+    return remainder, bound
+end
+
+function _omrf_direct_categorical_cell_bound(
+        anchor_logits, delta_left, z, width::Real)
+    width >= 0 || throw(ArgumentError("cell width must be nonnegative"))
+    left, _ = _omrf_categorical_hcv_remainder(
+        anchor_logits, delta_left, z)
+    right_delta = similar(delta_left)
+    @inbounds for index in eachindex(right_delta, delta_left, z)
+        right_delta[index] = delta_left[index] + width * z[index]
+    end
+    right, _ = _omrf_categorical_hcv_remainder(
+        anchor_logits, right_delta, z)
+    range_z = _omrf_range_with_reference(z)
+    return max(abs(left), abs(right)) + range_z^3 * width^2 / 32
+end
+
+"""Exact first-order categorical CV directional residual."""
+function _omrf_categorical_cv_residual(anchor_logits, delta, z)
+    q = length(anchor_logits)
+    length(delta) == q == length(z) || throw(DimensionMismatch(
+        "categorical CV vectors must have equal lengths"))
+    anchor_maximum = 0.0
+    displaced_maximum = 0.0
+    @inbounds for u in 1:q
+        anchor_maximum = max(anchor_maximum, anchor_logits[u])
+        displaced_maximum = max(displaced_maximum,
+            anchor_logits[u] + delta[u])
+    end
+    anchor_denominator = exp(-anchor_maximum)
+    displaced_denominator = exp(-displaced_maximum)
+    anchor_mean_z = 0.0
+    displaced_mean_z = 0.0
+    @inbounds for u in 1:q
+        anchor_weight = exp(anchor_logits[u] - anchor_maximum)
+        displaced_weight = exp(
+            anchor_logits[u] + delta[u] - displaced_maximum)
+        anchor_denominator += anchor_weight
+        displaced_denominator += displaced_weight
+        anchor_mean_z += anchor_weight * z[u]
+        displaced_mean_z += displaced_weight * z[u]
+    end
+    return displaced_mean_z / displaced_denominator -
+        anchor_mean_z / anchor_denominator
+end
+
+function _omrf_direct_categorical_cv_cell_bound(
+        anchor_logits, delta_left, z, width::Real)
+    width >= 0 || throw(ArgumentError("cell width must be nonnegative"))
+    left = _omrf_categorical_cv_residual(anchor_logits, delta_left, z)
+    right_delta = similar(delta_left)
+    @inbounds for index in eachindex(right_delta, delta_left, z)
+        right_delta[index] = delta_left[index] + width * z[index]
+    end
+    right = _omrf_categorical_cv_residual(anchor_logits, right_delta, z)
+    return nextfloat(max(abs(left), abs(right)))
+end
+
+"""
+Research-only direct person-node HCV certificate for linear BPS cells.
+
+Along a linear path the exact directional remainder `h(t)` satisfies
+`h''(t) = D^3 logsumexp(eta(t))[z,z,z]`. With the reference-category value
+zero included, this is a categorical third central moment. Hoeffding's
+covariance inequality gives `abs(h''(t)) <= R(z)^3/4`; the interpolation
+error on `[l,r]` is at most `sup(abs(h''))*(r-l)^2/8`. Therefore
+`max(abs(h(l)),abs(h(r))) + R(z)^3*(r-l)^2/32` is certified on the cell.
+
+Each cache column stores cumulative bounds for all person-node factors in one
+active grid cell. It is both the factor-bound store (by differencing adjacent
+entries) and the allocation-free distinguished-factor sampling table.
+
+For the ordinary first-order CV mode, `h(t)=z'(p(t)-p(a))` and
+`h'(t)=z'(diag(p(t))-p(t)p(t)')z >= 0`. Hence `h` is nondecreasing and
+`max(abs(h(t)))` on a cell is attained at an endpoint. The shared fill uses
+`nextfloat(max(abs(h(left)), abs(h(right))))`; its curvature coefficient is
+exactly zero. This mode stores no likelihood Hessian.
+"""
+mutable struct OMRFDirectPersonNodeHCVEnvelope <:
+        PDMPSamplers.AbstractResidualEnvelope
+    n_persons::Int
+    n_nodes::Int
+    anchor::Vector{Float64}
+    context::OMRFResidualContext
+    hcv_remainder::Bool
+    event_horizon_scope::Bool
+    component_scales!::Nothing
+    component_cell_scales!::Nothing
+    totals::Vector{Float64}
+    scales::Vector{Float64}
+    cell_scales::Vector{Float64}
+    cumulative_masses::Vector{Float64}
+    max_cells::Int
+    cell_left::Vector{Float64}
+    cell_right::Vector{Float64}
+    cell_mass::Vector{Float64}
+    cell_cumulative::Matrix{Float64}
+    factor_workspace::Vector{Float64}
+    cell_count::Int
+    active_cell::Int
+    origin_time::Float64
+    path_x::Vector{Float64}
+    path_theta::Vector{Float64}
+    path_anchor::Vector{Float64}
+    path_active_generation::Int
+    path_flow_token::UInt
+    qmax::Int
+    path_threshold_delta0::Matrix{Float64}
+    path_threshold_z::Matrix{Float64}
+    interaction_delta::Matrix{Float64}
+    interaction_velocity::Matrix{Float64}
+    field_delta::Matrix{Float64}
+    field_velocity::Matrix{Float64}
+    path_delta0::Matrix{Float64}
+    path_z::Matrix{Float64}
+    path_anchor_reference_probability::Vector{Float64}
+    path_anchor_mean_z::Vector{Float64}
+    path_anchor_cov_z_delta0::Vector{Float64}
+    path_anchor_var_z::Vector{Float64}
+    path_curvature_coefficient::Vector{Float64}
+    last_boundary_remainders::Vector{Float64}
+    last_boundary::Float64
+    last_boundary_valid::Bool
+    certified_horizon::Float64
+    horizon_valid::Bool
+    path_valid::Bool
+end
+
+function _new_omrf_direct_hcv_envelope(anchor,
+        context::OMRFResidualContext; max_cells::Int=128,
+        hcv_remainder::Bool=true, event_horizon_scope::Bool=false)
+    max_cells >= 1 || throw(ArgumentError(
+        "direct HCV cache must hold at least one cell"))
+    N, P = size(context.X)
+    n_factors = N * P
+    qmax = maximum(context.seen) - 1
+    return OMRFDirectPersonNodeHCVEnvelope(
+        N, P, anchor, context, hcv_remainder, event_horizon_scope,
+        nothing, nothing,
+        ones(1), zeros(1), zeros(1),
+        zeros(1), max_cells, zeros(max_cells), zeros(max_cells),
+        zeros(max_cells), zeros(n_factors, max_cells), zeros(n_factors),
+        0, 0, 0.0, zeros(length(anchor)), zeros(length(anchor)),
+        zeros(length(anchor)), -1, UInt(0), qmax,
+        zeros(qmax, P), zeros(qmax, P),
+        zeros(P, P), zeros(P, P), zeros(N, P), zeros(N, P),
+        zeros(qmax, n_factors),
+        zeros(qmax, n_factors), zeros(n_factors), zeros(n_factors),
+        zeros(n_factors),
+        zeros(n_factors), zeros(n_factors), zeros(n_factors), 0.0, false,
+        0.0, false, false)
+end
+
+PDMPSamplers.n_observations(envelope::OMRFDirectPersonNodeHCVEnvelope) =
+    envelope.n_persons * envelope.n_nodes
+PDMPSamplers._trajectory_scale_anchor(
+    envelope::OMRFDirectPersonNodeHCVEnvelope) = envelope.anchor
+
+function _omrf_direct_prepare_linear_fields!(
+        envelope::OMRFDirectPersonNodeHCVEnvelope, state, flow)
+    context = envelope.context
+    fill!(envelope.interaction_delta, 0.0)
+    fill!(envelope.interaction_velocity, 0.0)
+    edge = 1
+    @inbounds for left in 1:(envelope.n_nodes - 1)
+        for right in (left + 1):envelope.n_nodes
+            index = context.interaction_indices[edge]
+            delta, velocity = _omrf_coordinate_at(
+                state, flow, envelope.anchor, index, 0.0)
+            envelope.interaction_delta[left, right] = delta
+            envelope.interaction_delta[right, left] = delta
+            envelope.interaction_velocity[left, right] = velocity
+            envelope.interaction_velocity[right, left] = velocity
+            edge += 1
+        end
+    end
+    mul!(envelope.field_delta, context.X_float,
+        envelope.interaction_delta)
+    mul!(envelope.field_velocity, context.X_float,
+        envelope.interaction_velocity)
+    return nothing
+end
+
+@inline function _omrf_direct_hcv_remainder_at(
+        envelope::OMRFDirectPersonNodeHCVEnvelope, state, flow,
+        person::Int, node::Int, t::Float64)
+    context = envelope.context
+    q = context.seen[node] - 1
+    iszero(q) && return 0.0, 0.0
+    field_delta = 0.0
+    field_velocity = 0.0
+    @inbounds for k in eachindex(context.incident_edges[node])
+        covariate = context.X[person, context.incident_neighbours[node][k]]
+        iszero(covariate) && continue
+        index = context.interaction_indices[context.incident_edges[node][k]]
+        delta, velocity = _omrf_coordinate_at(
+            state, flow, envelope.anchor, index, t)
+        field_delta += covariate * delta
+        field_velocity += covariate * velocity
+    end
+    start = context.threshold_starts[node]
+    mean_z = 0.0
+    mean_delta = 0.0
+    mean_z_delta = 0.0
+    probability_sum = 0.0
+    maximum_delta = 0.0
+    minimum_z = 0.0
+    maximum_z = 0.0
+    @inbounds for u in 1:q
+        index = context.threshold_indices[start + u - 1]
+        threshold_delta, threshold_velocity = _omrf_coordinate_at(
+            state, flow, envelope.anchor, index, t)
+        delta = threshold_delta + u * field_delta
+        z = threshold_velocity + u * field_velocity
+        probability = context.anchor_probabilities[start + u - 1, person]
+        probability_sum += probability
+        mean_z += probability * z
+        mean_delta += probability * delta
+        mean_z_delta += probability * z * delta
+        maximum_delta = max(maximum_delta, delta)
+        minimum_z = min(minimum_z, z)
+        maximum_z = max(maximum_z, z)
+    end
+    reference_probability = max(0.0, 1.0 - probability_sum)
+    denominator = reference_probability * exp(-maximum_delta)
+    displaced_mean_z = 0.0
+    @inbounds for u in 1:q
+        index = context.threshold_indices[start + u - 1]
+        threshold_delta, threshold_velocity = _omrf_coordinate_at(
+            state, flow, envelope.anchor, index, t)
+        delta = threshold_delta + u * field_delta
+        z = threshold_velocity + u * field_velocity
+        weight = context.anchor_probabilities[start + u - 1, person] *
+            exp(delta - maximum_delta)
+        denominator += weight
+        displaced_mean_z += weight * z
+    end
+    displaced_mean_z /= denominator
+    covariance = mean_z_delta - mean_z * mean_delta
+    return displaced_mean_z - mean_z - covariance, maximum_z - minimum_z
+end
+
+@inline function _omrf_direct_hcv_factor_cell_bound(
+        envelope::OMRFDirectPersonNodeHCVEnvelope, state, flow,
+        person::Int, node::Int, left::Float64, right::Float64)
+    left_h, range_z = _omrf_direct_hcv_remainder_at(
+        envelope, state, flow, person, node, left)
+    right_h, _ = _omrf_direct_hcv_remainder_at(
+        envelope, state, flow, person, node, right)
+    width = right - left
+    return nextfloat(max(abs(left_h), abs(right_h)) +
+        range_z^3 * width^2 / 32)
+end
+
+function _omrf_direct_path_matches(
+        envelope::OMRFDirectPersonNodeHCVEnvelope, state,
+        flow_token::UInt=envelope.path_flow_token)
+    envelope.path_valid || return false
+    state.t[] == envelope.origin_time || return false
+    envelope.path_active_generation == envelope.context.active_generation ||
+        return false
+    envelope.path_flow_token == flow_token || return false
+    @inbounds for index in eachindex(envelope.path_x)
+        envelope.path_x[index] == state.ξ.x[index] || return false
+        envelope.path_theta[index] == state.ξ.θ[index] || return false
+        envelope.path_anchor[index] == envelope.anchor[index] || return false
+    end
+    return true
+end
+
+function _omrf_direct_prepare_path!(
+        envelope::OMRFDirectPersonNodeHCVEnvelope, state, flow,
+        flow_token::UInt=UInt(0))
+    copyto!(envelope.path_x, state.ξ.x)
+    copyto!(envelope.path_theta, state.ξ.θ)
+    copyto!(envelope.path_anchor, envelope.anchor)
+    envelope.origin_time = state.t[]
+    envelope.path_active_generation = envelope.context.active_generation
+    envelope.path_flow_token = flow_token
+    context = envelope.context
+    N = envelope.n_persons
+    if !envelope.hcv_remainder
+        _omrf_direct_prepare_linear_fields!(envelope, state, flow)
+    end
+    destination = 1
+    @inbounds for node in 1:envelope.n_nodes
+        q = context.seen[node] - 1
+        start = context.threshold_starts[node]
+        for u in 1:q
+            index = context.threshold_indices[start + u - 1]
+            threshold_delta0, threshold_velocity = _omrf_coordinate_at(
+                state, flow, envelope.anchor, index, 0.0)
+            envelope.path_threshold_delta0[u, node] = threshold_delta0
+            envelope.path_threshold_z[u, node] = threshold_velocity
+        end
+        for person in 1:N
+            if envelope.hcv_remainder
+                field_delta0 = 0.0
+                field_velocity = 0.0
+                for k in eachindex(context.incident_edges[node])
+                    covariate = context.X[person,
+                        context.incident_neighbours[node][k]]
+                    iszero(covariate) && continue
+                    index = context.interaction_indices[
+                        context.incident_edges[node][k]]
+                    delta, velocity = _omrf_coordinate_at(
+                        state, flow, envelope.anchor, index, 0.0)
+                    field_delta0 += covariate * delta
+                    field_velocity += covariate * velocity
+                end
+            else
+                field_delta0 = envelope.field_delta[person, node]
+                field_velocity = envelope.field_velocity[person, node]
+            end
+            probability_sum = 0.0
+            mean_z = 0.0
+            mean_delta0 = 0.0
+            mean_z_delta0 = 0.0
+            mean_z2 = 0.0
+            minimum_z = 0.0
+            maximum_z = 0.0
+            for u in 1:q
+                threshold_delta0 = envelope.path_threshold_delta0[u, node]
+                threshold_velocity = envelope.path_threshold_z[u, node]
+                delta0 = threshold_delta0 + u * field_delta0
+                z = threshold_velocity + u * field_velocity
+                envelope.path_delta0[u, destination] = delta0
+                envelope.path_z[u, destination] = z
+                probability = context.anchor_probabilities[
+                    start + u - 1, person]
+                probability_sum += probability
+                mean_z += probability * z
+                mean_delta0 += probability * delta0
+                mean_z_delta0 += probability * z * delta0
+                mean_z2 += probability * z * z
+                minimum_z = min(minimum_z, z)
+                maximum_z = max(maximum_z, z)
+            end
+            for u in (q + 1):envelope.qmax
+                envelope.path_delta0[u, destination] = 0.0
+                envelope.path_z[u, destination] = 0.0
+            end
+            # The reference category has delta=z=0; its probability therefore
+            # does not contribute to these raw moments.
+            envelope.path_anchor_reference_probability[destination] =
+                max(0.0, 1.0 - probability_sum)
+            envelope.path_anchor_mean_z[destination] = mean_z
+            if envelope.hcv_remainder
+                envelope.path_anchor_cov_z_delta0[destination] =
+                    mean_z_delta0 - mean_z * mean_delta0
+                envelope.path_anchor_var_z[destination] = mean_z2 - mean_z^2
+                range_z = maximum_z - minimum_z
+                envelope.path_curvature_coefficient[destination] =
+                    range_z^3 / 32
+            else
+                envelope.path_anchor_cov_z_delta0[destination] = 0.0
+                envelope.path_anchor_var_z[destination] = 0.0
+                envelope.path_curvature_coefficient[destination] = 0.0
+            end
+            destination += 1
+        end
+    end
+    envelope.cell_count = 0
+    envelope.active_cell = 0
+    envelope.last_boundary_valid = false
+    envelope.horizon_valid = false
+    envelope.path_valid = true
+    counts = context.counts
+    counts.direct_path_preparations += 1
+    counts.direct_path_factors_prepared += N * envelope.n_nodes
+    return envelope
+end
+
+@inline function _omrf_direct_cached_remainder_at(
+        envelope::OMRFDirectPersonNodeHCVEnvelope,
+        factor::Int, person::Int, node::Int, t::Float64)
+    context = envelope.context
+    q = context.seen[node] - 1
+    iszero(q) && return 0.0
+    start = context.threshold_starts[node]
+    maximum_delta = 0.0
+    @inbounds for u in 1:q
+        delta = envelope.path_delta0[u, factor] +
+            t * envelope.path_z[u, factor]
+        maximum_delta = max(maximum_delta, delta)
+    end
+    denominator = 0.0
+    displaced_mean_z = 0.0
+    @inbounds for u in 1:q
+        probability = context.anchor_probabilities[start + u - 1, person]
+        delta = envelope.path_delta0[u, factor] +
+            t * envelope.path_z[u, factor]
+        weight = probability * exp(delta - maximum_delta)
+        denominator += weight
+        displaced_mean_z += weight * envelope.path_z[u, factor]
+    end
+    denominator += envelope.path_anchor_reference_probability[factor] *
+        exp(-maximum_delta)
+    displaced_mean_z /= denominator
+    residual = displaced_mean_z - envelope.path_anchor_mean_z[factor]
+    if envelope.hcv_remainder
+        residual -= envelope.path_anchor_cov_z_delta0[factor] +
+            t * envelope.path_anchor_var_z[factor]
+    end
+    return residual
+end
+
+function _omrf_direct_reset_path!(
+        envelope::OMRFDirectPersonNodeHCVEnvelope, state, flow,
+        flow_token::UInt=UInt(0))
+    started = time_ns()
+    _omrf_direct_prepare_path!(envelope, state, flow, flow_token)
+    envelope.context.counts.direct_path_preparation_seconds +=
+        (time_ns() - started) * 1e-9
+    return envelope
+end
+
+@inline function _omrf_direct_find_cell(
+        envelope::OMRFDirectPersonNodeHCVEnvelope,
+        left::Float64, right::Float64)
+    @inbounds for cell in 1:envelope.cell_count
+        envelope.cell_left[cell] == left &&
+            envelope.cell_right[cell] == right && return cell
+    end
+    return 0
+end
+
+function _omrf_direct_hcv_fill_cell_original!(
+        envelope::OMRFDirectPersonNodeHCVEnvelope, state, flow,
+        left::Float64, right::Float64, cell::Int)
+    cumulative = 0.0
+    destination = 1
+    @inbounds for node in 1:envelope.n_nodes
+        for person in 1:envelope.n_persons
+            bound = _omrf_direct_hcv_factor_cell_bound(
+                envelope, state, flow, person, node, left, right)
+            envelope.factor_workspace[destination] = bound
+            cumulative += bound
+            envelope.cell_cumulative[destination, cell] = cumulative
+            destination += 1
+        end
+    end
+    envelope.cell_left[cell] = left
+    envelope.cell_right[cell] = right
+    envelope.cell_mass[cell] = cumulative
+    counts = envelope.context.counts
+    counts.direct_factor_bound_scans += 1
+    counts.direct_factors_evaluated += envelope.n_persons * envelope.n_nodes
+    counts.direct_residual_table_constructions += 1
+    return cumulative
+end
+
+function _omrf_direct_hcv_fill_cell_cached!(
+        envelope::OMRFDirectPersonNodeHCVEnvelope,
+        left::Float64, right::Float64, cell::Int,
+        reuse_adjacent::Bool)
+    adjacent = reuse_adjacent && envelope.last_boundary_valid &&
+        envelope.last_boundary == left
+    cumulative = 0.0
+    factor = 1
+    width2 = (right - left)^2
+    @inbounds for node in 1:envelope.n_nodes
+        for person in 1:envelope.n_persons
+            if adjacent
+                left_h = envelope.last_boundary_remainders[factor]
+            else
+                left_h = _omrf_direct_cached_remainder_at(
+                    envelope, factor, person, node, left)
+            end
+            right_h = _omrf_direct_cached_remainder_at(
+                envelope, factor, person, node, right)
+            envelope.last_boundary_remainders[factor] = right_h
+            bound = nextfloat(max(abs(left_h), abs(right_h)) +
+                envelope.path_curvature_coefficient[factor] * width2)
+            envelope.factor_workspace[factor] = bound
+            cumulative += bound
+            envelope.cell_cumulative[factor, cell] = cumulative
+            factor += 1
+        end
+    end
+    envelope.cell_left[cell] = left
+    envelope.cell_right[cell] = right
+    envelope.cell_mass[cell] = cumulative
+    envelope.last_boundary = right
+    envelope.last_boundary_valid = true
+    counts = envelope.context.counts
+    counts.direct_factor_bound_scans += 1
+    counts.direct_factors_evaluated += envelope.n_persons * envelope.n_nodes
+    counts.direct_residual_table_constructions += 1
+    counts.direct_left_endpoint_evaluations += adjacent ? 0 : factor - 1
+    counts.direct_right_endpoint_evaluations += factor - 1
+    counts.direct_adjacent_endpoint_reuses += adjacent ? factor - 1 : 0
+    return cumulative
+end
+
+function _omrf_direct_hcv_fill_cell!(
+        envelope::OMRFDirectPersonNodeHCVEnvelope, state, flow,
+        left::Float64, right::Float64, cell::Int)
+    return _omrf_direct_hcv_fill_cell_cached!(
+        envelope, left, right, cell, true)
+end
+
+@inline _omrf_direct_flow_token(flow) = UInt(0)
+@inline function _omrf_direct_flow_token(
+        flow::PDMPSamplers.PreconditionedDynamics)
+    generation = hasproperty(flow.metric, :generation) ?
+        flow.metric.generation : UInt(0)
+    return xor(UInt(objectid(flow.metric)), generation)
+end
+
+function _omrf_direct_component_cell_scales!(out,
+        envelope::OMRFDirectPersonNodeHCVEnvelope, state,
+        actual_flow::BouncyParticle,
+        left, right, flow_token::UInt)
+    left = Float64(left)
+    right = Float64(right)
+    right >= left || throw(ArgumentError("direct HCV cell is reversed"))
+    _omrf_direct_path_matches(envelope, state, flow_token) ||
+        _omrf_direct_reset_path!(
+            envelope, state, actual_flow, flow_token)
+    envelope.context.counts.direct_internal_cell_uses += 1
+    if envelope.event_horizon_scope
+        envelope.horizon_valid || throw(ArgumentError(
+            "direct CV horizon table requested before horizon preparation"))
+        tolerance = 16eps(max(1.0, abs(envelope.certified_horizon)))
+        left >= -tolerance && right <= envelope.certified_horizon + tolerance ||
+            throw(ArgumentError(
+                "direct CV cell lies outside its certified event horizon"))
+        cell = 1
+        envelope.context.counts.direct_horizon_table_hits += 1
+    else
+        cell = _omrf_direct_find_cell(envelope, left, right)
+        if iszero(cell)
+            envelope.cell_count < envelope.max_cells || throw(ArgumentError(
+                "direct HCV active grid exceeds the preallocated cell cache"))
+            cell = envelope.cell_count + 1
+            started = time_ns()
+            _omrf_direct_hcv_fill_cell!(
+                envelope, state, actual_flow, left, right, cell)
+            envelope.context.counts.direct_cell_certificate_seconds +=
+                (time_ns() - started) * 1e-9
+            envelope.cell_count = cell
+        else
+            envelope.context.counts.direct_cached_cell_hits += 1
+        end
+    end
+    envelope.active_cell = cell
+    envelope.scales[1] = envelope.cell_mass[cell]
+    envelope.cell_scales[1] = envelope.cell_mass[cell]
+    envelope.cumulative_masses[1] = envelope.cell_mass[cell]
+    out[1] = envelope.cell_mass[cell]
+    return out
+end
+
+function PDMPSamplers.component_cell_scales!(out,
+        envelope::OMRFDirectPersonNodeHCVEnvelope, state,
+        actual_flow::BouncyParticle, left, right)
+    return _omrf_direct_component_cell_scales!(out, envelope, state,
+        actual_flow, left, right, UInt(0))
+end
+
+function PDMPSamplers.component_cell_scales!(out,
+        envelope::OMRFDirectPersonNodeHCVEnvelope, state,
+        flow::PDMPSamplers.PreconditionedDynamics, left, right)
+    flow.dynamics isa BouncyParticle || throw(ArgumentError(
+        "direct person-node HCV cells currently support only linear BPS"))
+    return _omrf_direct_component_cell_scales!(out, envelope, state,
+        flow.dynamics, left, right, _omrf_direct_flow_token(flow))
+end
+
+function _omrf_direct_prepare_horizon!(
+        envelope::OMRFDirectPersonNodeHCVEnvelope, state,
+        flow::BouncyParticle, horizon::Float64, flow_token::UInt)
+    envelope.event_horizon_scope || return nothing
+    isfinite(horizon) && horizon >= 0 || throw(ArgumentError(
+        "direct CV event-horizon certificate requires a finite nonnegative horizon"))
+    _omrf_direct_path_matches(envelope, state, flow_token) ||
+        _omrf_direct_reset_path!(envelope, state, flow, flow_token)
+    if envelope.horizon_valid && envelope.certified_horizon == horizon
+        envelope.context.counts.direct_horizon_table_hits += 1
+        return nothing
+    end
+    envelope.last_boundary_valid = false
+    started = time_ns()
+    _omrf_direct_hcv_fill_cell_cached!(
+        envelope, 0.0, horizon, 1, false)
+    envelope.context.counts.direct_cell_certificate_seconds +=
+        (time_ns() - started) * 1e-9
+    envelope.cell_count = 1
+    envelope.active_cell = 1
+    envelope.certified_horizon = horizon
+    envelope.horizon_valid = true
+    return nothing
+end
+
+function PDMPSamplers.prepare_residual_horizon!(
+        envelope::OMRFDirectPersonNodeHCVEnvelope, state,
+        flow::BouncyParticle, horizon)
+    return _omrf_direct_prepare_horizon!(
+        envelope, state, flow, Float64(horizon), UInt(0))
+end
+
+function PDMPSamplers.prepare_residual_horizon!(
+        envelope::OMRFDirectPersonNodeHCVEnvelope, state,
+        flow::PDMPSamplers.PreconditionedDynamics, horizon)
+    flow.dynamics isa BouncyParticle || throw(ArgumentError(
+        "direct CV event-horizon cells currently support only linear BPS"))
+    return _omrf_direct_prepare_horizon!(envelope, state, flow.dynamics,
+        Float64(horizon), _omrf_direct_flow_token(flow))
+end
+
+@inline function _omrf_direct_activate_time!(
+        envelope::OMRFDirectPersonNodeHCVEnvelope, state, t)::Float64
+    # Aggregate screening receives the live cell-origin state and a future
+    # relative time. Selected-subset preparation receives an already moved
+    # candidate and `t == 0`. Distinguish these without scanning factors.
+    local_time = _omrf_direct_path_matches(envelope, state) ? Float64(t) :
+        Float64(state.t[] - envelope.origin_time + t)
+    tolerance = 16eps(max(1.0, abs(local_time)))
+    @inbounds for cell in 1:envelope.cell_count
+        if envelope.cell_left[cell] - tolerance <= local_time <=
+                envelope.cell_right[cell] + tolerance
+            envelope.active_cell = cell
+            mass = envelope.cell_mass[cell]
+            envelope.scales[1] = mass
+            envelope.cumulative_masses[1] = mass
+            envelope.context.counts.direct_cached_cell_hits += 1
+            return mass
+        end
+    end
+    throw(ArgumentError(
+        "direct HCV proposal time is outside the cached active grid"))
+end
+
+function PDMPSamplers.component_scales!(out,
+        envelope::OMRFDirectPersonNodeHCVEnvelope, state, flow, t)
+    out[1] = _omrf_direct_activate_time!(envelope, state, t)
+    return out
+end
+
+@inline function PDMPSamplers.screening_residual_bound(
+    envelope::OMRFDirectPersonNodeHCVEnvelope, state, flow, t)::Float64
+    return _omrf_direct_activate_time!(envelope, state, t)
+end
+
+function PDMPSamplers.prepare_residual_sampling!(
+        envelope::OMRFDirectPersonNodeHCVEnvelope, state, flow, t)
+    _omrf_direct_activate_time!(envelope, state, t)
+    return nothing
+end
+
+function PDMPSamplers.observation_residual_bound(
+        envelope::OMRFDirectPersonNodeHCVEnvelope, observation::Integer)
+    1 <= observation <= PDMPSamplers.n_observations(envelope) ||
+        throw(BoundsError(1:PDMPSamplers.n_observations(envelope), observation))
+    cell = envelope.active_cell
+    iszero(cell) && throw(ArgumentError(
+        "direct HCV factor bound requested before cell activation"))
+    @inbounds if observation == 1
+        return envelope.cell_cumulative[1, cell]
+    end
+    upper = envelope.cell_cumulative[observation, cell]
+    lower = envelope.cell_cumulative[observation - 1, cell]
+    # Adjacent-prefix subtraction can lose several ulps when the selected
+    # factor is small relative to the accumulated mass. Add the standard
+    # floating summation/subtraction error scale so the recovered value is an
+    # upper bound on the bit-identical scalar value kept during construction.
+    return (upper - lower) + 4eps(max(abs(upper), abs(lower), 1.0))
+end
+
+function PDMPSamplers._draw_component(rng::Random.AbstractRNG,
+        envelope::OMRFDirectPersonNodeHCVEnvelope, B::Real)::Int
+    cell = envelope.active_cell
+    iszero(cell) && throw(ArgumentError(
+        "direct HCV distinguished factor requested before cell activation"))
+    target = rand(rng) * B
+    left = 1
+    right = PDMPSamplers.n_observations(envelope)
+    @inbounds while left < right
+        middle = (left + right) >>> 1
+        if envelope.cell_cumulative[middle, cell] < target
+            left = middle + 1
+        else
+            right = middle
+        end
+    end
+    return left
+end
+
+PDMPSamplers._draw_distinguished(rng::Random.AbstractRNG,
+    ::OMRFDirectPersonNodeHCVEnvelope, observation::Int) = observation
 
 """
 Certified empirical-covariate expansion of the scalar OMRF residual rate.
@@ -1932,7 +3691,7 @@ trajectory terms as scales.  It therefore retains substantially more design
 information than the norm-local certificate without evaluating every
 observed node pattern during each grid build.
 """
-struct OMRFCovariateLocalScales
+mutable struct OMRFCovariateLocalScales
     anchor::Vector{Float64}
     context::OMRFResidualContext
     edge_displacements::Vector{Float64}
@@ -1940,6 +3699,1309 @@ struct OMRFCovariateLocalScales
     coordinate_offsets::Vector{Float64}
     coordinate_cosines::Vector{Float64}
     coordinate_sines::Vector{Float64}
+    cache_x::Vector{Float64}
+    cache_theta::Vector{Float64}
+    cache_mu::Vector{Float64}
+    cache_anchor::Vector{Float64}
+    cache_free::BitVector
+    harmonic_cache_flow_hash::UInt
+    harmonic_cache_valid::Bool
+end
+
+const _OMRFCompactAliasTable =
+    Union{Nothing,PDMPSamplers.AliasTables.AliasTable{UInt64,Int}}
+
+"""Immutable data-only state shared by all compact anchor-bank entries."""
+struct OMRFCompactStatic
+    column_sums::Vector{Float64}
+    cross_products::Matrix{Float64}
+    covariate_aliases::Vector{_OMRFCompactAliasTable}
+    cross_aliases::Matrix{_OMRFCompactAliasTable}
+    term_kind::Matrix{UInt8}
+    term_k::Matrix{Int}
+    term_l::Matrix{Int}
+    term_count::Vector{Int}
+end
+
+"""Compact person-node covariate-local certificate.
+
+The expanded covariate certificate has one component for every node-local
+polynomial term.  This representation keeps the same certified bound, but
+aggregates those terms directly into one bound per node and person.  The
+node/person masses are reused for distinguished-factor sampling, so no
+27,000-by-N weight matrix or per-proposal alias-table construction is needed.
+"""
+mutable struct OMRFCompactCovariateLocalScales
+    base::OMRFCovariateLocalScales
+    static::OMRFCompactStatic
+    person_bounds::Matrix{Float64}
+    person_cumulative::Matrix{Float64}
+    term_cumulative::Matrix{Float64}
+    prepare_person_bounds::Bool
+    node_A::Vector{Float64}
+    node_C::Vector{Float64}
+    node_edge_displacements::Matrix{Float64}
+    node_edge_velocities::Matrix{Float64}
+    signed_field_displacement::Matrix{Float64}
+    signed_field_velocity::Matrix{Float64}
+    signed_field_cosine::Matrix{Float64}
+    signed_field_sine::Matrix{Float64}
+    signed_threshold_displacement::Vector{Float64}
+    signed_threshold_velocity::Vector{Float64}
+    signed_threshold_cosine::Vector{Float64}
+    signed_threshold_sine::Vector{Float64}
+    signed_interaction_displacement::Vector{Float64}
+    signed_interaction_velocity::Vector{Float64}
+    signed_interaction_cosine::Vector{Float64}
+    signed_interaction_sine::Vector{Float64}
+    signed_cache_x::Vector{Float64}
+    signed_cache_theta::Vector{Float64}
+    signed_cache_anchor::Vector{Float64}
+    signed_cache_free::BitVector
+    signed_cache_flow_hash::UInt
+    signed_cache_generation::UInt
+    signed_cache_valid::Bool
+end
+
+mutable struct OMRFCompactCovariateLocalEnvelope{S,C} <:
+        PDMPSamplers.AbstractResidualEnvelope
+    n_persons::Int
+    n_nodes::Int
+    component_scales!::S
+    component_cell_scales!::C
+    totals::Vector{Float64}
+    scales::Vector{Float64}
+    cell_scales::Vector{Float64}
+    cumulative_masses::Vector{Float64}
+    screen_generation::UInt
+    screen_pending::Bool
+    screen_x::Vector{Float64}
+    screen_theta::Vector{Float64}
+    cell_term_left::Matrix{Float64}
+    cell_term_right::Matrix{Float64}
+    cell_node_left::Vector{Float64}
+    cell_node_right::Vector{Float64}
+    cell_state_id::UInt
+    cell_flow_type::DataType
+    cell_left::Float64
+    cell_right::Float64
+    cell_valid::Bool
+    cell_residual_left::Float64
+    cell_residual_right::Float64
+    chord_screen::Bool
+    screen_time::Float64
+    signed_bps::Bool
+    signed_harmonic::Bool
+    signed_cached_endpoint_generation::UInt
+    signed_cached_endpoint_time::Float64
+    signed_cached_endpoint_valid::Bool
+    signed_cell_cumulative_left::Vector{Float64}
+    signed_cell_cumulative_right::Vector{Float64}
+    signed_screen_cumulative::Vector{Float64}
+    signed_cell_left_mass::Float64
+    signed_cell_right_mass::Float64
+    signed_screen_alpha::Float64
+    signed_screen_valid::Bool
+end
+
+PDMPSamplers.n_observations(envelope::OMRFCompactCovariateLocalEnvelope) =
+    envelope.n_persons * envelope.n_nodes
+
+function _omrf_compact_static(context::OMRFResidualContext)
+    started = time_ns()
+    X = context.X_float
+    N, P = size(X)
+    column_sums = zeros(Float64, P)
+    cross_products = zeros(Float64, P, P)
+    @inbounds for person in 1:N, left in 1:P
+        x_left = X[person, left]
+        column_sums[left] += x_left
+        for right in 1:P
+            cross_products[left, right] += x_left * X[person, right]
+        end
+    end
+    covariate_aliases = _OMRFCompactAliasTable[nothing for _ in 1:P]
+    @inbounds for column in 1:P
+        if column_sums[column] > 0
+            covariate_aliases[column] = PDMPSamplers.AliasTables.AliasTable(
+                view(X, :, column))
+        end
+    end
+    cross_aliases = Matrix{_OMRFCompactAliasTable}(undef, P, P)
+    @inbounds for left in 1:P, right in 1:P
+        if cross_products[left, right] > 0
+            weights = Vector{Float64}(undef, N)
+            for person in 1:N
+                weights[person] = X[person, left] * X[person, right]
+            end
+            cross_aliases[left, right] =
+                PDMPSamplers.AliasTables.AliasTable(weights)
+        else
+            cross_aliases[left, right] = nothing
+        end
+    end
+    max_degree = maximum(length, context.incident_neighbours; init=0)
+    max_terms = 1 + 2 * max_degree + max_degree^2
+    term_kind = zeros(UInt8, P, max_terms)
+    term_k = zeros(Int, P, max_terms)
+    term_l = zeros(Int, P, max_terms)
+    term_count = zeros(Int, P)
+    @inbounds for node in 1:P
+        neighbours = context.incident_neighbours[node]
+        term = 1
+        term_kind[node, term] = 0x01
+        term_count[node] = term
+        for neighbour in neighbours
+            term += 1
+            term_kind[node, term] = 0x02
+            term_k[node, term] = neighbour
+            term_count[node] = term
+        end
+        for neighbour in neighbours
+            term += 1
+            term_kind[node, term] = 0x03
+            term_l[node, term] = neighbour
+            term_count[node] = term
+        end
+        for left in neighbours, right in neighbours
+            term += 1
+            term_kind[node, term] = 0x04
+            term_k[node, term] = left
+            term_l[node, term] = right
+            term_count[node] = term
+        end
+    end
+    context.counts.compact_static_constructions += 1
+    context.counts.compact_static_seconds += (time_ns() - started) * 1e-9
+    return OMRFCompactStatic(column_sums, cross_products,
+        covariate_aliases, cross_aliases, term_kind, term_k, term_l,
+        term_count)
+end
+
+function _new_omrf_compact_envelope(anchor,
+        residual_context::OMRFResidualContext,
+        static::Union{Nothing,OMRFCompactStatic}=nothing;
+        signed_bps::Bool=false, signed_harmonic::Bool=false)
+    N, P = size(residual_context.X)
+    max_degree = maximum(length, residual_context.incident_edges; init=0)
+    base = OMRFCovariateLocalScales(anchor, residual_context,
+        zeros(max_degree), zeros(max_degree), zeros(length(anchor)),
+        zeros(length(anchor)), zeros(length(anchor)),
+        zeros(length(anchor)), zeros(length(anchor)), zeros(length(anchor)),
+        zeros(length(anchor)), falses(length(anchor)), UInt(0), false)
+    static_state = static === nothing ? _omrf_compact_static(residual_context) : static
+    max_terms = size(static_state.term_kind, 2)
+    scales = OMRFCompactCovariateLocalScales(base, static_state,
+        zeros(Float64, P, N), zeros(Float64, P, N),
+        zeros(Float64, P, max_terms), false,
+        zeros(Float64, P), zeros(Float64, P),
+        zeros(Float64, P, max_degree), zeros(Float64, P, max_degree),
+        zeros(Float64, N, P), zeros(Float64, N, P),
+        zeros(Float64, N, P), zeros(Float64, N, P),
+        zeros(Float64, length(residual_context.threshold_indices)),
+        zeros(Float64, length(residual_context.threshold_indices)),
+        zeros(Float64, length(residual_context.threshold_indices)),
+        zeros(Float64, length(residual_context.threshold_indices)),
+        zeros(Float64, length(residual_context.interaction_indices)),
+        zeros(Float64, length(residual_context.interaction_indices)),
+        zeros(Float64, length(residual_context.interaction_indices)),
+        zeros(Float64, length(residual_context.interaction_indices)),
+        zeros(Float64, length(anchor)), zeros(Float64, length(anchor)),
+        zeros(Float64, length(anchor)), falses(length(anchor)),
+        UInt(0), UInt(0), false)
+    return OMRFCompactCovariateLocalEnvelope(
+        N, P, scales, scales, ones(Float64, P), zeros(Float64, P),
+        zeros(Float64, P), zeros(Float64, P), UInt(0), false,
+        zeros(Float64, length(anchor)), zeros(Float64, length(anchor)),
+        zeros(Float64, P, max_terms), zeros(Float64, P, max_terms),
+        zeros(Float64, P), zeros(Float64, P), UInt(0), typeof(nothing),
+        0.0, 0.0, false, 0.0, 0.0, false, 0.0, signed_bps,
+        signed_harmonic,
+        UInt(0), 0.0, false,
+        zeros(Float64, N * P), zeros(Float64, N * P),
+        zeros(Float64, N * P), 0.0, 0.0, 0.0, false)
+end
+
+@inline function _omrf_compact_fill_node!(out, scales,
+        node::Int, q::Int, A::Float64, C::Float64,
+        edge_displacements, edge_velocities)
+    context = scales.base.context
+    X = context.X
+    neighbours = context.incident_neighbours[node]
+    static = scales.static
+    scales.node_A[node] = A
+    scales.node_C[node] = C
+    @inbounds for k in eachindex(neighbours)
+        scales.node_edge_displacements[node, k] = edge_displacements[k]
+        scales.node_edge_velocities[node, k] = edge_velocities[k]
+    end
+    if !scales.prepare_person_bounds
+        cumulative = 0.0
+        term = 1
+        cumulative += 0.25 * size(X, 1) * A * C
+        scales.term_cumulative[node, term] = cumulative
+        @inbounds for k in eachindex(neighbours)
+            term += 1
+            cumulative += 0.25 * q * C * edge_displacements[k] *
+                static.column_sums[neighbours[k]]
+            scales.term_cumulative[node, term] = cumulative
+        end
+        @inbounds for l in eachindex(neighbours)
+            term += 1
+            cumulative += 0.25 * q * A * edge_velocities[l] *
+                static.column_sums[neighbours[l]]
+            scales.term_cumulative[node, term] = cumulative
+        end
+        @inbounds for k in eachindex(neighbours), l in eachindex(neighbours)
+            term += 1
+            cumulative += 0.25 * q^2 * edge_displacements[k] *
+                edge_velocities[l] * static.cross_products[
+                    neighbours[k], neighbours[l]]
+            scales.term_cumulative[node, term] = cumulative
+        end
+        out[node] = cumulative
+        return nothing
+    end
+    total = 0.0
+    @inbounds for person in axes(X, 1)
+        displacement_sum = 0.0
+        velocity_sum = 0.0
+        for k in eachindex(neighbours)
+            x = X[person, neighbours[k]]
+            displacement_sum += x * edge_displacements[k]
+            velocity_sum += x * edge_velocities[k]
+        end
+        bound = 0.25 * (A + q * displacement_sum) *
+            (C + q * velocity_sum)
+        scales.person_bounds[node, person] = bound
+        total += bound
+        scales.person_cumulative[node, person] = total
+    end
+    out[node] = total
+    return nothing
+end
+
+@inline function _omrf_compact_prepare_person_node!(scales,
+        node::Int)
+    context = scales.base.context
+    X = context.X
+    neighbours = context.incident_neighbours[node]
+    q = context.seen[node] - 1
+    context.counts.compact_person_bounds += size(X, 1)
+    A = scales.node_A[node]
+    C = scales.node_C[node]
+    total = 0.0
+    @inbounds for person in axes(X, 1)
+        displacement_sum = 0.0
+        velocity_sum = 0.0
+        for k in eachindex(neighbours)
+            x = X[person, neighbours[k]]
+            displacement_sum += x * scales.node_edge_displacements[node, k]
+            velocity_sum += x * scales.node_edge_velocities[node, k]
+        end
+        bound = 0.25 * (A + q * displacement_sum) *
+            (C + q * velocity_sum)
+        scales.person_bounds[node, person] = bound
+        total += bound
+        scales.person_cumulative[node, person] = total
+    end
+    return nothing
+end
+
+@inline function _omrf_compact_person_bound(scales, node::Int,
+        person::Int)
+    context = scales.base.context
+    neighbours = context.incident_neighbours[node]
+    q = context.seen[node] - 1
+    displacement_sum = 0.0
+    velocity_sum = 0.0
+    @inbounds for k in eachindex(neighbours)
+        x = context.X[person, neighbours[k]]
+        displacement_sum += x * scales.node_edge_displacements[node, k]
+        velocity_sum += x * scales.node_edge_velocities[node, k]
+    end
+    return 0.25 * (scales.node_A[node] + q * displacement_sum) *
+        (scales.node_C[node] + q * velocity_sum)
+end
+
+function PDMPSamplers.prepare_residual_sampling!(
+        envelope::OMRFCompactCovariateLocalEnvelope, state, flow, t)
+    scales = envelope.component_scales!
+    envelope.screen_pending = false
+    envelope.chord_screen = false
+    scales.prepare_person_bounds = false
+    actual_flow = flow isa PDMPSamplers.PreconditionedDynamics ?
+        flow.dynamics : flow
+    scales(envelope.scales, state, actual_flow, t)
+    cumulative = 0.0
+    @inbounds for node in axes(envelope.scales, 1)
+        cumulative += envelope.scales[node] * envelope.totals[node]
+        envelope.cumulative_masses[node] = cumulative
+    end
+    return nothing
+end
+
+@inline function _omrf_signed_factor_bound_coordinates(
+        context::OMRFResidualContext, anchor, x, theta,
+        person::Int, node::Int)
+    q = context.seen[node] - 1
+    iszero(q) && return 0.0
+    field_displacement = 0.0
+    field_velocity = 0.0
+    weighted_edge_velocity = 0.0
+    @inbounds for k in eachindex(context.incident_edges[node])
+        covariate = context.X[person, context.incident_neighbours[node][k]]
+        iszero(covariate) && continue
+        edge_index = context.interaction_indices[
+            context.incident_edges[node][k]]
+        displacement = x[edge_index] - anchor[edge_index]
+        velocity = theta[edge_index]
+        field_displacement += covariate * displacement
+        field_velocity += covariate * velocity
+        weighted_edge_velocity += covariate * abs(velocity)
+    end
+    minimum_logit = 0.0
+    maximum_logit = 0.0
+    minimum_logit_velocity = 0.0
+    maximum_logit_velocity = 0.0
+    threshold_velocity = 0.0
+    threshold_start = context.threshold_starts[node]
+    @inbounds for u in 1:q
+        index = context.threshold_indices[threshold_start + u - 1]
+        displacement = x[index] - anchor[index]
+        velocity = theta[index]
+        logit = displacement + u * field_displacement
+        minimum_logit = min(minimum_logit, logit)
+        maximum_logit = max(maximum_logit, logit)
+        logit_velocity = velocity + u * field_velocity
+        minimum_logit_velocity = min(minimum_logit_velocity, logit_velocity)
+        maximum_logit_velocity = max(maximum_logit_velocity, logit_velocity)
+        threshold_velocity += abs(velocity)
+    end
+    return 0.25 * (maximum_logit - minimum_logit) *
+        (maximum_logit_velocity - minimum_logit_velocity)
+end
+
+@inline function _omrf_signed_fill_interaction_matrix!(context, values)
+    matrix = context.interaction_matrix
+    fill!(matrix, 0.0)
+    edge = 1
+    P = size(matrix, 1)
+    @inbounds for left in 1:(P - 1), right in (left + 1):P
+        value = values[edge]
+        matrix[left, right] = value
+        matrix[right, left] = value
+        edge += 1
+    end
+    return matrix
+end
+
+@inline function _omrf_signed_cache_matches(scales,
+        state, flow, anchor, flow_hash::UInt)
+    scales.signed_cache_valid || return false
+    scales.signed_cache_flow_hash == flow_hash || return false
+    @inbounds for index in eachindex(anchor, scales.signed_cache_anchor)
+        anchor[index] == scales.signed_cache_anchor[index] || return false
+    end
+    @inbounds for index in eachindex(state.ξ.x, scales.signed_cache_x)
+        state.ξ.x[index] == scales.signed_cache_x[index] || return false
+        state.ξ.θ[index] == scales.signed_cache_theta[index] || return false
+    end
+    if state isa StickyPDMPState
+        @inbounds for index in eachindex(state.free, scales.signed_cache_free)
+            state.free[index] == scales.signed_cache_free[index] || return false
+        end
+    end
+    return true
+end
+
+function _omrf_signed_prepare_flight_cache!(scales, state, flow)
+    context = scales.base.context
+    anchor = scales.base.anchor
+    flow_generation = flow isa PDMPSamplers.PreconditionedDynamics ?
+        (hasproperty(flow.metric, :generation) ? flow.metric.generation : UInt(0)) :
+        UInt(0)
+    flow_hash = hash((typeof(flow), flow_generation, hash(flow)))
+    _omrf_signed_cache_matches(scales, state, flow, anchor, flow_hash) &&
+        return scales.signed_cache_generation
+    started = time_ns()
+    allocated = _omrf_allocated_bytes()
+    counts = context.counts.signed_bps
+    interaction_started = time_ns()
+    interaction_allocated = _omrf_allocated_bytes()
+    harmonic_flow = flow isa PDMPSamplers.AnyBoomerang
+    edge = 1
+    @inbounds for left in 1:(size(context.X, 2) - 1), right in (left + 1):size(context.X, 2)
+        index = context.interaction_indices[edge]
+        if harmonic_flow
+            scales.signed_interaction_displacement[edge] =
+                flow.μ[index] - anchor[index]
+            scales.signed_interaction_cosine[edge] =
+                _omrf_coordinate_free(state, index) ? state.ξ.x[index] - flow.μ[index] :
+                state.ξ.x[index] - anchor[index]
+            scales.signed_interaction_sine[edge] =
+                _omrf_coordinate_free(state, index) ? state.ξ.θ[index] : 0.0
+        else
+            scales.signed_interaction_displacement[edge] =
+                state.ξ.x[index] - anchor[index]
+            scales.signed_interaction_velocity[edge] =
+                _omrf_coordinate_free(state, index) ? state.ξ.θ[index] : 0.0
+        end
+        edge += 1
+    end
+    _omrf_signed_fill_interaction_matrix!(
+        context, scales.signed_interaction_displacement)
+    mul!(scales.signed_field_displacement,
+        context.X_float, context.interaction_matrix)
+    if harmonic_flow
+        _omrf_signed_fill_interaction_matrix!(
+            context, scales.signed_interaction_cosine)
+        mul!(scales.signed_field_cosine,
+            context.X_float, context.interaction_matrix)
+        _omrf_signed_fill_interaction_matrix!(
+            context, scales.signed_interaction_sine)
+        mul!(scales.signed_field_sine,
+            context.X_float, context.interaction_matrix)
+    else
+        _omrf_signed_fill_interaction_matrix!(
+            context, scales.signed_interaction_velocity)
+        mul!(scales.signed_field_velocity,
+            context.X_float, context.interaction_matrix)
+    end
+    interaction_elapsed = (time_ns() - interaction_started) * 1e-9
+    counts.interaction_field_preparations += 1
+    counts.interaction_field_seconds += interaction_elapsed
+    counts.interaction_field_allocated_bytes +=
+        _omrf_allocated_bytes() - interaction_allocated
+
+    @inbounds for local_index in eachindex(context.threshold_indices)
+        index = context.threshold_indices[local_index]
+        if harmonic_flow
+            scales.signed_threshold_displacement[local_index] =
+                flow.μ[index] - anchor[index]
+            scales.signed_threshold_cosine[local_index] =
+                _omrf_coordinate_free(state, index) ? state.ξ.x[index] - flow.μ[index] :
+                state.ξ.x[index] - anchor[index]
+            scales.signed_threshold_sine[local_index] =
+                _omrf_coordinate_free(state, index) ? state.ξ.θ[index] : 0.0
+        else
+            scales.signed_threshold_displacement[local_index] =
+                state.ξ.x[index] - anchor[index]
+            scales.signed_threshold_velocity[local_index] =
+                _omrf_coordinate_free(state, index) ? state.ξ.θ[index] : 0.0
+        end
+    end
+    copyto!(scales.signed_cache_x, state.ξ.x)
+    copyto!(scales.signed_cache_theta, state.ξ.θ)
+    copyto!(scales.signed_cache_anchor, anchor)
+    if state isa StickyPDMPState
+        copyto!(scales.signed_cache_free, state.free)
+    else
+        fill!(scales.signed_cache_free, true)
+    end
+    scales.signed_cache_flow_hash = flow_hash
+    scales.signed_cache_generation += UInt(1)
+    scales.signed_cache_valid = true
+    counts.endpoint_range_fills += 1
+    counts.endpoint_range_seconds += (time_ns() - started) * 1e-9 -
+        interaction_elapsed
+    counts.endpoint_range_allocated_bytes +=
+        _omrf_allocated_bytes() - allocated
+    return scales.signed_cache_generation
+end
+
+function _omrf_signed_fill_endpoint!(envelope, state, flow, t, cumulative)
+    scales = envelope.component_scales!
+    context = scales.base.context
+    people, nodes = size(context.X)
+    started = time_ns()
+    allocated = _omrf_allocated_bytes()
+    _omrf_signed_prepare_flight_cache!(scales, state, flow)
+    total = 0.0
+    @inbounds for node in 1:nodes, person in 1:people
+        q = context.seen[node] - 1
+        minimum_logit = 0.0
+        maximum_logit = 0.0
+        minimum_velocity = 0.0
+        maximum_velocity = 0.0
+        field_displacement = scales.signed_field_displacement[person, node] +
+            t * scales.signed_field_velocity[person, node]
+        field_velocity = scales.signed_field_velocity[person, node]
+        threshold_start = context.threshold_starts[node]
+        for u in 1:q
+            local_index = threshold_start + u - 1
+            displacement = scales.signed_threshold_displacement[local_index] +
+                t * scales.signed_threshold_velocity[local_index]
+            velocity = scales.signed_threshold_velocity[local_index]
+            logit = displacement + u * field_displacement
+            logit_velocity = velocity + u * field_velocity
+            minimum_logit = min(minimum_logit, logit)
+            maximum_logit = max(maximum_logit, logit)
+            minimum_velocity = min(minimum_velocity, logit_velocity)
+            maximum_velocity = max(maximum_velocity, logit_velocity)
+        end
+        bound = 0.25 * (maximum_logit - minimum_logit) *
+            (maximum_velocity - minimum_velocity)
+        total += bound
+        cumulative[(node - 1) * people + person] = total
+    end
+    counts = context.counts.signed_bps
+    counts.endpoint_fills += 1
+    counts.person_node_masses_filled += people * nodes
+    elapsed = (time_ns() - started) * 1e-9
+    counts.endpoint_fill_seconds += elapsed
+    counts.endpoint_fill_allocated_bytes += _omrf_allocated_bytes() - allocated
+    return total
+end
+
+"""Fill a signed factor mass vector for a harmonic Boomerang endpoint."""
+function _omrf_signed_harmonic_fill_endpoint!(envelope, state, flow, t, cumulative)
+    scales = envelope.component_scales!
+    context = scales.base.context
+    people, nodes = size(context.X)
+    counts = context.counts.signed_bps
+    started = time_ns()
+    allocated = _omrf_allocated_bytes()
+    _omrf_signed_prepare_flight_cache!(scales, state, flow)
+    sn, cs = sincos(t)
+    total = 0.0
+    @inbounds for node in 1:nodes, person in 1:people
+        q = context.seen[node] - 1
+        min_eta = 0.0
+        max_eta = 0.0
+        min_vel = 0.0
+        max_vel = 0.0
+        for u in 1:q
+            index = context.threshold_indices[
+                context.threshold_starts[node] + u - 1]
+            local_index = context.threshold_starts[node] + u - 1
+            offset = scales.signed_threshold_displacement[local_index] +
+                u * scales.signed_field_displacement[person, node]
+            cosine = scales.signed_threshold_cosine[local_index] +
+                u * scales.signed_field_cosine[person, node]
+            sine = scales.signed_threshold_sine[local_index] +
+                u * scales.signed_field_sine[person, node]
+            eta = offset + cosine * cs + sine * sn
+            velocity = -cosine * sn + sine * cs
+            min_eta = min(min_eta, eta)
+            max_eta = max(max_eta, eta)
+            min_vel = min(min_vel, velocity)
+            max_vel = max(max_vel, velocity)
+        end
+        total += 0.25 * (max_eta - min_eta) * (max_vel - min_vel)
+        cumulative[(node - 1) * people + person] = total
+    end
+    counts.harmonic_all_factor_point_scans += people * nodes
+    counts.endpoint_fills += 1
+    counts.endpoint_fill_seconds += (time_ns() - started) * 1e-9
+    counts.endpoint_fill_allocated_bytes += _omrf_allocated_bytes() - allocated
+    return total
+end
+
+"""Certified harmonic cell mass for the signed Boomerang research route."""
+function _omrf_signed_harmonic_fill_cell!(envelope, state, flow,
+        left, right, cumulative)
+    scales = envelope.component_scales!
+    context = scales.base.context
+    people, nodes = size(context.X)
+    total = 0.0
+    midpoint_sine, midpoint_cosine = sincos((left + right) / 2)
+    half_width = (right - left) / 2
+    @inbounds for node in 1:nodes, person in 1:people
+        q = context.seen[node] - 1
+        displacement_range = 0.0
+        velocity_range = 0.0
+        # Include the baseline category u=0, then all threshold categories.
+        for u in 1:q, v in 0:(u - 1)
+            iu = context.threshold_indices[context.threshold_starts[node] + u - 1]
+            offset_u = scales.base.coordinate_offsets[iu]
+            cosine_u = scales.base.coordinate_cosines[iu]
+            sine_u = scales.base.coordinate_sines[iu]
+            cu = (scales.signed_threshold_displacement[context.threshold_starts[node] + u - 1] +
+                u * scales.signed_field_displacement[person, node],
+                scales.signed_threshold_cosine[context.threshold_starts[node] + u - 1] +
+                u * scales.signed_field_cosine[person, node],
+                scales.signed_threshold_sine[context.threshold_starts[node] + u - 1] +
+                u * scales.signed_field_sine[person, node])
+            cv = (0.0, 0.0, 0.0)
+            if v > 0
+                iv = context.threshold_indices[context.threshold_starts[node] + v - 1]
+                cv = (scales.signed_threshold_displacement[context.threshold_starts[node] + v - 1] +
+                    v * scales.signed_field_displacement[person, node],
+                    scales.signed_threshold_cosine[context.threshold_starts[node] + v - 1] +
+                    v * scales.signed_field_cosine[person, node],
+                    scales.signed_threshold_sine[context.threshold_starts[node] + v - 1] +
+                    v * scales.signed_field_sine[person, node])
+            end
+            displacement_range = max(displacement_range,
+                _omrf_harmonic_abs_cell_bound(cu[1]-cv[1], cu[2]-cv[2], cu[3]-cv[3],
+                    midpoint_sine, midpoint_cosine, half_width))
+            velocity_range = max(velocity_range,
+                _omrf_harmonic_abs_cell_bound(0.0, cu[3]-cv[3], -(cu[2]-cv[2]),
+                    midpoint_sine, midpoint_cosine, half_width))
+        end
+        total += 0.25 * displacement_range * velocity_range
+        cumulative[(node - 1) * people + person] = total
+    end
+    return total
+end
+
+function _omrf_signed_prepare_cell!(out, envelope, state, flow, left, right)
+    scales = envelope.component_scales!
+    counts = scales.base.context.counts.signed_bps
+    cell_started = time_ns()
+    cell_allocated = _omrf_allocated_bytes()
+    generation = _omrf_signed_prepare_flight_cache!(scales, state, flow)
+    reuse_left = envelope.signed_cached_endpoint_valid &&
+        envelope.signed_cached_endpoint_generation == generation &&
+        envelope.signed_cached_endpoint_time == Float64(left)
+    harmonic_route = envelope.signed_harmonic &&
+        flow isa PDMPSamplers.AnyBoomerang
+    left_total = if harmonic_route
+        harmonic_started = time_ns()
+        harmonic_allocated = _omrf_allocated_bytes()
+        total = _omrf_signed_harmonic_fill_cell!(
+            envelope, state, flow, left, right,
+            envelope.signed_cell_cumulative_left)
+        # The harmonic certificate is constant over the closed cell.  Keep
+        # one mass distribution and expose it through both endpoint slots for
+        # the generic endpoint-mixture interface.
+        copyto!(envelope.signed_cell_cumulative_right,
+            envelope.signed_cell_cumulative_left)
+        counts.harmonic_cell_mass_constructions += 1
+        counts.harmonic_factor_masses_filled += envelope.n_persons *
+            envelope.n_nodes
+        counts.harmonic_cell_mass_seconds +=
+            (time_ns() - harmonic_started) * 1e-9
+        counts.harmonic_cell_mass_allocated_bytes +=
+            _omrf_allocated_bytes() - harmonic_allocated
+        total
+    elseif reuse_left
+        copyto!(envelope.signed_cell_cumulative_left,
+            envelope.signed_cell_cumulative_right)
+        counts.endpoint_reuses += 1
+        envelope.signed_cell_right_mass
+    else
+        _omrf_signed_fill_endpoint!(
+            envelope, state, flow, left, envelope.signed_cell_cumulative_left)
+    end
+    right_total = harmonic_route ?
+        left_total :
+        _omrf_signed_fill_endpoint!(
+            envelope, state, flow, right, envelope.signed_cell_cumulative_right)
+    envelope.signed_cell_left_mass = left_total
+    envelope.signed_cell_right_mass = right_total
+    envelope.cell_state_id = objectid(state)
+    envelope.cell_flow_type = typeof(flow)
+    envelope.cell_left = Float64(left)
+    envelope.cell_right = Float64(right)
+    envelope.cell_valid = true
+    envelope.cell_residual_left = left_total
+    envelope.cell_residual_right = right_total
+    envelope.signed_cached_endpoint_generation = generation
+    envelope.signed_cached_endpoint_time = Float64(right)
+    envelope.signed_cached_endpoint_valid = true
+    counts.cell_preparations += 1
+    counts.cell_preparation_seconds += (time_ns() - cell_started) * 1e-9
+    counts.cell_preparation_allocated_bytes +=
+        _omrf_allocated_bytes() - cell_allocated
+    # Keep the generic component vector valid for diagnostics and for code
+    # paths that inspect it, although the signed BPS hook samples factors
+    # directly from the endpoint cumulative vectors.
+    people = envelope.n_persons
+    @inbounds for node in 1:envelope.n_nodes
+        first = (node - 1) * people + 1
+        last = node * people
+        out[node] = envelope.signed_cell_cumulative_right[last] -
+            (first == 1 ? 0.0 : envelope.signed_cell_cumulative_right[first - 1])
+    end
+    return PDMPSamplers._validate_component_scales(
+        out, envelope.totals, "component cell")
+end
+
+function PDMPSamplers.component_cell_scales!(out,
+        envelope::OMRFCompactCovariateLocalEnvelope, state,
+        flow::Union{ZigZag,BouncyParticle}, left, right)
+    if envelope.signed_bps && flow isa BouncyParticle
+        return _omrf_signed_prepare_cell!(out, envelope, state, flow, left, right)
+    end
+    started = time_ns()
+    scales = envelope.component_scales!
+    scales(out, state, flow, left)
+    copyto!(envelope.cell_node_left, out)
+    copyto!(envelope.cell_term_left, scales.term_cumulative)
+    scales(out, state, flow, right)
+    copyto!(envelope.cell_node_right, out)
+    copyto!(envelope.cell_term_right, scales.term_cumulative)
+    # Retain the established closed-cell calculation for validation and for
+    # fallback diagnostics, while the residual-affine hook below exposes the
+    # tighter endpoint chord to the actual proposal clock.
+    scales(out, state, flow, left, right)
+    envelope.cell_state_id = objectid(state)
+    envelope.cell_flow_type = typeof(flow)
+    envelope.cell_left = Float64(left)
+    envelope.cell_right = Float64(right)
+    envelope.cell_valid = true
+    envelope.cell_residual_left = dot(envelope.cell_node_left,
+        envelope.totals)
+    envelope.cell_residual_right = dot(envelope.cell_node_right,
+        envelope.totals)
+    context = scales.base.context
+    context.counts.compact_cell_bound_calls += 1
+    context.counts.compact_cell_bound_seconds +=
+        (time_ns() - started) * 1e-9
+    context.counts.envelope_cell_calls += 1
+    context.counts.envelope_cell_seconds +=
+        (time_ns() - started) * 1e-9
+    return PDMPSamplers._validate_component_scales(
+        out, envelope.totals, "component cell")
+end
+
+function PDMPSamplers.component_cell_scales!(out,
+        envelope::OMRFCompactCovariateLocalEnvelope, state,
+        flow::PDMPSamplers.AnyBoomerang, left, right)
+    if envelope.signed_harmonic
+        return _omrf_signed_prepare_cell!(out, envelope, state, flow, left, right)
+    end
+    scales = envelope.component_scales!
+    # Adaptive Boomerang needs the certified harmonic closed-cell callback;
+    # the right endpoint alone is only a point bound and is not a cell roof.
+    scales(out, state, flow, left, right)
+    return PDMPSamplers._validate_component_scales(
+        out, envelope.totals, "component cell")
+end
+
+function PDMPSamplers.component_cell_scales!(out,
+        envelope::OMRFCompactCovariateLocalEnvelope,
+        state, flow::PDMPSamplers.PreconditionedDynamics, left, right)
+    if envelope.signed_bps && flow.dynamics isa BouncyParticle
+        return _omrf_signed_prepare_cell!(out, envelope, state,
+            flow, left, right)
+    end
+    throw(ArgumentError("compact preconditioned OMRF cell bounds require an explicit non-signed route"))
+end
+
+function PDMPSamplers.residual_affine_cell_bound(
+        envelope::OMRFCompactCovariateLocalEnvelope, state,
+        flow::Union{ZigZag,BouncyParticle}, left, right)
+    envelope.cell_valid || return nothing
+    envelope.cell_state_id == objectid(state) || return nothing
+    typeof(flow) === envelope.cell_flow_type || return nothing
+    envelope.cell_left == Float64(left) || return nothing
+    envelope.cell_right == Float64(right) || return nothing
+    width = envelope.cell_right - envelope.cell_left
+    width > 0 || return nothing
+    if envelope.signed_bps && flow isa BouncyParticle
+        return PDMPSamplers.ResidualAffineCell(
+            envelope.signed_cell_left_mass,
+            (envelope.signed_cell_right_mass -
+             envelope.signed_cell_left_mass) / width,
+            envelope.signed_cell_cumulative_left,
+            envelope.signed_cell_cumulative_right,
+            nothing, nothing)
+    end
+    return PDMPSamplers.ResidualAffineCell(
+        envelope.cell_residual_left,
+        (envelope.cell_residual_right - envelope.cell_residual_left) / width,
+        envelope.cell_node_left, envelope.cell_node_right,
+        envelope.cell_term_left, envelope.cell_term_right)
+end
+
+function PDMPSamplers.residual_affine_cell_bound(
+        envelope::OMRFCompactCovariateLocalEnvelope, state,
+        flow::PDMPSamplers.PreconditionedDynamics, left, right)
+    envelope.signed_bps && flow.dynamics isa BouncyParticle || return nothing
+    envelope.cell_valid || return nothing
+    envelope.cell_state_id == objectid(state) || return nothing
+    envelope.cell_left == Float64(left) || return nothing
+    envelope.cell_right == Float64(right) || return nothing
+    width = envelope.cell_right - envelope.cell_left
+    width > 0 || return nothing
+    return PDMPSamplers.ResidualAffineCell(
+        envelope.signed_cell_left_mass,
+        (envelope.signed_cell_right_mass - envelope.signed_cell_left_mass) / width,
+        envelope.signed_cell_cumulative_left,
+        envelope.signed_cell_cumulative_right, nothing, nothing)
+end
+
+function PDMPSamplers.residual_affine_cell_bound(
+        envelope::OMRFCompactCovariateLocalEnvelope, state,
+        flow::PDMPSamplers.AnyBoomerang, left, right)
+    envelope.signed_harmonic && envelope.cell_valid || return nothing
+    envelope.cell_state_id == objectid(state) || return nothing
+    envelope.cell_left == Float64(left) || return nothing
+    envelope.cell_right == Float64(right) || return nothing
+    width = envelope.cell_right - envelope.cell_left
+    width > 0 || return nothing
+    return PDMPSamplers.ResidualAffineCell(
+        envelope.signed_cell_left_mass,
+        (envelope.signed_cell_right_mass -
+         envelope.signed_cell_left_mass) / width,
+        envelope.signed_cell_cumulative_left,
+        envelope.signed_cell_cumulative_right, nothing, nothing)
+end
+
+function PDMPSamplers.screening_residual_bound(
+        envelope::OMRFCompactCovariateLocalEnvelope, state, flow, t)
+    scales = envelope.component_scales!
+    scales.prepare_person_bounds = false
+    actual_flow = flow isa PDMPSamplers.PreconditionedDynamics ?
+        flow.dynamics : flow
+    signed_route = envelope.signed_bps && actual_flow isa BouncyParticle
+    harmonic_route = envelope.signed_harmonic &&
+        actual_flow isa PDMPSamplers.AnyBoomerang
+    if harmonic_route
+        envelope.cell_valid || throw(ArgumentError(
+            "signed harmonic screening requires a prepared closed cell"))
+        objectid(state) == envelope.cell_state_id || throw(ArgumentError(
+            "signed harmonic screening cell state is stale"))
+        t >= envelope.cell_left && t <= envelope.cell_right ||
+            throw(ArgumentError("signed harmonic screening time is outside the prepared cell"))
+        total = envelope.signed_cell_right_mass
+        @inbounds for j in eachindex(envelope.screen_x, state.ξ.x)
+            displacement, velocity = _omrf_coordinate_at(
+                state, actual_flow, envelope.component_scales!.base.anchor, j, t)
+            envelope.screen_x[j] = envelope.component_scales!.base.anchor[j] + displacement
+            envelope.screen_theta[j] = velocity
+        end
+        envelope.signed_screen_valid = true
+        envelope.signed_screen_alpha = 0.0
+        envelope.screen_generation += UInt(1)
+        envelope.screen_pending = true
+        envelope.screen_time = Float64(t)
+        scales.base.context.counts.signed_bps.point_screens += 1
+        return total
+    end
+    if signed_route
+        signed_screen_started = time_ns()
+        signed_screen_allocated = _omrf_allocated_bytes()
+        same_cell = envelope.cell_valid && objectid(state) == envelope.cell_state_id &&
+            typeof(flow) === envelope.cell_flow_type &&
+            t >= envelope.cell_left && t <= envelope.cell_right &&
+            envelope.cell_right > envelope.cell_left
+        if same_cell
+            α = (t - envelope.cell_left) /
+                (envelope.cell_right - envelope.cell_left)
+            envelope.signed_screen_alpha = α
+            envelope.signed_cell_left_mass >= 0 ||
+                throw(ArgumentError("signed BPS left mass is negative"))
+            envelope.signed_cell_right_mass >= 0 ||
+                throw(ArgumentError("signed BPS right mass is negative"))
+            total = (1.0 - α) * envelope.signed_cell_left_mass +
+                α * envelope.signed_cell_right_mass
+            envelope.signed_screen_valid = true
+        else
+            total = _omrf_signed_fill_endpoint!(
+                envelope, state, flow, t, envelope.signed_screen_cumulative)
+            envelope.signed_cell_left_mass = total
+            envelope.signed_cell_right_mass = total
+            envelope.signed_screen_alpha = 0.0
+            envelope.signed_screen_valid = true
+            copyto!(envelope.signed_cell_cumulative_left,
+                envelope.signed_screen_cumulative)
+            copyto!(envelope.signed_cell_cumulative_right,
+                envelope.signed_screen_cumulative)
+        end
+        copy_started = time_ns()
+        copy_allocated = _omrf_allocated_bytes()
+        @inbounds for j in eachindex(envelope.screen_x, state.ξ.x)
+            displacement, velocity = _omrf_coordinate_at(
+                state, actual_flow, scales.base.anchor, j, t)
+            envelope.screen_x[j] = scales.base.anchor[j] + displacement
+            envelope.screen_theta[j] = velocity
+        end
+        screen_counts = scales.base.context.counts.signed_bps
+        screen_counts.screen_copy_checks += length(envelope.screen_x)
+        screen_counts.screen_copy_seconds +=
+            (time_ns() - copy_started) * 1e-9
+        screen_counts.screen_copy_allocated_bytes +=
+            _omrf_allocated_bytes() - copy_allocated
+        envelope.chord_screen = false
+        envelope.screen_generation += UInt(1)
+        envelope.screen_pending = true
+        envelope.screen_time = Float64(t)
+        screen_counts.point_screens += 1
+        screen_counts.point_screen_seconds +=
+            (time_ns() - signed_screen_started) * 1e-9
+        screen_counts.point_screen_allocated_bytes +=
+            _omrf_allocated_bytes() - signed_screen_allocated
+        return total
+    end
+    envelope.signed_screen_valid = false
+    chord = actual_flow isa Union{ZigZag,BouncyParticle} &&
+        envelope.cell_valid && objectid(state) == envelope.cell_state_id &&
+        typeof(actual_flow) === envelope.cell_flow_type &&
+        t >= envelope.cell_left && t <= envelope.cell_right &&
+        envelope.cell_right > envelope.cell_left
+    if chord
+        α = (t - envelope.cell_left) /
+            (envelope.cell_right - envelope.cell_left)
+        @inbounds for node in axes(envelope.scales, 1)
+            envelope.scales[node] = (1.0 - α) *
+                envelope.cell_node_left[node] + α *
+                envelope.cell_node_right[node]
+        end
+        envelope.chord_screen = true
+    else
+        envelope.chord_screen = false
+        scales(envelope.scales, state, actual_flow, t)
+    end
+    @inbounds for j in eachindex(envelope.screen_x, state.ξ.x)
+        displacement, velocity = _omrf_coordinate_at(
+            state, actual_flow, scales.base.anchor, j, t)
+        envelope.screen_x[j] = scales.base.anchor[j] + displacement
+        envelope.screen_theta[j] = velocity
+    end
+    cumulative = 0.0
+    @inbounds for node in axes(envelope.scales, 1)
+        cumulative += envelope.scales[node] * envelope.totals[node]
+        envelope.cumulative_masses[node] = cumulative
+    end
+    envelope.screen_generation += UInt(1)
+    envelope.screen_pending = true
+    envelope.screen_time = Float64(t)
+    return cumulative
+end
+
+PDMPSamplers.residual_sampling_generation(
+        envelope::OMRFCompactCovariateLocalEnvelope) =
+    envelope.screen_generation
+
+function PDMPSamplers.reuse_screened_residual_sampling!(
+        envelope::OMRFCompactCovariateLocalEnvelope, state, flow, t, token)
+    signed_check = envelope.signed_bps
+    check_started = signed_check ? time_ns() : 0
+    check_allocated = signed_check ? _omrf_allocated_bytes() : UInt(0)
+    envelope.screen_pending || return false
+    token == envelope.screen_generation || return false
+    @inbounds for j in eachindex(envelope.screen_x, state.ξ.x)
+        x = state.ξ.x[j]
+        θ = state.ξ.θ[j]
+        target_x = envelope.screen_x[j]
+        target_θ = envelope.screen_theta[j]
+        # The candidate is produced by the same flow integrator.  The
+        # tolerance only absorbs harmless reassociation/rounding differences;
+        # a different state or flow trajectory falls back to recomputation.
+        tol_x = 1e-12 * (1.0 + abs(target_x))
+        tol_θ = 1e-12 * (1.0 + abs(target_θ))
+        if abs(x - target_x) > tol_x || abs(θ - target_θ) > tol_θ
+            envelope.screen_pending = false
+            if signed_check
+                counts = envelope.component_scales!.base.context.counts.signed_bps
+                counts.screen_copy_checks += length(envelope.screen_x)
+                counts.screen_copy_seconds +=
+                    (time_ns() - check_started) * 1e-9
+                counts.screen_copy_allocated_bytes +=
+                    _omrf_allocated_bytes() - check_allocated
+            end
+            return false
+        end
+    end
+    envelope.screen_pending = false
+    if signed_check
+        counts = envelope.component_scales!.base.context.counts.signed_bps
+        counts.screen_copy_checks += length(envelope.screen_x)
+        counts.screen_copy_seconds += (time_ns() - check_started) * 1e-9
+        counts.screen_copy_allocated_bytes +=
+            _omrf_allocated_bytes() - check_allocated
+    end
+    return true
+end
+
+function (scales::OMRFCompactCovariateLocalScales)(out, state, flow, t)
+    started = time_ns()
+    base = scales.base
+    context = base.context
+    _cache_omrf_pattern_point_coordinates!(base, state, flow, t)
+    offsets = base.coordinate_offsets
+    velocities = base.coordinate_cosines
+    @inbounds for node in eachindex(context.seen)
+        q = context.seen[node] - 1
+        minimum_displacement = 0.0
+        maximum_displacement = 0.0
+        minimum_velocity = 0.0
+        maximum_velocity = 0.0
+        threshold_start = context.threshold_starts[node]
+        for u in 1:q
+            index = context.threshold_indices[threshold_start + u - 1]
+            displacement = offsets[index]
+            velocity = velocities[index]
+            minimum_displacement = min(minimum_displacement, displacement)
+            maximum_displacement = max(maximum_displacement, displacement)
+            minimum_velocity = min(minimum_velocity, velocity)
+            maximum_velocity = max(maximum_velocity, velocity)
+        end
+        edge_displacements = base.edge_displacements
+        edge_velocities = base.edge_velocities
+        edges = context.incident_edges[node]
+        @inbounds for k in eachindex(edges)
+            index = context.interaction_indices[edges[k]]
+            edge_displacements[k] = abs(offsets[index])
+            edge_velocities[k] = abs(velocities[index])
+        end
+        _omrf_compact_fill_node!(out, scales, node, q,
+            maximum_displacement - minimum_displacement,
+            maximum_velocity - minimum_velocity,
+            edge_displacements, edge_velocities)
+    end
+    context.counts.compact_aggregate_point_calls += 1
+    context.counts.compact_aggregate_point_seconds +=
+        (time_ns() - started) * 1e-9
+    context.counts.envelope_point_calls += 1
+    context.counts.envelope_point_seconds +=
+        (time_ns() - started) * 1e-9
+    return out
+end
+
+function (scales::OMRFCompactCovariateLocalScales)(out, state,
+        flow::Union{ZigZag,BouncyParticle}, left, right)
+    base = scales.base
+    context = base.context
+    @inbounds for node in eachindex(context.seen)
+        q = context.seen[node] - 1
+        threshold_start = context.threshold_starts[node]
+        minimum_velocity = 0.0
+        maximum_velocity = 0.0
+        A = 0.0
+        for u in 1:q, v in 0:(u - 1)
+            index = context.threshold_indices[threshold_start + u - 1]
+            displacement_left, velocity = _omrf_coordinate_at(
+                state, flow, base.anchor, index, left)
+            displacement_right, _ = _omrf_coordinate_at(
+                state, flow, base.anchor, index, right)
+            minimum_velocity = min(minimum_velocity, velocity)
+            maximum_velocity = max(maximum_velocity, velocity)
+            if v > 0
+                index = context.threshold_indices[threshold_start + v - 1]
+                other_left, _ = _omrf_coordinate_at(
+                    state, flow, base.anchor, index, left)
+                other_right, _ = _omrf_coordinate_at(
+                    state, flow, base.anchor, index, right)
+                displacement_left -= other_left
+                displacement_right -= other_right
+            end
+            A = max(A, abs(displacement_left), abs(displacement_right))
+        end
+        edge_displacements = base.edge_displacements
+        edge_velocities = base.edge_velocities
+        edges = context.incident_edges[node]
+        @inbounds for k in eachindex(edges)
+            index = context.interaction_indices[edges[k]]
+            left_displacement, velocity = _omrf_coordinate_at(
+                state, flow, base.anchor, index, left)
+            right_displacement, _ = _omrf_coordinate_at(
+                state, flow, base.anchor, index, right)
+            edge_displacements[k] = max(abs(left_displacement),
+                abs(right_displacement))
+            edge_velocities[k] = abs(velocity)
+        end
+        _omrf_compact_fill_node!(out, scales, node, q, A,
+            maximum_velocity - minimum_velocity,
+            edge_displacements, edge_velocities)
+    end
+    return out
+end
+
+function (scales::OMRFCompactCovariateLocalScales)(out, state,
+        flow::PDMPSamplers.AnyBoomerang, left, right)
+    started = time_ns()
+    base = scales.base
+    context = base.context
+    _cache_omrf_pattern_harmonic_coefficients!(base, state, flow)
+    midpoint = (left + right) / 2
+    midpoint_sine, midpoint_cosine = sincos(midpoint)
+    half_width = (right - left) / 2
+    @inbounds for node in eachindex(context.seen)
+        q = context.seen[node] - 1
+        threshold_start = context.threshold_starts[node]
+        A = 0.0
+        C = 0.0
+        for u in 1:q, v in 0:(u - 1)
+            index = context.threshold_indices[threshold_start + u - 1]
+            offset = base.coordinate_offsets[index]
+            cosine = base.coordinate_cosines[index]
+            sine = base.coordinate_sines[index]
+            if v > 0
+                index = context.threshold_indices[threshold_start + v - 1]
+                offset -= base.coordinate_offsets[index]
+                cosine -= base.coordinate_cosines[index]
+                sine -= base.coordinate_sines[index]
+            end
+            A = max(A, _omrf_harmonic_abs_cell_bound(offset, cosine, sine,
+                midpoint_sine, midpoint_cosine, half_width))
+            C = max(C, _omrf_harmonic_abs_cell_bound(0.0, sine, -cosine,
+                midpoint_sine, midpoint_cosine, half_width))
+        end
+        edge_displacements = base.edge_displacements
+        edge_velocities = base.edge_velocities
+        edges = context.incident_edges[node]
+        @inbounds for k in eachindex(edges)
+            index = context.interaction_indices[edges[k]]
+            offset = base.coordinate_offsets[index]
+            cosine = base.coordinate_cosines[index]
+            sine = base.coordinate_sines[index]
+            edge_displacements[k] = _omrf_harmonic_abs_cell_bound(
+                offset, cosine, sine, midpoint_sine, midpoint_cosine,
+                half_width)
+            edge_velocities[k] = _omrf_harmonic_abs_cell_bound(
+                0.0, sine, -cosine, midpoint_sine, midpoint_cosine,
+                half_width)
+        end
+        _omrf_compact_fill_node!(out, scales, node, q, A, C,
+            edge_displacements, edge_velocities)
+    end
+    context.counts.compact_cell_bound_calls += 1
+    context.counts.compact_cell_bound_seconds +=
+        (time_ns() - started) * 1e-9
+    context.counts.envelope_cell_calls += 1
+    context.counts.envelope_cell_seconds +=
+        (time_ns() - started) * 1e-9
+    return out
+end
+
+PDMPSamplers.n_observations(envelope::OMRFCompactCovariateLocalEnvelope) =
+    envelope.n_persons * envelope.n_nodes
+
+function PDMPSamplers.observation_residual_bound(
+        envelope::OMRFCompactCovariateLocalEnvelope, observation::Integer)
+    started = time_ns()
+    selected_allocated = envelope.signed_harmonic ?
+        _omrf_allocated_bytes() : UInt(0)
+    block0, person0 = divrem(observation - 1, envelope.n_persons)
+    node = block0 + 1
+    person = person0 + 1
+    1 <= node <= envelope.n_nodes || throw(BoundsError(
+        1:PDMPSamplers.n_observations(envelope), observation))
+    result = if envelope.signed_bps || envelope.signed_harmonic
+        envelope.signed_screen_valid || throw(ArgumentError(
+            "signed BPS factor bound requested before point screening"))
+        bound = _omrf_signed_factor_bound_coordinates(
+            envelope.component_scales!.base.context,
+            envelope.component_scales!.base.anchor,
+            envelope.screen_x, envelope.screen_theta, person, node)
+        if envelope.signed_harmonic
+            counts = envelope.component_scales!.base.context.counts.signed_bps
+            counts.harmonic_selected_point_bounds += 1
+            counts.harmonic_selected_point_seconds +=
+                (time_ns() - started) * 1e-9
+            counts.harmonic_selected_point_allocated_bytes +=
+                _omrf_allocated_bytes() - selected_allocated
+        end
+        bound
+    else
+        _omrf_compact_person_bound(envelope.component_scales!, node, person)
+    end
+    context = envelope.component_scales!.base.context
+    context.counts.compact_observation_bound_calls += 1
+    context.counts.compact_observation_bound_seconds +=
+        (time_ns() - started) * 1e-9
+    return result
+end
+
+function PDMPSamplers._draw_component(rng::Random.AbstractRNG,
+        envelope::OMRFCompactCovariateLocalEnvelope, B::Real)
+    if envelope.signed_bps || envelope.signed_harmonic
+        draw_started = time_ns()
+        draw_allocated = _omrf_allocated_bytes()
+        envelope.signed_screen_valid || throw(ArgumentError(
+            "signed BPS component draw requested before point screening"))
+        left_mass = (1.0 - envelope.signed_screen_alpha) *
+            envelope.signed_cell_left_mass
+        right_mass = envelope.signed_screen_alpha *
+            envelope.signed_cell_right_mass
+        total = left_mass + right_mass
+        if total <= 0
+            result = 1
+        elseif rand(rng) * total <= left_mass
+            u = rand(rng) * envelope.signed_cell_left_mass
+            result = min(searchsortedlast(
+                envelope.signed_cell_cumulative_left, u) + 1,
+                envelope.n_persons * envelope.n_nodes)
+        else
+            u = rand(rng) * envelope.signed_cell_right_mass
+            result = min(searchsortedlast(
+                envelope.signed_cell_cumulative_right, u) + 1,
+                envelope.n_persons * envelope.n_nodes)
+        end
+        counts = envelope.component_scales!.base.context.counts.signed_bps
+        counts.component_draws += 1
+        counts.component_draw_seconds += (time_ns() - draw_started) * 1e-9
+        counts.component_draw_allocated_bytes +=
+            _omrf_allocated_bytes() - draw_allocated
+        return result
+    end
+    u = rand(rng) * B
+    return min(searchsortedlast(envelope.cumulative_masses, u) + 1,
+        envelope.n_nodes)
+end
+
+@inline function _omrf_compact_search_term(cumulative::Matrix{Float64},
+        node::Int, n_terms::Int, u::Float64)
+    left = 1
+    right = n_terms
+    while left < right
+        middle = (left + right) >>> 1
+        if cumulative[node, middle] < u
+            left = middle + 1
+        else
+            right = middle
+        end
+    end
+    return left
+end
+
+function PDMPSamplers._draw_distinguished(rng::Random.AbstractRNG,
+        envelope::OMRFCompactCovariateLocalEnvelope, node::Int)
+    if envelope.signed_bps || envelope.signed_harmonic
+        envelope.signed_screen_valid || throw(ArgumentError(
+            "signed BPS distinguished draw requested before point screening"))
+        return node
+    end
+    scales = envelope.component_scales!
+    context = scales.base.context
+    static = scales.static
+    if envelope.chord_screen
+        # The point screen only needs node totals.  Build the selected node's
+        # term cumulative masses lazily, after component selection, so the
+        # roof loop does not repeat the O(P^3) term traversal.
+        α = clamp(envelope.screen_time - envelope.cell_left,
+            0.0, envelope.cell_right - envelope.cell_left) /
+            (envelope.cell_right - envelope.cell_left)
+        n_terms = static.term_count[node]
+        @inbounds for term in 1:n_terms
+            scales.term_cumulative[node, term] =
+                (1.0 - α) * envelope.cell_term_left[node, term] +
+                α * envelope.cell_term_right[node, term]
+        end
+        envelope.chord_screen = false
+    end
+    selection_started = time_ns()
+    total = envelope.scales[node]
+    u = rand(rng) * total
+    term = _omrf_compact_search_term(scales.term_cumulative, node,
+        static.term_count[node], u)
+    context.counts.compact_term_selection_calls += 1
+    context.counts.compact_term_selection_seconds +=
+        (time_ns() - selection_started) * 1e-9
+    person_started = time_ns()
+    kind = static.term_kind[node, term]
+    person = if kind == 0x01
+        rand(rng, 1:envelope.n_persons)
+    elseif kind == 0x02
+        table = static.covariate_aliases[static.term_k[node, term]]
+        table === nothing ? rand(rng, 1:envelope.n_persons) : rand(rng, table)
+    elseif kind == 0x03
+        table = static.covariate_aliases[static.term_l[node, term]]
+        table === nothing ? rand(rng, 1:envelope.n_persons) : rand(rng, table)
+    else
+        table = static.cross_aliases[static.term_k[node, term],
+            static.term_l[node, term]]
+        table === nothing ? rand(rng, 1:envelope.n_persons) : rand(rng, table)
+    end
+    context.counts.compact_person_selection_calls += 1
+    context.counts.compact_person_selection_seconds +=
+        (time_ns() - person_started) * 1e-9
+    return (node - 1) * envelope.n_persons + person
 end
 
 """Certified node-local scales for the damped categorical HCV remainder."""
@@ -2044,6 +5106,60 @@ function (scales::OMRFNormLocalScales)(out, state, flow, t)
 end
 
 function (scales::OMRFNormLocalScales)(out, state,
+        flow::PDMPSamplers.AnyBoomerang, t)
+    # Every node uses the same harmonic phase.  Compute sin/cos and each
+    # coordinate's displacement/velocity once, then reuse interaction
+    # coordinates at both incident nodes.  This is algebraically identical to
+    # `_omrf_norm_node_terms_at` and changes only repeated arithmetic.
+    s, c = sincos(t)
+    displacement = scales.coordinate_displacements
+    velocity = scales.coordinate_velocities
+    @inbounds for index in eachindex(scales.anchor)
+        if _omrf_coordinate_free(state, index)
+            centered = state.ξ.x[index] - flow.μ[index]
+            displacement[index] = flow.μ[index] - scales.anchor[index] +
+                centered * c + state.ξ.θ[index] * s
+            velocity[index] = -centered * s + state.ξ.θ[index] * c
+        else
+            displacement[index] = state.ξ.x[index] - scales.anchor[index]
+            velocity[index] = 0.0
+        end
+    end
+    context = scales.context
+    P = length(context.seen)
+    @inbounds for node in 1:P
+        q = context.seen[node] - 1
+        if iszero(q)
+            _fill_omrf_norm_scales!(out, node, P, 0.0, 0.0, 0.0, 0.0)
+            continue
+        end
+        minimum_threshold = 0.0
+        maximum_threshold = 0.0
+        threshold_velocity = 0.0
+        threshold_start = context.threshold_starts[node]
+        for u in 1:q
+            index = context.threshold_indices[threshold_start + u - 1]
+            value = displacement[index]
+            minimum_threshold = min(minimum_threshold, value)
+            maximum_threshold = max(maximum_threshold, value)
+            threshold_velocity += abs(velocity[index])
+        end
+        edge_displacement2 = 0.0
+        edge_velocity2 = 0.0
+        for edge in context.incident_edges[node]
+            index = context.interaction_indices[edge]
+            edge_displacement2 += displacement[index]^2
+            edge_velocity2 += velocity[index]^2
+        end
+        _fill_omrf_norm_scales!(out, node, P,
+            maximum_threshold - minimum_threshold,
+            q * sqrt(edge_displacement2), threshold_velocity,
+            q * sqrt(edge_velocity2))
+    end
+    return out
+end
+
+function (scales::OMRFNormLocalScales)(out, state,
         flow::Union{ZigZag,BouncyParticle}, left, right)
     P = length(scales.context.seen)
     @inbounds for node in 1:P
@@ -2057,6 +5173,82 @@ function (scales::OMRFNormLocalScales)(out, state,
     return out
 end
 
+function _omrf_compact_hcv_node_terms_at(
+        scales::OMRFCompactHCVNormLocalScales,
+        state, flow, node::Int, t)
+    context = scales.context
+    q = context.seen[node] - 1
+    iszero(q) && return 0.0, 0.0, 0.0, 0.0
+    threshold_start = context.threshold_starts[node]
+    minimum_displacement = 0.0
+    maximum_displacement = 0.0
+    minimum_velocity = 0.0
+    maximum_velocity = 0.0
+    @inbounds for u in 1:q
+        index = context.threshold_indices[threshold_start + u - 1]
+        displacement, velocity = _omrf_coordinate_at(
+            state, flow, scales.anchor, index, t)
+        minimum_displacement = min(minimum_displacement, displacement)
+        maximum_displacement = max(maximum_displacement, displacement)
+        minimum_velocity = min(minimum_velocity, velocity)
+        maximum_velocity = max(maximum_velocity, velocity)
+    end
+    edge_displacement2 = 0.0
+    edge_velocity2 = 0.0
+    @inbounds for edge in context.incident_edges[node]
+        index = context.interaction_indices[edge]
+        displacement, velocity = _omrf_coordinate_at(
+            state, flow, scales.anchor, index, t)
+        edge_displacement2 += displacement * displacement
+        edge_velocity2 += velocity * velocity
+    end
+    A = maximum_displacement - minimum_displacement
+    C = maximum_velocity - minimum_velocity
+    return A, C, sqrt(edge_displacement2), sqrt(edge_velocity2)
+end
+
+@inline function _fill_omrf_compact_hcv_scales!(
+        out, node, P, q, A, C, D, V)
+    qD = q * D
+    qV = q * V
+    out[node] = C * A * A / 8
+    out[P + node] = (2 * C * A * qD + qV * A * A) / 8
+    out[2P + node] = (C * qD * qD + 2 * qV * A * qD) / 8
+    out[3P + node] = qV * qD * qD / 8
+    return nothing
+end
+
+function (scales::OMRFCompactHCVNormLocalScales)(out, state,
+        flow::Union{ZigZag,BouncyParticle}, t)
+    P = length(scales.context.seen)
+    @inbounds for node in 1:P
+        A, C, D, V = _omrf_compact_hcv_node_terms_at(
+            scales, state, flow, node, t)
+        _fill_omrf_compact_hcv_scales!(out, node, P,
+            scales.context.seen[node] - 1, A, C, D, V)
+    end
+    return out
+end
+
+function (scales::OMRFCompactHCVNormLocalScales)(out, state,
+        flow::Union{ZigZag,BouncyParticle}, left, right)
+    P = length(scales.context.seen)
+    @inbounds for node in 1:P
+        Al, C, Dl, V = _omrf_compact_hcv_node_terms_at(
+            scales, state, flow, node, left)
+        Ar, _, Dr, _ = _omrf_compact_hcv_node_terms_at(
+            scales, state, flow, node, right)
+        _fill_omrf_compact_hcv_scales!(out, node, P,
+            scales.context.seen[node] - 1,
+            max(Al, Ar), C, max(Dl, Dr), V)
+    end
+    return out
+end
+
+@inline (scales::OMRFCompactHCVNormLocalScales)(out, state,
+    flow::PDMPSamplers.PreconditionedDynamics, args...) =
+    scales(out, state, flow.dynamics, args...)
+
 function (scales::OMRFNormLocalScales)(out, state,
         flow::PDMPSamplers.AnyBoomerang, left, right)
     context = scales.context
@@ -2068,7 +5260,7 @@ function (scales::OMRFNormLocalScales)(out, state,
             continue
         end
         threshold_start = context.threshold_starts[node]
-        threshold_coefficients = Vector{NTuple{3,Float64}}(undef, q + 1)
+        threshold_coefficients = scales.threshold_coefficients
         threshold_coefficients[1] = (0.0, 0.0, 0.0)
         C = 0.0
         for u in 1:q
@@ -2285,6 +5477,7 @@ end
 function (scales::OMRFCovariateLocalScales)(out, state,
         flow::PDMPSamplers.AnyBoomerang, left, right)
     context = scales.context
+    cell_started = time_ns()
     _cache_omrf_pattern_harmonic_coefficients!(scales, state, flow)
     midpoint = (left + right) / 2
     midpoint_sine, midpoint_cosine = sincos(midpoint)
@@ -2334,6 +5527,8 @@ function (scales::OMRFCovariateLocalScales)(out, state,
         destination = _fill_omrf_covariate_node_scales!(out, destination, q,
             A, C, edge_displacements, edge_velocities, degree)
     end
+    context.counts.envelope_cell_calls += 1
+    context.counts.envelope_cell_seconds += (time_ns() - cell_started) * 1e-9
     return out
 end
 
@@ -2345,52 +5540,274 @@ end
     flow::PDMPSamplers.PreconditionedDynamics, args...) =
     scales(out, state, flow.dynamics, args...)
 
-function _omrf_pattern_scale_at(scales::OMRFPatternLocalScales,
-        state, flow, component::Int, t)
-    context = scales.context
-    node = scales.component_nodes[component]
-    q = context.seen[node] - 1
-    iszero(q) && return 0.0
-    threshold_start = context.threshold_starts[node]
-    field_displacement = 0.0
-    field_velocity = 0.0
-    weighted_edge_velocity = 0.0
+function _build_omrf_pattern_packed_metadata(
+        component_nodes::Vector{Int}, component_covariates::Matrix{Int},
+        context::OMRFResidualContext)
+    n_nodes = length(context.seen)
+    n_components = length(component_nodes)
+    node_component_starts = Vector{Int}(undef, n_nodes)
+    node_component_ends = Vector{Int}(undef, n_nodes)
+    node_edge_starts = Vector{Int}(undef, n_nodes)
+    node_edge_ends = Vector{Int}(undef, n_nodes)
+    n_edges = sum(length, context.incident_edges)
+    node_edge_indices = Vector{Int}(undef, n_edges)
+    component_edge_offsets = Vector{Int}(undef, n_components + 1)
+    component_edge_count = sum(
+        length(context.incident_edges[component_nodes[component]])
+        for component in eachindex(component_nodes))
+    component_edge_covariates = Vector{Int}(undef, component_edge_count)
+
+    edge_destination = 1
+    component_edge_destination = 1
+    @inbounds for node in 1:n_nodes
+        first_component = findfirst(==(node), component_nodes)
+        last_component = findlast(==(node), component_nodes)
+        if first_component === nothing
+            node_component_starts[node] = 1
+            node_component_ends[node] = 0
+        else
+            node_component_starts[node] = first_component
+            node_component_ends[node] = last_component
+            all(==(node), view(component_nodes, first_component:last_component)) ||
+                throw(ArgumentError(
+                    "OMRF pattern components must be contiguous by node"))
+        end
+
+        edges = context.incident_edges[node]
+        node_edge_starts[node] = edge_destination
+        for edge in edges
+            node_edge_indices[edge_destination] =
+                context.interaction_indices[edge]
+            edge_destination += 1
+        end
+        node_edge_ends[node] = edge_destination - 1
+
+        if first_component !== nothing
+            for component in first_component:last_component
+                component_edge_offsets[component] = component_edge_destination
+                for k in eachindex(edges)
+                    component_edge_covariates[component_edge_destination] =
+                        component_covariates[
+                            component, context.incident_neighbours[node][k]]
+                    component_edge_destination += 1
+                end
+            end
+        end
+    end
+    component_edge_offsets[n_components + 1] = component_edge_destination
+    return node_component_starts, node_component_ends,
+        node_edge_starts, node_edge_ends, node_edge_indices,
+        component_edge_offsets, component_edge_covariates
+end
+
+@inline function _omrf_active_pattern_hash(
+        context::OMRFResidualContext, node::Int, person::Int,
+        free::BitVector)
+    hash = UInt64(1469598103934665603)
     @inbounds for k in eachindex(context.incident_edges[node])
-        covariate = scales.component_covariates[
-            component, context.incident_neighbours[node][k]]
-        iszero(covariate) && continue
-        edge_index = context.interaction_indices[context.incident_edges[node][k]]
-        displacement, velocity = _omrf_coordinate_at(
-            state, flow, scales.anchor, edge_index, t)
-        field_displacement += covariate * displacement
-        field_velocity += covariate * velocity
-        weighted_edge_velocity += covariate * abs(velocity)
+        edge = context.incident_edges[node][k]
+        index = context.interaction_indices[edge]
+        free[index] || continue
+        hash ⊻= UInt64(context.X[person,
+            context.incident_neighbours[node][k]] + 1)
+        hash *= UInt64(1099511628211)
     end
-    minimum_logit = 0.0
-    maximum_logit = 0.0
-    minimum_logit_velocity = 0.0
-    maximum_logit_velocity = 0.0
-    threshold_velocity = 0.0
-    @inbounds for u in 1:q
-        index = context.threshold_indices[threshold_start + u - 1]
-        displacement, velocity = _omrf_coordinate_at(
-            state, flow, scales.anchor, index, t)
-        logit = displacement + u * field_displacement
-        minimum_logit = min(minimum_logit, logit)
-        maximum_logit = max(maximum_logit, logit)
-        logit_velocity = velocity + u * field_velocity
-        minimum_logit_velocity = min(minimum_logit_velocity, logit_velocity)
-        maximum_logit_velocity = max(maximum_logit_velocity, logit_velocity)
-        threshold_velocity += abs(velocity)
+    return hash
+end
+
+@inline function _omrf_active_pattern_equal(
+        context::OMRFResidualContext, node::Int, person::Int,
+        representative::Int, free::BitVector)
+    @inbounds for k in eachindex(context.incident_edges[node])
+        edge = context.incident_edges[node][k]
+        index = context.interaction_indices[edge]
+        free[index] || continue
+        neighbour = context.incident_neighbours[node][k]
+        context.X[person, neighbour] == context.X[representative, neighbour] ||
+            return false
     end
-    velocity_range = if flow isa ZigZag
-        # Coordinatewise Zig-Zag rates require an L1 bound; signed
-        # directional cancellation is available only to scalar-rate flows.
-        threshold_velocity + q * weighted_edge_velocity
+    return true
+end
+
+function _rebuild_omrf_active_pattern!(scales::OMRFPatternLocalScales)
+    _rebuild_omrf_active_pattern!(scales, false)
+end
+
+function _rebuild_omrf_active_pattern!(scales::OMRFPatternLocalScales,
+        use_all_free::Bool)
+    started = time_ns()
+    context = scales.context
+    free = use_all_free ? scales.active_all_free : context.active_free
+    groups = scales.active_groups::Matrix{Int}
+    members = scales.active_members::Vector{Vector{Int}}
+    totals = scales.active_totals::Vector{Float64}
+    X = context.X
+    N, P = size(X)
+    fill!(totals, 0.0)
+    @inbounds for member in members
+        empty!(member)
+    end
+
+    epoch = scales.active_hash_epoch
+    component_base = 0
+    component_edge_destination = 1
+    factorized = context.factorization === :person_node
+
+    @inbounds for node in 1:P
+        epoch = epoch == typemax(Int) ? 1 : epoch + 1
+        epoch == 1 && fill!(scales.active_hash_stamps, 0)
+        first_component = component_base + 1
+        group_count = 0
+        for person in 1:N
+            key = _omrf_active_pattern_hash(context, node, person, free)
+            slot = Int(key & UInt64(length(scales.active_hash_keys) - 1)) + 1
+            local_group = 0
+            while scales.active_hash_stamps[slot] == epoch
+                if scales.active_hash_keys[slot] == key
+                    candidate = scales.active_hash_values[slot]
+                    representative = scales.active_representatives[candidate]
+                    if _omrf_active_pattern_equal(
+                            context, node, person, representative, free)
+                        local_group = candidate
+                        break
+                    end
+                end
+                slot = slot == length(scales.active_hash_keys) ? 1 : slot + 1
+            end
+            if iszero(local_group)
+                group_count += 1
+                local_group = group_count
+                scales.active_hash_stamps[slot] = epoch
+                scales.active_hash_keys[slot] = key
+                scales.active_hash_values[slot] = local_group
+                scales.active_representatives[local_group] = person
+                component = component_base + local_group
+                scales.component_nodes[component] = node
+                for column in axes(scales.component_covariates, 2)
+                    scales.component_covariates[component, column] = 0
+                end
+                for k in eachindex(context.incident_edges[node])
+                    edge = context.incident_edges[node][k]
+                    index = context.interaction_indices[edge]
+                    free[index] || continue
+                    neighbour = context.incident_neighbours[node][k]
+                    scales.component_covariates[component, neighbour] =
+                        X[person, neighbour]
+                end
+            end
+            component = component_base + local_group
+            observation = factorized ? (node - 1) * N + person : person
+            partition = factorized ? 1 : node
+            groups[partition, observation] = component
+            push!(members[component], observation)
+            totals[component] += 1.0
+        end
+
+        node_component_starts = first_component
+        node_component_ends = component_base + group_count
+        scales.node_component_starts[node] = node_component_starts
+        scales.node_component_ends[node] = node_component_ends
+        edges = context.incident_edges[node]
+        for component in node_component_starts:node_component_ends
+            scales.component_edge_offsets[component] =
+                component_edge_destination
+            for k in eachindex(edges)
+                edge = edges[k]
+                index = context.interaction_indices[edge]
+                scales.component_edge_covariates[component_edge_destination] =
+                    free[index] ? scales.component_covariates[
+                        component, context.incident_neighbours[node][k]] : 0
+                component_edge_destination += 1
+            end
+        end
+        component_base = node_component_ends
+    end
+    scales.component_edge_offsets[component_base + 1] =
+        component_edge_destination
+    scales.active_component_count = component_base
+    scales.active_hash_epoch = epoch
+    scales.active_generation = context.active_generation
+    scales.active_effective_full = use_all_free
+    context.active_rebuilds += 1
+    context.active_rebuild_seconds += (time_ns() - started) * 1e-9
+    context.active_group_count_sum += component_base
+    if context.active_rebuilds == 1
+        context.active_group_count_min = component_base
+        context.active_group_count_max = component_base
     else
-        maximum_logit_velocity - minimum_logit_velocity
+        context.active_group_count_min = min(
+            context.active_group_count_min, component_base)
+        context.active_group_count_max = max(
+            context.active_group_count_max, component_base)
     end
-    return 0.25 * (maximum_logit - minimum_logit) * velocity_range
+    return nothing
+end
+
+@inline function _ensure_omrf_active_pattern!(
+        scales::OMRFPatternLocalScales)
+    scales.active_compression || return nothing
+    context = scales.context
+    scales.active_generation == context.active_generation ||
+        _rebuild_omrf_active_pattern!(scales)
+    return nothing
+end
+
+@inline function _omrf_active_pattern_requires_full(
+        scales::OMRFPatternLocalScales, state)
+    state isa StickyPDMPState || return false
+    context = scales.context
+    @inbounds for index in context.interaction_indices
+        !state.free[index] && state.ξ.x[index] != scales.anchor[index] &&
+            return true
+    end
+    return false
+end
+
+@inline function _ensure_omrf_active_pattern!(
+        scales::OMRFPatternLocalScales, state)
+    scales.active_compression || return nothing
+    context = scales.context
+    use_all_free = _omrf_active_pattern_requires_full(scales, state)
+    if scales.active_generation != context.active_generation ||
+            scales.active_effective_full != use_all_free
+        _rebuild_omrf_active_pattern!(scales, use_all_free)
+    end
+    return nothing
+end
+
+function _attach_omrf_active_pattern!(
+        envelope::PDMPSamplers.GroupedResidualEnvelope,
+        scales::OMRFPatternLocalScales)
+    scales.active_groups = envelope.groups
+    scales.active_members = envelope.members
+    scales.active_totals = envelope.totals
+    N = size(scales.context.X, 1)
+    @inbounds for member in envelope.members
+        sizehint!(member, N)
+    end
+    return envelope
+end
+
+function PDMPSamplers.set_active_set!(
+        scales::OMRFPatternLocalScales, free::BitVector)
+    scales.active_compression || return nothing
+    context = scales.context
+    length(free) == length(context.active_free) || throw(DimensionMismatch(
+        "active OMRF set has the wrong dimension"))
+    changed = false
+    @inbounds for index in eachindex(free, context.active_free)
+        changed |= free[index] != context.active_free[index]
+    end
+    changed || return nothing
+    copyto!(context.active_free, free)
+    context.active_generation += 1
+    return nothing
+end
+
+function PDMPSamplers.set_active_set!(
+        envelope::PDMPSamplers.GroupedResidualEnvelope, free::BitVector)
+    PDMPSamplers.set_active_set!(envelope.component_scales!, free)
+    return nothing
 end
 
 function _cache_omrf_pattern_point_coordinates!(
@@ -2467,22 +5884,21 @@ function _cache_omrf_pattern_point_coordinates!(
     return nothing
 end
 
-function _omrf_pattern_scale_cached(scales::OMRFPatternLocalScales,
-        flow, component::Int)
+@inline function _omrf_pattern_zigzag_scale(
+        scales::OMRFPatternLocalScales, component::Int,
+        q::Int, threshold_start::Int, node_edge_start::Int,
+        node_edge_end::Int, displacements, velocities)
     context = scales.context
-    node = scales.component_nodes[component]
-    q = context.seen[node] - 1
-    iszero(q) && return 0.0
-    displacements = scales.coordinate_offsets
-    velocities = scales.coordinate_cosines
     field_displacement = 0.0
     field_velocity = 0.0
     weighted_edge_velocity = 0.0
-    @inbounds for k in eachindex(context.incident_edges[node])
-        covariate = scales.component_covariates[
-            component, context.incident_neighbours[node][k]]
+    component_edge_start = scales.component_edge_offsets[component]
+    @inbounds for edge_position in node_edge_start:node_edge_end
+        k = edge_position - node_edge_start + 1
+        covariate = scales.component_edge_covariates[
+            component_edge_start + k - 1]
         iszero(covariate) && continue
-        index = context.interaction_indices[context.incident_edges[node][k]]
+        index = scales.node_edge_indices[edge_position]
         field_displacement += covariate * displacements[index]
         field_velocity += covariate * velocities[index]
         weighted_edge_velocity += covariate * abs(velocities[index])
@@ -2492,7 +5908,6 @@ function _omrf_pattern_scale_cached(scales::OMRFPatternLocalScales,
     minimum_logit_velocity = 0.0
     maximum_logit_velocity = 0.0
     threshold_velocity = 0.0
-    threshold_start = context.threshold_starts[node]
     @inbounds for u in 1:q
         index = context.threshold_indices[threshold_start + u - 1]
         logit = displacements[index] + u * field_displacement
@@ -2503,12 +5918,42 @@ function _omrf_pattern_scale_cached(scales::OMRFPatternLocalScales,
         maximum_logit_velocity = max(maximum_logit_velocity, logit_velocity)
         threshold_velocity += abs(velocities[index])
     end
-    velocity_range = if flow isa ZigZag
-        threshold_velocity + q * weighted_edge_velocity
-    else
-        maximum_logit_velocity - minimum_logit_velocity
+    return 0.25 * (maximum_logit - minimum_logit) *
+        (threshold_velocity + q * weighted_edge_velocity)
+end
+
+@inline function _omrf_pattern_bouncy_scale(
+        scales::OMRFPatternLocalScales, component::Int,
+        q::Int, threshold_start::Int, node_edge_start::Int,
+        node_edge_end::Int, displacements, velocities)
+    context = scales.context
+    field_displacement = 0.0
+    field_velocity = 0.0
+    component_edge_start = scales.component_edge_offsets[component]
+    @inbounds for edge_position in node_edge_start:node_edge_end
+        k = edge_position - node_edge_start + 1
+        covariate = scales.component_edge_covariates[
+            component_edge_start + k - 1]
+        iszero(covariate) && continue
+        index = scales.node_edge_indices[edge_position]
+        field_displacement += covariate * displacements[index]
+        field_velocity += covariate * velocities[index]
     end
-    return 0.25 * (maximum_logit - minimum_logit) * velocity_range
+    minimum_logit = 0.0
+    maximum_logit = 0.0
+    minimum_logit_velocity = 0.0
+    maximum_logit_velocity = 0.0
+    @inbounds for u in 1:q
+        index = context.threshold_indices[threshold_start + u - 1]
+        logit = displacements[index] + u * field_displacement
+        minimum_logit = min(minimum_logit, logit)
+        maximum_logit = max(maximum_logit, logit)
+        logit_velocity = velocities[index] + u * field_velocity
+        minimum_logit_velocity = min(minimum_logit_velocity, logit_velocity)
+        maximum_logit_velocity = max(maximum_logit_velocity, logit_velocity)
+    end
+    return 0.25 * (maximum_logit - minimum_logit) *
+        (maximum_logit_velocity - minimum_logit_velocity)
 end
 
 @inline function _omrf_person_pattern_bound_at(context::OMRFResidualContext,
@@ -2602,8 +6047,117 @@ end
         velocity_range
 end
 
+@inline function _omrf_add_person_node_zigzag_bounds!(
+        context::OMRFResidualContext, out, state, flow,
+        anchor, person::Int, node::Int, t)
+    q = context.seen[node] - 1
+    iszero(q) && return nothing
+    field_displacement = 0.0
+    @inbounds for k in eachindex(context.incident_edges[node])
+        covariate = context.X[person,
+            context.incident_neighbours[node][k]]
+        edge_index = context.interaction_indices[
+            context.incident_edges[node][k]]
+        displacement, _ = _omrf_coordinate_at(
+            state, flow, anchor, edge_index, t)
+        field_displacement += covariate * displacement
+    end
+    minimum_logit = 0.0
+    maximum_logit = 0.0
+    threshold_start = context.threshold_starts[node]
+    @inbounds for u in 1:q
+        index = context.threshold_indices[threshold_start + u - 1]
+        displacement, _ = _omrf_coordinate_at(
+            state, flow, anchor, index, t)
+        logit = displacement + u * field_displacement
+        minimum_logit = min(minimum_logit, logit)
+        maximum_logit = max(maximum_logit, logit)
+    end
+    coordinate_scale = 0.25 * (maximum_logit - minimum_logit)
+    @inbounds for u in 1:q
+        index = context.threshold_indices[threshold_start + u - 1]
+        out[index] += coordinate_scale
+    end
+    @inbounds for k in eachindex(context.incident_edges[node])
+        covariate = context.X[person,
+            context.incident_neighbours[node][k]]
+        edge_index = context.interaction_indices[
+            context.incident_edges[node][k]]
+        out[edge_index] += coordinate_scale * q * abs(covariate)
+    end
+    return nothing
+end
+
+@inline function _omrf_exact_selected_residual_abs_rate(
+        state, residual, flow::PDMPSamplers.PreconditionedDynamics,
+        touched_positions)
+    return _omrf_exact_selected_residual_abs_rate(
+        state, residual, flow.dynamics, touched_positions)
+end
+
+@inline function _omrf_exact_selected_residual_abs_rate(
+        state, residual, ::ZigZag, touched_positions)
+    result = 0.0
+    @inbounds for index in touched_positions
+        result += abs(state.ξ.θ[index] * residual[index])
+    end
+    return result
+end
+
+@inline function _omrf_exact_selected_residual_abs_rate(
+        state, residual,
+        ::Union{BouncyParticle,PDMPSamplers.AnyBoomerang},
+        touched_positions)
+    result = 0.0
+    @inbounds for index in touched_positions
+        result += state.ξ.θ[index] * residual[index]
+    end
+    return abs(result)
+end
+
+function _omrf_prepare_exact_selected_residual!(
+        oracle::OMRFAnalyticSubsamplingOracle, state, subset)
+    oracle.ctx.counts.selected_refinement_calls += 1
+    fill!(oracle.cached_residual, 0.0)
+    oracle(oracle.cached_residual, state.ξ.x, subset, oracle.anchor)
+    # Keep this workspace private to the bound calculation.  Passing it back
+    # through the generic candidate-evaluation cache is unsafe when the
+    # provider is wrapped with statistics and/or an anchor-bank adapter: the
+    # live subset/touched-position state can be changed before the handoff is
+    # consumed.  The ordinary candidate path recomputes the selected residual
+    # below, preserving the certified bound without sharing mutable state.
+    oracle.cached_residual_valid = false
+    return nothing
+end
+
+function PDMPSamplers.subsampling_subset_bound(
+        oracle::OMRFAnalyticSubsamplingOracle, state, gradient, flow,
+        D, M, subset, scale)
+    oracle.exact_selected_refinement || return PDMPSamplers._signed_subset_bound(
+        state, gradient, flow, D, M)
+    supported_flow = flow isa Union{ZigZag,BouncyParticle,
+        PDMPSamplers.AnyBoomerang,PDMPSamplers.PreconditionedDynamics}
+    supported_flow || return PDMPSamplers._signed_subset_bound(
+        state, gradient, flow, D, M)
+    _omrf_prepare_exact_selected_residual!(oracle, state, subset)
+    residual_rate_bound = scale *
+        _omrf_exact_selected_residual_abs_rate(
+            state, oracle.cached_residual, flow,
+            oracle.residual_context.touched_positions)
+    deterministic_actual = λ(state, gradient, flow)
+    return min(M, deterministic_actual + residual_rate_bound)
+end
+
+function PDMPSamplers.subsampling_cached_residual!(
+        oracle::OMRFAnalyticSubsamplingOracle, out, state, subset, anchor)
+    oracle.cached_residual_valid || return false
+    copyto!(out, oracle.cached_residual)
+    oracle.cached_residual_valid = false
+    return true
+end
+
 function PDMPSamplers.subsampling_residual_subset_bound(
-        oracle::OMRFAnalyticSubsamplingOracle, state, flow,
+        oracle::OMRFAnalyticSubsamplingOracle, state, gradient, flow,
         D, M, subset, scale)
     if isfinite(oracle.lazy_residual_subset_bound)
         bound = D + oracle.lazy_residual_subset_bound
@@ -2611,9 +6165,50 @@ function PDMPSamplers.subsampling_residual_subset_bound(
         return min(M, bound)
     end
     context = oracle.residual_context
-    factor_pattern_dynamics = flow isa Union{ZigZag,BouncyParticle} ||
+    if context.node_box_first_order
+        _omrf_prepare_exact_selected_residual!(oracle, state, subset)
+        residual_rate_bound = scale *
+            _omrf_exact_selected_residual_abs_rate(
+                state, oracle.cached_residual, flow,
+                context.touched_positions)
+        return min(M, D + residual_rate_bound)
+    end
+    zigzag = flow isa ZigZag ||
         (flow isa PDMPSamplers.PreconditionedDynamics &&
-         flow.dynamics isa Union{ZigZag,BouncyParticle})
+         flow.dynamics isa ZigZag)
+    if context.zigzag_sign_aware && zigzag && !context.use_hcv &&
+            gradient !== nothing
+        fill!(context.signed_coordinate_bounds, 0.0)
+        N = size(context.X, 1)
+        if context.factorization === :person
+            @inbounds for person in subset, node in eachindex(context.seen)
+                _omrf_add_person_node_zigzag_bounds!(context,
+                    context.signed_coordinate_bounds, state, flow,
+                    oracle.anchor, person, node, 0.0)
+            end
+        else
+            @inbounds for factor in subset
+                node0, person0 = divrem(factor - 1, N)
+                _omrf_add_person_node_zigzag_bounds!(context,
+                    context.signed_coordinate_bounds, state, flow,
+                    oracle.anchor, person0 + 1, node0 + 1, 0.0)
+            end
+        end
+        bound = D
+        @inbounds for index in eachindex(context.signed_coordinate_bounds)
+            residual_bound = scale *
+                context.signed_coordinate_bounds[index]
+            signed_deterministic = state.ξ.θ[index] * gradient[index]
+            bound += max(0.0, signed_deterministic + residual_bound) -
+                max(0.0, signed_deterministic)
+        end
+        return min(M, bound)
+    end
+    factor_pattern_dynamics = flow isa Union{
+        ZigZag,BouncyParticle,PDMPSamplers.AnyBoomerang} ||
+        (flow isa PDMPSamplers.PreconditionedDynamics &&
+         flow.dynamics isa Union{ZigZag,BouncyParticle,
+             PDMPSamplers.AnyBoomerang})
     if factor_pattern_dynamics && context.factorization === :person_node &&
             !context.use_hcv
         N = size(context.X, 1)
@@ -2642,26 +6237,360 @@ function PDMPSamplers.subsampling_residual_subset_bound(
     return D + residual_bound
 end
 
-function (scales::OMRFPatternLocalScales)(out, state, flow, t)
+PDMPSamplers.needs_subsampling_residual_gradient(
+    oracle::OMRFAnalyticSubsamplingOracle) =
+    oracle.residual_context.zigzag_sign_aware
+
+function PDMPSamplers.subsampling_residual_subset_bound(
+        oracle::OMRFAnalyticSubsamplingOracle, state, flow,
+        D, M, subset, scale)
+    return PDMPSamplers.subsampling_residual_subset_bound(
+        oracle, state, nothing, flow, D, M, subset, scale)
+end
+
+function _cache_omrf_pattern_linear_cell_coordinates!(
+        scales::OMRFPatternLocalScales, state,
+        flow::Union{ZigZag,BouncyParticle}, left, right)
+    left_offsets = scales.cell_left_offsets
+    right_offsets = scales.cell_right_offsets
+    velocities = scales.cell_velocities
+    context = scales.context
+    @inbounds for index in context.threshold_indices
+        left_offsets[index], velocity = _omrf_coordinate_at(
+            state, flow, scales.anchor, index, left)
+        right_offsets[index], _ = _omrf_coordinate_at(
+            state, flow, scales.anchor, index, right)
+        velocities[index] = velocity
+    end
+    @inbounds for index in context.interaction_indices
+        left_offsets[index], velocity = _omrf_coordinate_at(
+            state, flow, scales.anchor, index, left)
+        right_offsets[index], _ = _omrf_coordinate_at(
+            state, flow, scales.anchor, index, right)
+        velocities[index] = velocity
+    end
+    return nothing
+end
+
+function _cache_omrf_pattern_point_coordinates!(
+        scales::OMRFPatternLocalScales, state,
+        flow::Union{ZigZag,BouncyParticle}, t)
+    context = scales.context
+    displacements = scales.coordinate_offsets
+    velocities = scales.coordinate_cosines
+    @inbounds for index in context.threshold_indices
+        displacements[index], velocities[index] = _omrf_coordinate_at(
+            state, flow, scales.anchor, index, t)
+    end
+    @inbounds for index in context.interaction_indices
+        displacements[index], velocities[index] = _omrf_coordinate_at(
+            state, flow, scales.anchor, index, t)
+    end
+    return nothing
+end
+
+function _omrf_pattern_point_scales!(out, scales::OMRFPatternLocalScales,
+        ::ZigZag)
+    context = scales.context
+    displacements = scales.coordinate_offsets
+    velocities = scales.coordinate_cosines
+    @inbounds for node in eachindex(scales.node_component_starts)
+        q = context.seen[node] - 1
+        first_component = scales.node_component_starts[node]
+        last_component = scales.node_component_ends[node]
+        if q == 0
+            for component in first_component:last_component
+                out[component] = 0.0
+            end
+            continue
+        end
+        threshold_start = context.threshold_starts[node]
+        edge_start = scales.node_edge_starts[node]
+        edge_end = scales.node_edge_ends[node]
+        for component in first_component:last_component
+            out[component] = _omrf_pattern_zigzag_scale(
+                scales, component, q, threshold_start,
+                edge_start, edge_end, displacements, velocities)
+        end
+    end
+    if scales.active_compression
+        @inbounds for component in (scales.active_component_count + 1):length(out)
+            out[component] = 0.0
+        end
+    end
+    return out
+end
+
+function _omrf_pattern_point_scales!(out, scales::OMRFPatternLocalScales,
+        ::BouncyParticle)
+    context = scales.context
+    displacements = scales.coordinate_offsets
+    velocities = scales.coordinate_cosines
+    @inbounds for node in eachindex(scales.node_component_starts)
+        q = context.seen[node] - 1
+        first_component = scales.node_component_starts[node]
+        last_component = scales.node_component_ends[node]
+        if q == 0
+            for component in first_component:last_component
+                out[component] = 0.0
+            end
+            continue
+        end
+        threshold_start = context.threshold_starts[node]
+        edge_start = scales.node_edge_starts[node]
+        edge_end = scales.node_edge_ends[node]
+        for component in first_component:last_component
+            out[component] = _omrf_pattern_bouncy_scale(
+                scales, component, q, threshold_start,
+                edge_start, edge_end, displacements, velocities)
+        end
+    end
+    if scales.active_compression
+        @inbounds for component in (scales.active_component_count + 1):length(out)
+            out[component] = 0.0
+        end
+    end
+    return out
+end
+
+@inline _omrf_pattern_point_scales_from_nodes!(
+        out, scales::OMRFPatternLocalScales, flow::ZigZag) =
+    _omrf_pattern_point_scales!(out, scales, flow)
+
+@inline _omrf_pattern_point_scales_from_nodes!(
+        out, scales::OMRFPatternLocalScales, flow::BouncyParticle) =
+    _omrf_pattern_point_scales!(out, scales, flow)
+
+@inline _omrf_pattern_point_scales_from_nodes!(
+        out, scales::OMRFPatternLocalScales,
+        flow::PDMPSamplers.AnyBoomerang) =
+    _omrf_pattern_point_scales!(out, scales, flow)
+
+function (scales::OMRFPatternLocalScales)(out, state,
+        flow::ZigZag, t)
+    _ensure_omrf_active_pattern!(scales, state)
     _cache_omrf_pattern_point_coordinates!(scales, state, flow, t)
-    @inbounds for component in eachindex(out, scales.component_nodes)
-        out[component] = _omrf_pattern_scale_cached(
-            scales, flow, component)
+    _omrf_pattern_point_scales!(out, scales, flow)
+    return out
+end
+
+function (scales::OMRFPatternLocalScales)(out, state,
+        flow::BouncyParticle, t)
+    _ensure_omrf_active_pattern!(scales, state)
+    _cache_omrf_pattern_point_coordinates!(scales, state, flow, t)
+    _omrf_pattern_point_scales!(out, scales, flow)
+    return out
+end
+
+function _omrf_pattern_cell_scales!(out, scales::OMRFPatternLocalScales,
+        ::ZigZag)
+    context = scales.context
+    left_offsets = scales.cell_left_offsets
+    right_offsets = scales.cell_right_offsets
+    velocities = scales.cell_velocities
+    @inbounds for node in eachindex(scales.node_component_starts)
+        q = context.seen[node] - 1
+        first_component = scales.node_component_starts[node]
+        last_component = scales.node_component_ends[node]
+        if q == 0
+            for component in first_component:last_component
+                out[component] = 0.0
+            end
+            continue
+        end
+        threshold_start = context.threshold_starts[node]
+        edge_start = scales.node_edge_starts[node]
+        edge_end = scales.node_edge_ends[node]
+        for component in first_component:last_component
+            left_scale = _omrf_pattern_zigzag_scale(
+                scales, component, q, threshold_start,
+                edge_start, edge_end, left_offsets, velocities)
+            right_scale = _omrf_pattern_zigzag_scale(
+                scales, component, q, threshold_start,
+                edge_start, edge_end, right_offsets, velocities)
+            out[component] = max(left_scale, right_scale)
+        end
+    end
+    if scales.active_compression
+        @inbounds for component in (scales.active_component_count + 1):length(out)
+            out[component] = 0.0
+        end
+    end
+    return out
+end
+
+function _omrf_pattern_cell_scales!(out, scales::OMRFPatternLocalScales,
+        ::BouncyParticle)
+    context = scales.context
+    left_offsets = scales.cell_left_offsets
+    right_offsets = scales.cell_right_offsets
+    velocities = scales.cell_velocities
+    @inbounds for node in eachindex(scales.node_component_starts)
+        q = context.seen[node] - 1
+        first_component = scales.node_component_starts[node]
+        last_component = scales.node_component_ends[node]
+        if q == 0
+            for component in first_component:last_component
+                out[component] = 0.0
+            end
+            continue
+        end
+        threshold_start = context.threshold_starts[node]
+        edge_start = scales.node_edge_starts[node]
+        edge_end = scales.node_edge_ends[node]
+        for component in first_component:last_component
+            left_scale = _omrf_pattern_bouncy_scale(
+                scales, component, q, threshold_start,
+                edge_start, edge_end, left_offsets, velocities)
+            right_scale = _omrf_pattern_bouncy_scale(
+                scales, component, q, threshold_start,
+                edge_start, edge_end, right_offsets, velocities)
+            out[component] = max(left_scale, right_scale)
+        end
+    end
+    if scales.active_compression
+        @inbounds for component in (scales.active_component_count + 1):length(out)
+            out[component] = 0.0
+        end
     end
     return out
 end
 
 function (scales::OMRFPatternLocalScales)(out, state,
-        flow::Union{ZigZag,BouncyParticle}, left, right)
-    @inbounds for component in eachindex(out, scales.component_nodes)
-        # The logit range is convex for a linear trajectory; its interval
-        # maximum is therefore attained at an endpoint.  Velocity is constant.
-        out[component] = max(
-            _omrf_pattern_scale_at(scales, state, flow, component, left),
-            _omrf_pattern_scale_at(scales, state, flow, component, right))
+        flow::ZigZag, left, right)
+    _ensure_omrf_active_pattern!(scales, state)
+    _cache_omrf_pattern_linear_cell_coordinates!(
+        scales, state, flow, left, right)
+    _omrf_pattern_cell_scales!(out, scales, flow)
+    return out
+end
+
+function (scales::OMRFPatternLocalScales)(out, state,
+        flow::BouncyParticle, left, right)
+    _ensure_omrf_active_pattern!(scales, state)
+    _cache_omrf_pattern_linear_cell_coordinates!(
+        scales, state, flow, left, right)
+    _omrf_pattern_cell_scales!(out, scales, flow)
+    return out
+end
+
+function (scales::OMRFPatternLocalScales)(out, state,
+        flow::PDMPSamplers.AnyBoomerang, t)
+    _ensure_omrf_active_pattern!(scales, state)
+    _cache_omrf_pattern_point_coordinates!(scales, state, flow, t)
+    _omrf_pattern_point_scales!(out, scales, flow)
+    return out
+end
+
+function _omrf_pattern_point_scales!(out, scales::OMRFPatternLocalScales,
+        ::PDMPSamplers.AnyBoomerang)
+    context = scales.context
+    displacements = scales.coordinate_offsets
+    velocities = scales.coordinate_cosines
+    @inbounds for node in eachindex(scales.node_component_starts)
+        q = context.seen[node] - 1
+        first_component = scales.node_component_starts[node]
+        last_component = scales.node_component_ends[node]
+        if q == 0
+            for component in first_component:last_component
+                out[component] = 0.0
+            end
+            continue
+        end
+        threshold_start = context.threshold_starts[node]
+        edge_start = scales.node_edge_starts[node]
+        edge_end = scales.node_edge_ends[node]
+        for component in first_component:last_component
+            out[component] = _omrf_pattern_bouncy_scale(
+                scales, component, q, threshold_start,
+                edge_start, edge_end, displacements, velocities)
+        end
+    end
+    if scales.active_compression
+        @inbounds for component in (scales.active_component_count + 1):length(out)
+            out[component] = 0.0
+        end
     end
     return out
 end
+
+# The generic GroupedResidualEnvelope screening path materializes every
+# component scale through a separate callback and constructs cumulative
+# masses.  The pattern certificate still visits its structural components,
+# but the pointwise aggregate can be accumulated in the same pass while
+# retaining the scales needed if the aggregate screen accepts.
+function _omrf_pattern_screening_bound!(
+        envelope::PDMPSamplers.GroupedResidualEnvelope{F,C}, state,
+        flow::ZigZag, t) where {F<:OMRFPatternLocalScales,C}
+    scales = envelope.component_scales!
+    _ensure_omrf_active_pattern!(scales, state)
+    _cache_omrf_pattern_point_coordinates!(scales, state, flow, t)
+    component_scales = envelope.scales
+    cumulative_masses = envelope.cumulative_masses
+    result = 0.0
+    _omrf_pattern_point_scales_from_nodes!(
+        component_scales, scales, flow)
+    @inbounds for component in eachindex(scales.component_nodes, envelope.totals)
+        result += component_scales[component] * envelope.totals[component]
+        cumulative_masses[component] = result
+    end
+    return nextfloat(result)
+end
+
+function _omrf_pattern_screening_bound!(
+        envelope::PDMPSamplers.GroupedResidualEnvelope{F,C}, state,
+        flow::BouncyParticle, t) where {F<:OMRFPatternLocalScales,C}
+    scales = envelope.component_scales!
+    _ensure_omrf_active_pattern!(scales, state)
+    _cache_omrf_pattern_point_coordinates!(scales, state, flow, t)
+    component_scales = envelope.scales
+    cumulative_masses = envelope.cumulative_masses
+    result = 0.0
+    _omrf_pattern_point_scales!(component_scales, scales, flow)
+    @inbounds for component in eachindex(scales.component_nodes, envelope.totals)
+        result += component_scales[component] * envelope.totals[component]
+        cumulative_masses[component] = result
+    end
+    return nextfloat(result)
+end
+
+PDMPSamplers.screening_residual_bound(
+        envelope::PDMPSamplers.GroupedResidualEnvelope{F,C}, state,
+        flow::ZigZag, t) where {F<:OMRFPatternLocalScales,C} =
+    _omrf_pattern_screening_bound!(envelope, state, flow, t)
+
+PDMPSamplers.screening_residual_bound(
+        envelope::PDMPSamplers.GroupedResidualEnvelope{F,C}, state,
+        flow::BouncyParticle, t) where {F<:OMRFPatternLocalScales,C} =
+    _omrf_pattern_screening_bound!(envelope, state, flow, t)
+
+function PDMPSamplers.prepare_residual_sampling!(
+        envelope::PDMPSamplers.GroupedResidualEnvelope{F,C}, state,
+        flow::ZigZag, t) where
+        {F<:OMRFPatternLocalScales,C}
+    # `screening_residual_bound` has already populated both buffers in the
+    # same pass.  Keeping this hook explicit documents that no second scale
+    # evaluation is needed before drawing a subset.
+    return nothing
+end
+
+PDMPSamplers.prepare_residual_sampling!(
+        envelope::PDMPSamplers.GroupedResidualEnvelope{F,C}, state,
+        flow::BouncyParticle, t) where {F<:OMRFPatternLocalScales,C} = nothing
+
+PDMPSamplers.screening_residual_bound(
+        envelope::PDMPSamplers.GroupedResidualEnvelope{F,C}, state,
+        flow::PDMPSamplers.PreconditionedDynamics, t) where
+        {F<:OMRFPatternLocalScales,C} =
+    PDMPSamplers.screening_residual_bound(
+        envelope, state, flow.dynamics, t)
+
+PDMPSamplers.prepare_residual_sampling!(
+        envelope::PDMPSamplers.GroupedResidualEnvelope{F,C}, state,
+        flow::PDMPSamplers.PreconditionedDynamics, t) where
+        {F<:OMRFPatternLocalScales,C} =
+    PDMPSamplers.prepare_residual_sampling!(
+        envelope, state, flow.dynamics, t)
 
 @inline function _omrf_harmonic_coefficients(state, flow, anchor, j)
     return _omrf_harmonic_coefficients_anchor_value(
@@ -2696,10 +6625,647 @@ end
     return nextfloat(min(abs(c) + amplitude, midpoint_roof))
 end
 
+@inline function _omrf_harmonic_phase_in_cell(phase, left, right)
+    period = 2pi
+    occurrence = phase + ceil((left - phase) / period) * period
+    return occurrence <= right
+end
+
+"""Exact closed interval for `c + a*cos(t) + b*sin(t)`."""
+@inline function _omrf_harmonic_cell_interval(c, a, b, left, right)
+    left_value = c + a * cos(left) + b * sin(left)
+    right_value = c + a * cos(right) + b * sin(right)
+    lower = min(left_value, right_value)
+    upper = max(left_value, right_value)
+    amplitude = hypot(a, b)
+    if !iszero(amplitude)
+        maximum_phase = atan(b, a)
+        _omrf_harmonic_phase_in_cell(maximum_phase, left, right) &&
+            (upper = c + amplitude)
+        _omrf_harmonic_phase_in_cell(maximum_phase + pi, left, right) &&
+            (lower = c - amplitude)
+    end
+    return prevfloat(lower), nextfloat(upper)
+end
+
+@inline function _omrf_interval_product_lower(xl, xu, yl, yu)
+    return min(xl * yl, xl * yu, xu * yl, xu * yu)
+end
+
+@inline function _omrf_interval_product_upper(xl, xu, yl, yu)
+    return max(xl * yl, xl * yu, xu * yl, xu * yu)
+end
+
+function _cache_omrf_node_box_point!(scales::OMRFNodeBoxFirstOrderScales,
+        state, flow, t)
+    @inbounds for index in eachindex(scales.anchor)
+        displacement, velocity = _omrf_coordinate_at_anchor_value(
+            state, flow, scales.anchor[index], index, t)
+        scales.displacement_lower[index] = displacement
+        scales.displacement_upper[index] = displacement
+        scales.velocity_lower[index] = velocity
+        scales.velocity_upper[index] = velocity
+    end
+    return scales
+end
+
+function _cache_omrf_node_box_cell!(scales::OMRFNodeBoxFirstOrderScales,
+        state, flow::PDMPSamplers.AnyBoomerang, left, right)
+    @inbounds for index in eachindex(scales.anchor)
+        offset, cosine, sine = _omrf_harmonic_coefficients_anchor_value(
+            state, flow, scales.anchor[index], index)
+        scales.displacement_lower[index], scales.displacement_upper[index] =
+            _omrf_harmonic_cell_interval(
+                offset, cosine, sine, left, right)
+        scales.velocity_lower[index], scales.velocity_upper[index] =
+            _omrf_harmonic_cell_interval(
+                0.0, sine, -cosine, left, right)
+    end
+    return scales
+end
+
+function _cache_omrf_node_box_cell!(scales::OMRFNodeBoxFirstOrderScales,
+        state, flow::BouncyParticle, left, right)
+    @inbounds for index in eachindex(scales.anchor)
+        left_displacement, velocity = _omrf_coordinate_at_anchor_value(
+            state, flow, scales.anchor[index], index, left)
+        right_displacement, _ = _omrf_coordinate_at_anchor_value(
+            state, flow, scales.anchor[index], index, right)
+        scales.displacement_lower[index] = min(
+            left_displacement, right_displacement)
+        scales.displacement_upper[index] = max(
+            left_displacement, right_displacement)
+        scales.velocity_lower[index] = velocity
+        scales.velocity_upper[index] = velocity
+    end
+    return scales
+end
+
+@inline function _omrf_node_box_first_order_bound(
+        scales::OMRFNodeBoxFirstOrderScales, component::Int, node::Int)
+    context = scales.context
+    q = context.seen[node] - 1
+    iszero(q) && return 0.0
+    field_displacement_lower = 0.0
+    field_displacement_upper = 0.0
+    field_velocity_lower = 0.0
+    field_velocity_upper = 0.0
+    @inbounds for k in eachindex(context.incident_edges[node])
+        edge_index = context.interaction_indices[
+            context.incident_edges[node][k]]
+        neighbour = context.incident_neighbours[node][k]
+        covariate_lower = scales.minima[component, neighbour]
+        covariate_upper = scales.maxima[component, neighbour]
+        field_displacement_lower += _omrf_interval_product_lower(
+            covariate_lower, covariate_upper,
+            scales.displacement_lower[edge_index],
+            scales.displacement_upper[edge_index])
+        field_displacement_upper += _omrf_interval_product_upper(
+            covariate_lower, covariate_upper,
+            scales.displacement_lower[edge_index],
+            scales.displacement_upper[edge_index])
+        field_velocity_lower += _omrf_interval_product_lower(
+            covariate_lower, covariate_upper,
+            scales.velocity_lower[edge_index],
+            scales.velocity_upper[edge_index])
+        field_velocity_upper += _omrf_interval_product_upper(
+            covariate_lower, covariate_upper,
+            scales.velocity_lower[edge_index],
+            scales.velocity_upper[edge_index])
+    end
+    displacement_minimum = 0.0
+    displacement_maximum = 0.0
+    velocity_minimum = 0.0
+    velocity_maximum = 0.0
+    threshold_start = context.threshold_starts[node]
+    @inbounds for category in 1:q
+        threshold_index = context.threshold_indices[
+            threshold_start + category - 1]
+        category_displacement_lower =
+            scales.displacement_lower[threshold_index] +
+            category * field_displacement_lower
+        category_displacement_upper =
+            scales.displacement_upper[threshold_index] +
+            category * field_displacement_upper
+        category_velocity_lower = scales.velocity_lower[threshold_index] +
+            category * field_velocity_lower
+        category_velocity_upper = scales.velocity_upper[threshold_index] +
+            category * field_velocity_upper
+        displacement_minimum = min(
+            displacement_minimum, category_displacement_lower)
+        displacement_maximum = max(
+            displacement_maximum, category_displacement_upper)
+        velocity_minimum = min(velocity_minimum, category_velocity_lower)
+        velocity_maximum = max(velocity_maximum, category_velocity_upper)
+    end
+    displacement_range = displacement_maximum - displacement_minimum
+    velocity_range = velocity_maximum - velocity_minimum
+    # For categorical p, Hoeffding's covariance inequality yields
+    # |b'*(p(x)-p(anchor))| <= range(a)*range(b)/4.  The zero reference
+    # category is included by the zero initial extrema above.
+    return nextfloat(0.25 * displacement_range * velocity_range)
+end
+
+@inline function _omrf_node_box_two_bounds!(out,
+        scales::OMRFNodeBoxFirstOrderScales, node::Int,
+        first_component::Int, second_component::Int)
+    context = scales.context
+    q = context.seen[node] - 1
+    if iszero(q)
+        out[first_component] = 0.0
+        out[second_component] = 0.0
+        return nothing
+    end
+    first_dl = 0.0; first_du = 0.0
+    first_vl = 0.0; first_vu = 0.0
+    second_dl = 0.0; second_du = 0.0
+    second_vl = 0.0; second_vu = 0.0
+    # G=2 specialization: every incident edge is loaded once and contributes
+    # to both contiguous node-box rows. This is algebraically identical to
+    # two calls of `_omrf_node_box_first_order_bound`.
+    @inbounds for k in eachindex(context.incident_edges[node])
+        edge_index = context.interaction_indices[
+            context.incident_edges[node][k]]
+        neighbour = context.incident_neighbours[node][k]
+        displacement_lower = scales.displacement_lower[edge_index]
+        displacement_upper = scales.displacement_upper[edge_index]
+        velocity_lower = scales.velocity_lower[edge_index]
+        velocity_upper = scales.velocity_upper[edge_index]
+
+        lower = scales.minima[first_component, neighbour]
+        upper = scales.maxima[first_component, neighbour]
+        first_dl += _omrf_interval_product_lower(
+            lower, upper, displacement_lower, displacement_upper)
+        first_du += _omrf_interval_product_upper(
+            lower, upper, displacement_lower, displacement_upper)
+        first_vl += _omrf_interval_product_lower(
+            lower, upper, velocity_lower, velocity_upper)
+        first_vu += _omrf_interval_product_upper(
+            lower, upper, velocity_lower, velocity_upper)
+
+        lower = scales.minima[second_component, neighbour]
+        upper = scales.maxima[second_component, neighbour]
+        second_dl += _omrf_interval_product_lower(
+            lower, upper, displacement_lower, displacement_upper)
+        second_du += _omrf_interval_product_upper(
+            lower, upper, displacement_lower, displacement_upper)
+        second_vl += _omrf_interval_product_lower(
+            lower, upper, velocity_lower, velocity_upper)
+        second_vu += _omrf_interval_product_upper(
+            lower, upper, velocity_lower, velocity_upper)
+    end
+    first_dmin = 0.0; first_dmax = 0.0
+    first_vmin = 0.0; first_vmax = 0.0
+    second_dmin = 0.0; second_dmax = 0.0
+    second_vmin = 0.0; second_vmax = 0.0
+    threshold_start = context.threshold_starts[node]
+    @inbounds for category in 1:q
+        threshold_index = context.threshold_indices[
+            threshold_start + category - 1]
+        threshold_dl = scales.displacement_lower[threshold_index]
+        threshold_du = scales.displacement_upper[threshold_index]
+        threshold_vl = scales.velocity_lower[threshold_index]
+        threshold_vu = scales.velocity_upper[threshold_index]
+        first_dmin = min(first_dmin, threshold_dl + category * first_dl)
+        first_dmax = max(first_dmax, threshold_du + category * first_du)
+        first_vmin = min(first_vmin, threshold_vl + category * first_vl)
+        first_vmax = max(first_vmax, threshold_vu + category * first_vu)
+        second_dmin = min(second_dmin, threshold_dl + category * second_dl)
+        second_dmax = max(second_dmax, threshold_du + category * second_du)
+        second_vmin = min(second_vmin, threshold_vl + category * second_vl)
+        second_vmax = max(second_vmax, threshold_vu + category * second_vu)
+    end
+    out[first_component] = nextfloat(0.25 *
+        (first_dmax - first_dmin) * (first_vmax - first_vmin))
+    out[second_component] = nextfloat(0.25 *
+        (second_dmax - second_dmin) * (second_vmax - second_vmin))
+    return nothing
+end
+
+@inline function _omrf_node_box_fill_bounds!(out,
+        scales::OMRFNodeBoxFirstOrderScales)
+    node_count = length(scales.context.seen)
+    if length(out) == 2node_count
+        @inbounds for node in 1:node_count
+            first_component = 2node - 1
+            second_component = first_component + 1
+            if scales.component_nodes[first_component] != node ||
+                    scales.component_nodes[second_component] != node
+                # The compact construction normally stores exactly two
+                # consecutive rows per node. Retain the generic fallback for
+                # malformed/legacy layouts without changing their behavior.
+                for component in eachindex(out)
+                    out[component] = _omrf_node_box_first_order_bound(
+                        scales, component,
+                        scales.component_nodes[component])
+                end
+                return out
+            end
+            _omrf_node_box_two_bounds!(out, scales, node,
+                first_component, second_component)
+        end
+        return out
+    end
+    @inbounds for component in eachindex(out)
+        out[component] = _omrf_node_box_first_order_bound(
+            scales, component, scales.component_nodes[component])
+    end
+    return out
+end
+
+function (scales::OMRFNodeBoxFirstOrderScales)(out, state,
+        flow::PDMPSamplers.AnyBoomerang, t)
+    started = time_ns()
+    _cache_omrf_node_box_point!(scales, state, flow, t)
+    _omrf_node_box_fill_bounds!(out, scales)
+    scales.context.counts.envelope_point_calls += 1
+    scales.context.counts.envelope_point_seconds +=
+        (time_ns() - started) * 1e-9
+    return out
+end
+
+function (scales::OMRFNodeBoxFirstOrderScales)(out, state,
+        flow::BouncyParticle, t)
+    started = time_ns()
+    _cache_omrf_node_box_point!(scales, state, flow, t)
+    _omrf_node_box_fill_bounds!(out, scales)
+    scales.context.counts.envelope_point_calls += 1
+    scales.context.counts.envelope_point_seconds +=
+        (time_ns() - started) * 1e-9
+    return out
+end
+
+function (scales::OMRFNodeBoxFirstOrderScales)(out, state,
+        flow::PDMPSamplers.AnyBoomerang, left, right)
+    started = time_ns()
+    _cache_omrf_node_box_cell!(scales, state, flow, left, right)
+    _omrf_node_box_fill_bounds!(out, scales)
+    scales.context.counts.envelope_cell_calls += 1
+    scales.context.counts.envelope_cell_seconds +=
+        (time_ns() - started) * 1e-9
+    return out
+end
+
+function (scales::OMRFNodeBoxFirstOrderScales)(out, state,
+        flow::BouncyParticle, left, right)
+    started = time_ns()
+    _cache_omrf_node_box_cell!(scales, state, flow, left, right)
+    _omrf_node_box_fill_bounds!(out, scales)
+    scales.context.counts.envelope_cell_calls += 1
+    scales.context.counts.envelope_cell_seconds +=
+        (time_ns() - started) * 1e-9
+    return out
+end
+
+(scales::OMRFNodeBoxFirstOrderScales)(out, state,
+    flow::PDMPSamplers.PreconditionedDynamics, args...) =
+    scales(out, state, flow.dynamics, args...)
+
+PDMPSamplers._trajectory_scale_anchor(scales::OMRFNodeBoxFirstOrderScales) =
+    scales.anchor
+
+function _omrf_cell_marked_cache_slot!(
+        scales::OMRFCellMarkedNodeBoxFirstOrderScales,
+        left::Float64, right::Float64)
+    slot = scales.n_cached_cells + 1
+    if slot > length(scales.cell_lefts)
+        old_capacity = length(scales.cell_lefts)
+        new_capacity = max(slot, max(8, 2old_capacity))
+        resize!(scales.cell_lefts, new_capacity)
+        resize!(scales.cell_rights, new_capacity)
+        resize!(scales.cell_total_masses, new_capacity)
+        n_components = length(scales.component_totals)
+        old_scales = scales.cell_scales
+        old_cumulative = scales.cell_cumulative_masses
+        scales.cell_scales = zeros(n_components, new_capacity)
+        scales.cell_cumulative_masses = zeros(n_components, new_capacity)
+        if old_capacity > 0
+            copyto!(view(scales.cell_scales, :, 1:old_capacity), old_scales)
+            copyto!(view(scales.cell_cumulative_masses, :, 1:old_capacity),
+                old_cumulative)
+        end
+    end
+    scales.cell_lefts[slot] = left
+    scales.cell_rights[slot] = right
+    scales.n_cached_cells = slot
+    return slot
+end
+
+@inline function _omrf_cell_marked_lookup(
+        scales::OMRFCellMarkedNodeBoxFirstOrderScales, time::Float64)
+    # Grid cells are appended in increasing order. Find the last cell whose
+    # left endpoint does not exceed the proposal time in logarithmic time;
+    # the cache is reset for every new event-search schedule.
+    lo = 1
+    hi = scales.n_cached_cells
+    slot = 0
+    @inbounds while lo <= hi
+        mid = (lo + hi) >>> 1
+        if scales.cell_lefts[mid] <= time
+            slot = mid
+            lo = mid + 1
+        else
+            hi = mid - 1
+        end
+    end
+    return slot > 0 && time <= scales.cell_rights[slot] ? slot : 0
+end
+
+function (scales::OMRFCellMarkedNodeBoxFirstOrderScales)(out, state,
+        flow::PDMPSamplers.AnyBoomerang, left, right)
+    iszero(left) && (scales.n_cached_cells = 0)
+    scales.base(out, state, flow, left, right)
+    slot = _omrf_cell_marked_cache_slot!(
+        scales, Float64(left), Float64(right))
+    cumulative = 0.0
+    @inbounds for component in eachindex(out, scales.component_totals)
+        value = out[component]
+        cumulative += value * scales.component_totals[component]
+        scales.cell_scales[component, slot] = value
+        scales.cell_cumulative_masses[component, slot] = cumulative
+    end
+    scales.cell_total_masses[slot] = cumulative
+    return out
+end
+
+function (scales::OMRFCellMarkedNodeBoxFirstOrderScales)(out, state,
+        flow::BouncyParticle, left, right)
+    iszero(left) && (scales.n_cached_cells = 0)
+    scales.base(out, state, flow, left, right)
+    slot = _omrf_cell_marked_cache_slot!(
+        scales, Float64(left), Float64(right))
+    cumulative = 0.0
+    @inbounds for component in eachindex(out, scales.component_totals)
+        value = out[component]
+        cumulative += value * scales.component_totals[component]
+        scales.cell_scales[component, slot] = value
+        scales.cell_cumulative_masses[component, slot] = cumulative
+    end
+    scales.cell_total_masses[slot] = cumulative
+    return out
+end
+
+@inline function _omrf_cell_marked_set_point!(scales, state, flow, time,
+        harmonic::Bool)
+    scales.point_x = state.ξ.x
+    scales.point_theta = state.ξ.θ
+    state isa StickyPDMPState && (scales.point_free = state.free)
+    scales.point_is_sticky = state isa StickyPDMPState
+    scales.point_mu = flow.μ
+    scales.point_harmonic = harmonic
+    scales.cached_time = time
+    return nothing
+end
+
+function (scales::OMRFCellMarkedNodeBoxFirstOrderScales)(out, state,
+        flow::PDMPSamplers.AnyBoomerang, t)
+    time = Float64(t)
+    slot = _omrf_cell_marked_lookup(scales, time)
+    if iszero(slot)
+        scales.cell_cache_misses += 1
+        throw(ErrorException(
+            "cell-marked node-box proposal lies outside the active cell cache"))
+    end
+    @inbounds for component in eachindex(out)
+        out[component] = scales.cell_scales[component, slot]
+    end
+    _omrf_cell_marked_set_point!(scales, state, flow, time, true)
+    scales.active_cell = slot
+    scales.cell_cache_hits += 1
+    return out
+end
+
+
+function (scales::OMRFCellMarkedNodeBoxFirstOrderScales)(out, state,
+        flow::BouncyParticle, t)
+    time = Float64(t)
+    slot = _omrf_cell_marked_lookup(scales, time)
+    if iszero(slot)
+        scales.cell_cache_misses += 1
+        throw(ErrorException(
+            "cell-marked node-box proposal lies outside the active cell cache"))
+    end
+    @inbounds for component in eachindex(out)
+        out[component] = scales.cell_scales[component, slot]
+    end
+    _omrf_cell_marked_set_point!(scales, state, flow, time, false)
+    scales.active_cell = slot
+    scales.cell_cache_hits += 1
+    return out
+end
+
+(scales::OMRFCellMarkedNodeBoxFirstOrderScales)(out, state,
+    flow::PDMPSamplers.PreconditionedDynamics, args...) =
+    scales(out, state, flow.dynamics, args...)
+
+PDMPSamplers._trajectory_scale_anchor(
+    scales::OMRFCellMarkedNodeBoxFirstOrderScales) = scales.base.anchor
+
+function PDMPSamplers.subsampling_failure_context(
+        oracle::OMRFAnalyticSubsamplingOracle,
+        envelope::PDMPSamplers.GroupedResidualEnvelope{
+            <:OMRFCellMarkedNodeBoxFirstOrderScales}, subset)
+    scales = envelope.component_scales!
+    factor = isempty(subset) ? 0 : subset[1]
+    component = iszero(factor) ? 0 : envelope.groups[1, factor]
+    context = oracle.residual_context
+    count_names = fieldnames(typeof(context.counts))
+    count_values = ntuple(i -> getfield(context.counts, count_names[i]),
+        length(count_names))
+    count_snapshot = NamedTuple{count_names}(count_values)
+    N = size(context.X, 1)
+    node0, person0 = iszero(factor) ? (-1, -1) : divrem(factor - 1, N)
+    slot = scales.active_cell
+    return (
+        selected_factor=factor,
+        selected_person=person0 + 1,
+        selected_node=node0 + 1,
+        selected_component=component,
+        component_population=iszero(component) ? 0.0 :
+            scales.component_totals[component],
+        component_cell_certificate=iszero(component) ? NaN :
+            envelope.scales[component],
+        selected_point_certificate=scales.selected_factor_point_bound,
+        active_cell=slot,
+        cell_left=iszero(slot) ? NaN : scales.cell_lefts[slot],
+        cell_right=iszero(slot) ? NaN : scales.cell_rights[slot],
+        cache_generation=scales.n_cached_cells,
+        cached_point_time=scales.cached_time,
+        cached_point_position=copy(scales.point_x),
+        cached_point_velocity=copy(scales.point_theta),
+        cached_point_free=copy(scales.point_free),
+        cached_point_mean=copy(scales.point_mu),
+        cached_point_harmonic=scales.point_harmonic,
+        oracle_anchor=copy(oracle.anchor),
+        oracle_anchor_identity=objectid(oracle.anchor),
+        envelope_anchor=copy(scales.base.anchor),
+        envelope_anchor_identity=objectid(scales.base.anchor),
+        anchor_probabilities=copy(context.anchor_probabilities),
+        touched_coordinates=copy(context.touched_positions),
+        active_generation=context.active_generation,
+        oracle_event_history=count_snapshot)
+end
+
+function PDMPSamplers.screening_residual_bound(
+        envelope::PDMPSamplers.GroupedResidualEnvelope{
+            <:OMRFCellMarkedNodeBoxFirstOrderScales}, state, flow, t)
+    scales = envelope.component_scales!
+    scales(envelope.scales, state, flow, t)
+    slot = scales.active_cell
+    @inbounds for component in eachindex(envelope.cumulative_masses)
+        envelope.cumulative_masses[component] =
+            scales.cell_cumulative_masses[component, slot]
+    end
+    return scales.cell_total_masses[slot]
+end
+
+@inline function _omrf_cell_marked_coordinate(scales,
+        index::Int, sine::Float64, cosine::Float64)
+    if scales.point_is_sticky && !scales.point_free[index]
+        return scales.point_x[index] - scales.base.anchor[index], 0.0
+    end
+    if !scales.point_harmonic
+        displacement = scales.point_x[index] - scales.base.anchor[index] +
+            scales.cached_time * scales.point_theta[index]
+        return displacement, scales.point_theta[index]
+    end
+    centered = scales.point_x[index] - scales.point_mu[index]
+    displacement = scales.point_mu[index] - scales.base.anchor[index] +
+        centered * cosine + scales.point_theta[index] * sine
+    velocity = -centered * sine + scales.point_theta[index] * cosine
+    return displacement, velocity
+end
+
+@inline function _omrf_cell_marked_factor_point_bound(
+        scales::OMRFCellMarkedNodeBoxFirstOrderScales,
+        factor::Int)
+    context = scales.base.context
+    N = size(context.X, 1)
+    node0, person0 = divrem(factor - 1, N)
+    node = node0 + 1
+    person = person0 + 1
+    sine, cosine = scales.point_harmonic ? sincos(scales.cached_time) :
+        (0.0, 1.0)
+    field_displacement = 0.0
+    field_velocity = 0.0
+    @inbounds for k in eachindex(context.incident_edges[node])
+        covariate = context.X[person, context.incident_neighbours[node][k]]
+        iszero(covariate) && continue
+        index = context.interaction_indices[context.incident_edges[node][k]]
+        displacement, velocity = _omrf_cell_marked_coordinate(
+            scales, index, sine, cosine)
+        field_displacement += covariate * displacement
+        field_velocity += covariate * velocity
+    end
+    displacement_minimum = 0.0
+    displacement_maximum = 0.0
+    velocity_minimum = 0.0
+    velocity_maximum = 0.0
+    threshold_start = context.threshold_starts[node]
+    q = context.seen[node] - 1
+    @inbounds for category in 1:q
+        index = context.threshold_indices[threshold_start + category - 1]
+        displacement, velocity = _omrf_cell_marked_coordinate(
+            scales, index, sine, cosine)
+        logit_displacement = displacement + category * field_displacement
+        logit_velocity = velocity + category * field_velocity
+        displacement_minimum = min(displacement_minimum, logit_displacement)
+        displacement_maximum = max(displacement_maximum, logit_displacement)
+        velocity_minimum = min(velocity_minimum, logit_velocity)
+        velocity_maximum = max(velocity_maximum, logit_velocity)
+    end
+    return nextfloat(0.25 *
+        (displacement_maximum - displacement_minimum) *
+        (velocity_maximum - velocity_minimum))
+end
+
+function PDMPSamplers.draw_subset!(rng::Random.AbstractRNG,
+        cv::PDMPSamplers.SubsampledControlVariate{<:Any,<:Any,
+            <:PDMPSamplers.GroupedResidualEnvelope{
+                <:OMRFCellMarkedNodeBoxFirstOrderScales}},
+        D::Real, B::Real)
+    envelope = cv.envelope
+    scales = envelope.component_scales!
+    cv.m == 1 || throw(ArgumentError(
+        "cell-marked node-box geometry requires batch size one"))
+    N = PDMPSamplers.n_observations(envelope)
+    total = D + B
+    if !iszero(B) && (iszero(D) || rand(rng) * total > D)
+        component = PDMPSamplers._draw_component(rng, envelope, B)
+        cv.subset[1] = PDMPSamplers._draw_distinguished(
+            rng, envelope, component)
+        scales.component_marks += 1
+    else
+        PDMPSamplers._draw_base_subset!(rng, cv, cv.subset_design)
+    end
+    factor = cv.subset[1]
+    component = envelope.groups[1, factor]
+    cell_bound = envelope.scales[component]
+    started = time_ns()
+    point_bound = _omrf_cell_marked_factor_point_bound(scales, factor)
+    scales.factor_point_evaluations += 1
+    scales.factor_point_seconds += (time_ns() - started) * 1e-9
+    point_bound <= cell_bound * (1 + 64eps(Float64)) || throw(ErrorException(
+        "selected person-node point bound exceeds its closed-cell certificate"))
+    scales.selected_factor_point_bound = point_bound
+    oracle = cv.residual_oracle
+    oracle isa PDMPSamplers.WithResidualStats && (oracle = oracle.f)
+    oracle isa OMRFAnalyticSubsamplingOracle &&
+        (oracle.lazy_residual_subset_bound = N * point_bound)
+    return D + N * cell_bound
+end
+
 function _cache_omrf_pattern_harmonic_coefficients!(
         scales::Union{OMRFPatternLocalScales,OMRFPatternLocalHCVScales,
             OMRFCovariateLocalScales},
         state, flow)
+    if scales isa OMRFCovariateLocalScales
+        flow_hash = hash((typeof(flow), hash(flow.Γ)))
+        cache_matches = scales.harmonic_cache_valid &&
+            scales.harmonic_cache_flow_hash == flow_hash &&
+            length(scales.cache_x) == length(state.ξ.x) &&
+            length(scales.cache_theta) == length(state.ξ.θ) &&
+            all(@inbounds(scales.cache_x[i] == state.ξ.x[i])
+                for i in eachindex(state.ξ.x)) &&
+            all(@inbounds(scales.cache_theta[i] == state.ξ.θ[i])
+                for i in eachindex(state.ξ.θ)) &&
+            all(@inbounds(scales.cache_mu[i] == flow.μ[i])
+                for i in eachindex(flow.μ)) &&
+            all(@inbounds(scales.cache_anchor[i] == scales.anchor[i])
+                for i in eachindex(scales.anchor)) &&
+            all(@inbounds(scales.cache_free[i] ==
+                _omrf_coordinate_free(state, i)) for i in eachindex(scales.anchor))
+        if cache_matches
+            scales.context.counts.harmonic_coefficient_cache_hits += 1
+            return nothing
+        end
+        scales.context.counts.harmonic_coefficient_preparations += 1
+        started = time_ns()
+        scales.harmonic_cache_flow_hash = flow_hash
+        copyto!(scales.cache_x, state.ξ.x)
+        copyto!(scales.cache_theta, state.ξ.θ)
+        copyto!(scales.cache_mu, flow.μ)
+        copyto!(scales.cache_anchor, scales.anchor)
+        @inbounds for i in eachindex(scales.cache_free)
+            scales.cache_free[i] = _omrf_coordinate_free(state, i)
+        end
+        context = scales.context
+        offsets = scales.coordinate_offsets
+        cosines = scales.coordinate_cosines
+        sines = scales.coordinate_sines
+        @inbounds for index in context.threshold_indices
+            offsets[index], cosines[index], sines[index] =
+                _omrf_harmonic_coefficients(state, flow, scales.anchor, index)
+        end
+        @inbounds for index in context.interaction_indices
+            offsets[index], cosines[index], sines[index] =
+                _omrf_harmonic_coefficients(state, flow, scales.anchor, index)
+        end
+        scales.harmonic_cache_valid = true
+        context.counts.harmonic_coefficient_seconds +=
+            (time_ns() - started) * 1e-9
+        return nothing
+    end
     context = scales.context
     offsets = scales.coordinate_offsets
     cosines = scales.coordinate_cosines
@@ -2738,6 +7304,7 @@ end
 
 function (scales::OMRFPatternLocalScales)(out, state,
         flow::PDMPSamplers.AnyBoomerang, left, right)
+    _ensure_omrf_active_pattern!(scales, state)
     context = scales.context
     _cache_omrf_pattern_harmonic_coefficients!(scales, state, flow)
     midpoint_sine, midpoint_cosine = sincos((left + right) / 2)
@@ -2745,7 +7312,9 @@ function (scales::OMRFPatternLocalScales)(out, state,
     coordinate_offsets = scales.coordinate_offsets
     coordinate_cosines = scales.coordinate_cosines
     coordinate_sines = scales.coordinate_sines
-    @inbounds for component in eachindex(out, scales.component_nodes)
+    component_limit = scales.active_compression ?
+        scales.active_component_count : length(scales.component_nodes)
+    @inbounds for component in 1:component_limit
         node = scales.component_nodes[component]
         q = context.seen[node] - 1
         if iszero(q)
@@ -3313,7 +7882,8 @@ end
 
 function _cache_omrf_node_grouped_point!(
         scales::OMRFNodeGroupedPersonHCVBoxScales,
-        state, flow::PDMPSamplers.AnyBoomerang, t::Real)
+        state, flow::Union{PDMPSamplers.AnyBoomerang,
+            ZigZag,BouncyParticle}, t::Real)
     context = scales.context
     edge_destination = 1
     @inbounds for node in eachindex(context.seen)
@@ -3356,7 +7926,8 @@ end
 
 function _cache_omrf_node_grouped_point_node!(
         scales::OMRFNodeGroupedPersonHCVBoxScales,
-        state, flow::PDMPSamplers.AnyBoomerang, node::Int, anchor)
+        state, flow::Union{PDMPSamplers.AnyBoomerang,
+            ZigZag,BouncyParticle}, node::Int, anchor)
     context = scales.context
     q = context.seen[node] - 1
     pair_destination = scales.pair_offsets[node]
@@ -3471,14 +8042,191 @@ The shared trajectory geometry must already have been populated by
     return velocity_range * displacement_range^2 / 8
 end
 
+@inline function _omrf_node_grouped_zigzag_point_bound(
+        scales::OMRFNodeGroupedPersonHCVBoxScales,
+        component::Int, node::Int, state, flow, anchor)
+    context = scales.context
+    q = context.seen[node] - 1
+    q == 0 && return 0.0
+    edges = context.incident_edges[node]
+    neighbours = context.incident_neighbours[node]
+    logit_norm_squared = 0.0
+    start = context.threshold_starts[node]
+    @inbounds for u in 1:q
+        index = context.threshold_indices[start + u - 1]
+        displacement, _ = _omrf_coordinate_at(
+            state, flow, anchor, index, 0.0)
+        field_center = 0.0
+        field_uncertainty = 0.0
+        for k in eachindex(edges)
+            edge_index = context.interaction_indices[edges[k]]
+            lower = scales.minima[component, neighbours[k]]
+            upper = scales.maxima[component, neighbours[k]]
+            midpoint = (lower + upper) / 2
+            radius = (upper - lower) / 2
+            edge_displacement, _ = _omrf_coordinate_at(
+                state, flow, anchor, edge_index, 0.0)
+            field_center += midpoint * edge_displacement
+            field_uncertainty += radius * abs(edge_displacement)
+        end
+        logit_abs = abs(displacement + u * field_center) +
+            u * field_uncertainty
+        logit_norm_squared += logit_abs * logit_abs
+    end
+    weighted_velocity = 0.0
+    @inbounds for u in 1:q
+        index = context.threshold_indices[start + u - 1]
+        _, velocity = _omrf_coordinate_at(
+            state, flow, anchor, index, 0.0)
+        weighted_velocity += abs(velocity)
+    end
+    category_square_sum = q * (q + 1) * (2q + 1) / 6
+    @inbounds for k in eachindex(edges)
+        edge_index = context.interaction_indices[edges[k]]
+        _, velocity = _omrf_coordinate_at(
+            state, flow, anchor, edge_index, 0.0)
+        upper = scales.maxima[component, neighbours[k]]
+        weighted_velocity += abs(velocity) * upper * sqrt(category_square_sum)
+    end
+    return 0.75 * logit_norm_squared * weighted_velocity
+end
+
+@inline function _omrf_node_grouped_person_zigzag_point_bound(
+        scales::OMRFNodeGroupedPersonHCVBoxScales,
+        person::Int, node::Int, state, flow, anchor)
+    context = scales.context
+    q = context.seen[node] - 1
+    q == 0 && return 0.0
+    edges = context.incident_edges[node]
+    neighbours = context.incident_neighbours[node]
+    logit_norm_squared = 0.0
+    start = context.threshold_starts[node]
+    @inbounds for u in 1:q
+        index = context.threshold_indices[start + u - 1]
+        displacement, _ = _omrf_coordinate_at(
+            state, flow, anchor, index, 0.0)
+        field = 0.0
+        for k in eachindex(edges)
+            edge_index = context.interaction_indices[edges[k]]
+            edge_displacement, _ = _omrf_coordinate_at(
+                state, flow, anchor, edge_index, 0.0)
+            field += context.X[person, neighbours[k]] * edge_displacement
+        end
+        logit = displacement + u * field
+        logit_norm_squared += logit * logit
+    end
+    weighted_velocity = 0.0
+    @inbounds for u in 1:q
+        index = context.threshold_indices[start + u - 1]
+        _, velocity = _omrf_coordinate_at(
+            state, flow, anchor, index, 0.0)
+        weighted_velocity += abs(velocity)
+    end
+    category_square_sum = q * (q + 1) * (2q + 1) / 6
+    @inbounds for k in eachindex(edges)
+        edge_index = context.interaction_indices[edges[k]]
+        _, velocity = _omrf_coordinate_at(
+            state, flow, anchor, edge_index, 0.0)
+        weighted_velocity += abs(velocity) *
+            context.X[person, neighbours[k]] * sqrt(category_square_sum)
+    end
+    return 0.75 * logit_norm_squared * weighted_velocity
+end
+
+@inline function _omrf_node_grouped_zigzag_cell_bound(
+        scales::OMRFNodeGroupedPersonHCVBoxScales,
+        component::Int, node::Int, state, flow, anchor,
+        left::Real, right::Real)
+    context = scales.context
+    q = context.seen[node] - 1
+    q == 0 && return 0.0
+    edges = context.incident_edges[node]
+    neighbours = context.incident_neighbours[node]
+    logit_norm_squared = 0.0
+    start = context.threshold_starts[node]
+    @inbounds for u in 1:q
+        index = context.threshold_indices[start + u - 1]
+        left_displacement, _ = _omrf_coordinate_at(
+            state, flow, anchor, index, left)
+        right_displacement, _ = _omrf_coordinate_at(
+            state, flow, anchor, index, right)
+        left_field = 0.0
+        right_field = 0.0
+        field_uncertainty = 0.0
+        for k in eachindex(edges)
+            edge_index = context.interaction_indices[edges[k]]
+            left_edge, _ = _omrf_coordinate_at(
+                state, flow, anchor, edge_index, left)
+            right_edge, _ = _omrf_coordinate_at(
+                state, flow, anchor, edge_index, right)
+            lower = scales.minima[component, neighbours[k]]
+            upper = scales.maxima[component, neighbours[k]]
+            midpoint = (lower + upper) / 2
+            radius = (upper - lower) / 2
+            left_field += midpoint * left_edge
+            right_field += midpoint * right_edge
+            field_uncertainty += radius * max(abs(left_edge), abs(right_edge))
+        end
+        left_abs = abs(left_displacement + u * left_field) +
+            u * field_uncertainty
+        right_abs = abs(right_displacement + u * right_field) +
+            u * field_uncertainty
+        logit_norm_squared += max(left_abs, right_abs)^2
+    end
+    weighted_velocity = 0.0
+    @inbounds for u in 1:q
+        index = context.threshold_indices[start + u - 1]
+        _, velocity = _omrf_coordinate_at(
+            state, flow, anchor, index, left)
+        weighted_velocity += abs(velocity)
+    end
+    category_square_sum = q * (q + 1) * (2q + 1) / 6
+    @inbounds for k in eachindex(edges)
+        edge_index = context.interaction_indices[edges[k]]
+        _, velocity = _omrf_coordinate_at(
+            state, flow, anchor, edge_index, left)
+        upper = scales.maxima[component, neighbours[k]]
+        weighted_velocity += abs(velocity) * upper * sqrt(category_square_sum)
+    end
+    return 0.75 * logit_norm_squared * weighted_velocity
+end
+
+@inline function _omrf_node_grouped_person_point_bound(
+        scales::OMRFNodeGroupedPersonHCVBoxScales,
+        person::Int, node::Int, state, flow, anchor)
+    if flow isa ZigZag
+        node_anchor = scales.node_anchors === nothing ? scales.anchor :
+            view(scales.node_anchors, :, scales.node_sources[node])
+        return _omrf_node_grouped_person_zigzag_point_bound(
+            scales, person, node, state, flow, node_anchor)
+    end
+    return _omrf_node_grouped_person_point_bound(scales, person, node)
+end
+
 function (scales::OMRFNodeGroupedPersonHCVBoxScales)(out, state,
-        flow::PDMPSamplers.AnyBoomerang, t)
+        flow::Union{PDMPSamplers.AnyBoomerang,BouncyParticle}, t)
     started = time_ns()
     _cache_omrf_node_grouped_point!(scales, state, flow, t)
     @inbounds for component in eachindex(out)
         node = scales.component_nodes[component]
         out[component] = _omrf_node_grouped_point_bound(
             scales, component, node)
+    end
+    scales.context.counts.envelope_point_calls += 1
+    scales.context.counts.envelope_point_seconds +=
+        (time_ns() - started) * 1e-9
+    return out
+end
+
+function (scales::OMRFNodeGroupedPersonHCVBoxScales)(out, state,
+        flow::ZigZag, t)
+    started = time_ns()
+    @inbounds for component in eachindex(out)
+        node = scales.component_nodes[component]
+        anchor = scales.node_anchors === nothing ? scales.anchor :
+            view(scales.node_anchors, :, scales.node_sources[node])
+        out[component] = _omrf_node_grouped_zigzag_point_bound(
+            scales, component, node, state, flow, anchor)
     end
     scales.context.counts.envelope_point_calls += 1
     scales.context.counts.envelope_point_seconds +=
@@ -3612,6 +8360,100 @@ function (scales::OMRFNodeGroupedPersonHCVBoxScales)(out, state,
     return out
 end
 
+function _omrf_node_grouped_linear_cell_bound(
+        scales::OMRFNodeGroupedPersonHCVBoxScales,
+        component::Int, node::Int, state, flow, left::Real, right::Real)
+    context = scales.context
+    q = context.seen[node] - 1
+    q == 0 && return 0.0
+    anchor = scales.node_anchors === nothing ? scales.anchor :
+        view(scales.node_anchors, :, scales.node_sources[node])
+    if flow isa ZigZag
+        return _omrf_node_grouped_zigzag_cell_bound(
+            scales, component, node, state, flow, anchor, left, right)
+    end
+    edges = context.incident_edges[node]
+    neighbours = context.incident_neighbours[node]
+    displacement_range = 0.0
+    velocity_range = 0.0
+    start = context.threshold_starts[node]
+    @inbounds for u in 1:q, v in 0:(u - 1)
+        u_index = context.threshold_indices[start + u - 1]
+        left_displacement, left_velocity = _omrf_coordinate_at(
+            state, flow, anchor, u_index, left)
+        right_displacement, _ = _omrf_coordinate_at(
+            state, flow, anchor, u_index, right)
+        if iszero(v)
+            left_pair = left_displacement
+            right_pair = right_displacement
+            pair_velocity = left_velocity
+        else
+            v_index = context.threshold_indices[start + v - 1]
+            v_left, v_velocity = _omrf_coordinate_at(
+                state, flow, anchor, v_index, left)
+            v_right, _ = _omrf_coordinate_at(
+                state, flow, anchor, v_index, right)
+            left_pair = left_displacement - v_left
+            right_pair = right_displacement - v_right
+            pair_velocity = left_velocity - v_velocity
+        end
+        displacement_uncertainty = 0.0
+        velocity_uncertainty = 0.0
+        multiplier = u - v
+        for k in eachindex(edges)
+            index = context.interaction_indices[edges[k]]
+            left_edge, edge_velocity = _omrf_coordinate_at(
+                state, flow, anchor, index, left)
+            right_edge, _ = _omrf_coordinate_at(
+                state, flow, anchor, index, right)
+            lower = scales.minima[component, neighbours[k]]
+            upper = scales.maxima[component, neighbours[k]]
+            midpoint = (lower + upper) / 2
+            radius = (upper - lower) / 2
+            left_pair += multiplier * midpoint * left_edge
+            right_pair += multiplier * midpoint * right_edge
+            pair_velocity += multiplier * midpoint * edge_velocity
+            displacement_uncertainty += multiplier * radius *
+                max(abs(left_edge), abs(right_edge))
+            velocity_uncertainty += multiplier * radius * abs(edge_velocity)
+        end
+        displacement_range = max(displacement_range,
+            abs(left_pair) + displacement_uncertainty,
+            abs(right_pair) + displacement_uncertainty)
+        velocity_range = max(velocity_range,
+            abs(pair_velocity) + velocity_uncertainty)
+    end
+    return velocity_range * displacement_range^2 / 8
+end
+
+function (scales::OMRFNodeGroupedPersonHCVBoxScales)(out, state,
+        flow::BouncyParticle, left, right)
+    started = time_ns()
+    @inbounds for component in eachindex(out)
+        node = scales.component_nodes[component]
+        out[component] = _omrf_node_grouped_linear_cell_bound(
+            scales, component, node, state, flow, left, right)
+    end
+    scales.context.counts.envelope_cell_calls += 1
+    scales.context.counts.envelope_cell_seconds +=
+        (time_ns() - started) * 1e-9
+    return out
+end
+
+function (scales::OMRFNodeGroupedPersonHCVBoxScales)(out, state,
+        flow::ZigZag, left, right)
+    started = time_ns()
+    @inbounds for component in eachindex(out)
+        node = scales.component_nodes[component]
+        out[component] = _omrf_node_grouped_linear_cell_bound(
+            scales, component, node, state, flow, left, right)
+    end
+    scales.context.counts.envelope_cell_calls += 1
+    scales.context.counts.envelope_cell_seconds +=
+        (time_ns() - started) * 1e-9
+    return out
+end
+
 (scales::OMRFNodeGroupedPersonHCVBoxScales)(out, state,
     flow::PDMPSamplers.PreconditionedDynamics, args...) =
     scales(out, state, flow.dynamics, args...)
@@ -3636,7 +8478,7 @@ function _omrf_cell_cache_slot!(
 end
 
 function (scales::OMRFCellCachedNodeGroupedPersonHCVBoxScales)(out, state,
-        flow::PDMPSamplers.AnyBoomerang, left, right)
+        flow::Union{PDMPSamplers.AnyBoomerang,BouncyParticle,ZigZag}, left, right)
     iszero(left) && (scales.n_cached_cells = 0)
     scales.base(out, state, flow, left, right)
     slot = _omrf_cell_cache_slot!(
@@ -3646,7 +8488,7 @@ function (scales::OMRFCellCachedNodeGroupedPersonHCVBoxScales)(out, state,
 end
 
 function (scales::OMRFCellCachedNodeGroupedPersonHCVBoxScales)(out, state,
-        flow::PDMPSamplers.AnyBoomerang, t)
+        flow::Union{PDMPSamplers.AnyBoomerang,BouncyParticle,ZigZag}, t)
     time = Float64(t)
     # The proposal time lies in a cell already appended to the active clock.
     # Search backwards because the newest cells are proposed from first.
@@ -3709,7 +8551,8 @@ function PDMPSamplers.draw_subset!(rng::Random.AbstractRNG,
     @inbounds for observation in cv.subset
         for partition in axes(envelope.groups, 1)
             point_weight += _omrf_node_grouped_person_point_bound(
-                scales.base, observation, partition)
+                scales.base, observation, partition, scales.cached_state,
+                base_flow, scales.base.anchor)
         end
     end
     scales.selected_person_point_bound = (N / m) * point_weight
@@ -3744,13 +8587,27 @@ end
     return _omrf_node_grouped_point_bound(scales.base, component, node)
 end
 
+@inline function _omrf_lazy_component_point_bound(
+        scales::OMRFLazyNodeGroupedPersonHCVBoxScales,
+        component::Int, flow)
+    node = scales.base.component_nodes[component]
+    anchor = scales.base.node_anchors === nothing ? scales.base.anchor :
+        view(scales.base.node_anchors, :, scales.base.node_sources[node])
+    if flow isa ZigZag
+        return _omrf_node_grouped_zigzag_point_bound(
+            scales.base, component, node, scales.cached_state,
+            flow, anchor)
+    end
+    return _omrf_node_grouped_point_bound(scales.base, component, node)
+end
+
 function (scales::OMRFLazyNodeGroupedPersonHCVBoxScales)(out, state,
-        flow::PDMPSamplers.AnyBoomerang, t)
+        flow::Union{PDMPSamplers.AnyBoomerang,BouncyParticle,ZigZag}, t)
     started = time_ns()
     _cache_omrf_lazy_point!(scales, state, flow, t)
     @inbounds for root_index in eachindex(scales.roots, out)
         out[root_index] = _omrf_lazy_component_point_bound(
-            scales, scales.roots[root_index])
+            scales, scales.roots[root_index], _omrf_lazy_base_flow(flow))
     end
     scales.base.context.counts.envelope_point_calls += 1
     scales.base.context.counts.envelope_point_seconds +=
@@ -3759,19 +8616,26 @@ function (scales::OMRFLazyNodeGroupedPersonHCVBoxScales)(out, state,
 end
 
 function (scales::OMRFLazyNodeGroupedPersonHCVBoxScales)(out, state,
-        flow::PDMPSamplers.AnyBoomerang, left, right)
+        flow::Union{PDMPSamplers.AnyBoomerang,BouncyParticle,ZigZag}, left, right)
     started = time_ns()
     midpoint = (left + right) / 2
     midpoint_sine, midpoint_cosine = sincos(midpoint)
     half_width = (right - left) / 2
-    _cache_omrf_node_grouped_cell!(scales.base, state, flow,
-        midpoint_sine, midpoint_cosine, half_width)
-    @inbounds for root_index in eachindex(scales.roots, out)
-        component = scales.roots[root_index]
-        node = scales.base.component_nodes[component]
-        out[root_index] = _omrf_node_grouped_cell_bound(
-            scales.base, component, node, midpoint_sine, midpoint_cosine,
-            half_width)
+    if flow isa Union{BouncyParticle,ZigZag}
+        scales.base(scales.leaf_scales, state, flow, left, right)
+        @inbounds for root_index in eachindex(scales.roots, out)
+            out[root_index] = scales.leaf_scales[scales.roots[root_index]]
+        end
+    else
+        _cache_omrf_node_grouped_cell!(scales.base, state, flow,
+            midpoint_sine, midpoint_cosine, half_width)
+        @inbounds for root_index in eachindex(scales.roots, out)
+            component = scales.roots[root_index]
+            node = scales.base.component_nodes[component]
+            out[root_index] = _omrf_node_grouped_cell_bound(
+                scales.base, component, node, midpoint_sine, midpoint_cosine,
+                half_width)
+        end
     end
     scales.base.context.counts.envelope_cell_calls += 1
     scales.base.context.counts.envelope_cell_seconds +=
@@ -3819,6 +8683,7 @@ function PDMPSamplers.draw_subset!(rng::Random.AbstractRNG,
     scales = envelope.component_scales!
     counts = scales.base.context.counts
     started = time_ns()
+    base_flow = _omrf_lazy_base_flow(scales.cached_flow)
     N = PDMPSamplers.n_observations(envelope)
     m = cv.m
     total = D + B
@@ -3834,8 +8699,10 @@ function PDMPSamplers.draw_subset!(rng::Random.AbstractRNG,
         parent_scale = envelope.scales[root_index]
         while !scales.leaves[component]
             left, right = scales.children[component]
-            left_scale = _omrf_lazy_component_point_bound(scales, left)
-            right_scale = _omrf_lazy_component_point_bound(scales, right)
+            left_scale = _omrf_lazy_component_point_bound(
+                scales, left, base_flow)
+            right_scale = _omrf_lazy_component_point_bound(
+                scales, right, base_flow)
             counts.lazy_branch_evaluations += 2
             left_mass = left_scale * length(scales.members[left])
             child_mass = left_mass +
@@ -3882,7 +8749,8 @@ function PDMPSamplers.draw_subset!(rng::Random.AbstractRNG,
         bound = 0.0
         for partition in axes(scales.leaf_groups, 1)
             component = scales.leaf_groups[partition, observation]
-            value = _omrf_lazy_component_point_bound(scales, component)
+            value = _omrf_lazy_component_point_bound(
+                scales, component, base_flow)
             counts.lazy_leaf_evaluations += 1
             bound += value
         end
@@ -4200,6 +9068,19 @@ function (scales::OMRFDampedHCVNodeLocalScales)(out, state, flow, t)
         end
         return out
     end
+    if scales.context.hcv_nodewise
+        @inbounds for node in 1:P
+            displacement, velocity = _omrf_node_geometry(
+                state, flow, scales.anchor, scales.supports[node], t)
+            displacement2 = displacement * displacement
+            α = isinf(scales.context.hcv_damping) ? 1.0 :
+                scales.context.hcv_damping /
+                (scales.context.hcv_damping + displacement2)
+            _fill_omrf_damped_hcv_scales!(out, node, P,
+                displacement, velocity, α)
+        end
+        return out
+    end
     global_displacement, _ = PDMPSamplers.trajectory_geometry_bounds(
         flow, state, scales.anchor, t)
     damping = scales.context.hcv_damping
@@ -4246,6 +9127,19 @@ function (scales::OMRFDampedHCVNodeLocalScales)(out, state, flow, left, right)
                 state, flow, scales.anchor, scales.supports[node], left, right)
             out[node] = velocity * displacement
             out[P + node] = 0.0
+        end
+        return out
+    end
+    if scales.context.hcv_nodewise
+        damping = scales.context.hcv_damping
+        @inbounds for node in 1:P
+            displacement, velocity = _omrf_node_cell_geometry(
+                state, flow, scales.anchor, scales.supports[node], left, right)
+            displacement2 = displacement * displacement
+            one_minus_α_bound = isinf(damping) ? 0.0 :
+                displacement2 / (damping + displacement2)
+            out[node] = velocity * displacement * one_minus_α_bound
+            out[P + node] = velocity * displacement2
         end
         return out
     end
@@ -4297,6 +9191,114 @@ function _build_omrf_residual_envelope(envelope_spec, anchor,
         residual_context::OMRFResidualContext)
     bound_type = _haskey(envelope_spec, :bound_type) ?
         String(_rget(envelope_spec, :bound_type)) : ""
+    # Compact norm-local specifications intentionally omit the generic dense
+    # P-by-(NP) matrices. Dispatch on their specialized payload first; legacy
+    # specifications carrying those matrices reach exactly the same branch.
+    if bound_type in ("node_box_first_order",
+            "cell_marked_node_box_first_order")
+        residual_context.factorization === :person_node ||
+            throw(ArgumentError(
+                "node-box first-order geometry requires person-node factorization"))
+        !residual_context.use_hcv && !residual_context.hcv_active ||
+            throw(ArgumentError(
+                "node-box first-order geometry requires an ordinary first-order CV"))
+        groups_by_node = Matrix{Int}(
+            _rget(envelope_spec, :node_box_membership))
+        N, P = size(residual_context.X)
+        size(groups_by_node) == (P, N) || throw(DimensionMismatch(
+            "node-box membership must be a P-by-N matrix"))
+        component_nodes = _as_int_vector(
+            _rget(envelope_spec, :node_box_nodes))
+        minima = _as_float_matrix(_rget(envelope_spec, :node_box_minima))
+        maxima = _as_float_matrix(_rget(envelope_spec, :node_box_maxima))
+        n_components = length(component_nodes)
+        size(minima) == size(maxima) == (n_components, P) ||
+            throw(DimensionMismatch(
+                "node-box extrema must contain one P-vector per component"))
+        all(component -> 1 <= component <= n_components, groups_by_node) ||
+            throw(ArgumentError("node-box membership is out of range"))
+        all(minima .<= maxima) || throw(ArgumentError(
+            "node-box minima must not exceed maxima"))
+        if bound_type == "cell_marked_node_box_first_order"
+            n_components == 2P || throw(ArgumentError(
+                "cell-marked node-box geometry currently requires G=2"))
+            exact_refinement = _haskey(envelope_spec,
+                :exact_selected_refinement) && Bool(_rget(
+                    envelope_spec, :exact_selected_refinement))
+            exact_refinement || throw(ArgumentError(
+                "cell-marked node-box geometry requires exact selected-factor refinement"))
+        end
+        @inbounds for node in 1:P, person in 1:N
+            component_nodes[groups_by_node[node, person]] == node ||
+                throw(ArgumentError(
+                    "node-box membership refers to a component for another node"))
+        end
+        # Person-node factor indices are node-major: all N people for node 1,
+        # then all N people for node 2. One grouped partition therefore
+        # represents exactly NP factors without a dense P-by-NP matrix.
+        groups = reshape(vec(permutedims(groups_by_node)), 1, N * P)
+        d = length(anchor)
+        scales = OMRFNodeBoxFirstOrderScales(copy(anchor), component_nodes,
+            minima, maxima, residual_context, zeros(d), zeros(d), zeros(d),
+            zeros(d))
+        if bound_type == "cell_marked_node_box_first_order"
+            component_totals = zeros(n_components)
+            @inbounds for factor in axes(groups, 2)
+                component_totals[groups[1, factor]] += 1.0
+            end
+            # A schedule normally uses only a handful of cells. Preallocating
+            # 128 keeps ordinary cell construction allocation-free; unusual
+            # larger schedules grow geometrically during construction.
+            capacity = 128
+            cell_marked = OMRFCellMarkedNodeBoxFirstOrderScales(
+                scales, component_totals, zeros(capacity), zeros(capacity),
+                zeros(n_components, capacity),
+                zeros(n_components, capacity), zeros(capacity), 0,
+                0.0, 0, zeros(d), zeros(d), trues(d), false, zeros(d), false, NaN,
+                0, 0, 0.0, 0, 0)
+            return PDMPSamplers.GroupedResidualEnvelope(
+                groups, n_components, cell_marked;
+                component_cell_scales! = cell_marked)
+        end
+        return PDMPSamplers.GroupedResidualEnvelope(
+            groups, n_components, scales; component_cell_scales! = scales)
+    end
+    if bound_type == "norm_local_hcv_compact"
+        residual_context.factorization === :person_node ||
+            throw(ArgumentError(
+                "compact HCV norm-local geometry requires person-node factorization"))
+        residual_context.use_hcv && residual_context.hcv_active &&
+            isinf(residual_context.hcv_damping) || throw(ArgumentError(
+                "compact HCV norm-local geometry requires active undamped HCV"))
+        residual_context.hcv_nodewise && throw(ArgumentError(
+            "compact HCV norm-local geometry requires a global HCV"))
+        weights = _as_float_matrix(_rget(envelope_spec, :norm_weights))
+        N, P = size(residual_context.X)
+        size(weights) == (4P, N) || throw(DimensionMismatch(
+            "compact HCV norm-local weights must be a 4P-by-N matrix"))
+        scales = OMRFCompactHCVNormLocalScales(anchor, residual_context)
+        component_blocks = repeat(collect(1:P), 4)
+        return PDMPSamplers.BlockSeparableResidualEnvelope(
+            weights, component_blocks, P, scales;
+            component_cell_scales! = scales)
+    end
+    if bound_type == "node_local_norm_low_rank" &&
+            _haskey(envelope_spec, :norm_weights) &&
+            !residual_context.use_hcv
+        weights = _as_float_matrix(_rget(envelope_spec, :norm_weights))
+        N, P = size(residual_context.X)
+        size(weights) == (3P, N) || throw(DimensionMismatch(
+            "OMRF norm-local weights must be a 3P-by-N matrix"))
+        scales = OMRFNormLocalScales(anchor, residual_context)
+        if residual_context.factorization === :person_node
+            component_blocks = repeat(collect(1:P), 3)
+            return PDMPSamplers.BlockSeparableResidualEnvelope(
+                weights, component_blocks, P, scales;
+                component_cell_scales! = scales)
+        end
+        return SeparableResidualEnvelope(weights, scales;
+            component_cell_scales! = scales)
+    end
     if bound_type in ("node_grouped_person_hcv_box",
             "cell_cached_node_grouped_person_hcv_box",
             "lazy_node_grouped_person_hcv_box")
@@ -4518,15 +9520,45 @@ function _build_omrf_residual_envelope(envelope_spec, anchor,
                 (length(component_nodes), size(residual_context.X, 2)) ||
                 throw(DimensionMismatch(
                     "OMRF structural covariates have the wrong dimensions"))
+            packed_metadata = _build_omrf_pattern_packed_metadata(
+                component_nodes, component_covariates, residual_context)
             workspace_length = maximum(residual_context.seen)
+            active_compression = residual_context.active_pattern_compression
+            hash_capacity = 1
+            while hash_capacity < 2 * size(residual_context.X, 1)
+                hash_capacity <<= 1
+            end
             scales = OMRFPatternLocalScales(anchor, component_nodes,
-                component_covariates, residual_context,
+                component_covariates, packed_metadata..., residual_context,
+                active_compression, n_components,
+                active_compression ? -1 : 0,
+                active_compression ? trues(length(anchor)) : BitVector(),
+                false, nothing, nothing, nothing,
+                active_compression ? zeros(UInt64, hash_capacity) :
+                    zeros(UInt64, 1),
+                active_compression ? zeros(Int, hash_capacity) : zeros(Int, 1),
+                active_compression ? zeros(Int, hash_capacity) : zeros(Int, 1),
+                0,
+                active_compression ? zeros(Int, size(residual_context.X, 1)) :
+                    Int[],
                 zeros(workspace_length), zeros(workspace_length),
                 zeros(workspace_length), zeros(length(anchor)),
-                zeros(length(anchor)), zeros(length(anchor)))
-            return PDMPSamplers.GroupedResidualEnvelope(
+                zeros(length(anchor)), zeros(length(anchor)),
+                zeros(length(anchor)), zeros(length(anchor)),
+                zeros(length(anchor)))
+            envelope = PDMPSamplers.GroupedResidualEnvelope(
                 groups, n_components, scales;
                 component_cell_scales! = scales)
+            if active_compression
+                _attach_omrf_active_pattern!(envelope, scales)
+                # Build the initial active partition once at construction so
+                # the envelope is valid before the first sampler callback.
+                # Subsequent sticky transitions use the generation check in
+                # `_ensure_omrf_active_pattern!` and rebuild lazily at the
+                # next point/cell query.
+                _rebuild_omrf_active_pattern!(scales)
+            end
+            return envelope
         end
         if bound_type == "covariate_local_expansion" &&
                 _haskey(envelope_spec, :covariate_weights) &&
@@ -4542,7 +9574,9 @@ function _build_omrf_residual_envelope(envelope_spec, anchor,
                 init=0)
             scales = OMRFCovariateLocalScales(anchor, residual_context,
                 zeros(max_degree), zeros(max_degree), zeros(length(anchor)),
-                zeros(length(anchor)), zeros(length(anchor)))
+                zeros(length(anchor)), zeros(length(anchor)),
+                zeros(length(anchor)), zeros(length(anchor)), zeros(length(anchor)),
+                zeros(length(anchor)), falses(length(anchor)), UInt(0), false)
             if residual_context.factorization === :person_node
                 component_blocks = _as_int_vector(
                     _rget(envelope_spec, :covariate_component_blocks))
@@ -4553,6 +9587,64 @@ function _build_omrf_residual_envelope(envelope_spec, anchor,
             return SeparableResidualEnvelope(weights, scales;
                 component_cell_scales! = scales)
         end
+        if bound_type == "covariate_local_compact" &&
+                residual_context.factorization === :person_node &&
+                !residual_context.use_hcv
+            N = size(residual_context.X, 1)
+            P = size(residual_context.X, 2)
+            signed_bps = _haskey(envelope_spec, :signed_bps) &&
+                Bool(_rget(envelope_spec, :signed_bps))
+            signed_harmonic = _haskey(envelope_spec, :signed_harmonic) &&
+                Bool(_rget(envelope_spec, :signed_harmonic))
+            return _new_omrf_compact_envelope(anchor, residual_context;
+                signed_bps=signed_bps, signed_harmonic=signed_harmonic)
+        end
+        if bound_type == "direct_person_node_hcv"
+            residual_context.factorization === :person_node ||
+                throw(ArgumentError(
+                    "direct HCV geometry requires person-node factorization"))
+            residual_context.use_hcv && residual_context.hcv_active &&
+                isinf(residual_context.hcv_damping) || throw(ArgumentError(
+                    "direct HCV geometry requires active undamped HCV"))
+            residual_context.hcv_nodewise && throw(ArgumentError(
+                "direct HCV geometry requires a global HCV"))
+            return _new_omrf_direct_hcv_envelope(anchor, residual_context)
+        end
+        if bound_type == "direct_person_node_cv"
+            residual_context.factorization === :person_node ||
+                throw(ArgumentError(
+                    "direct first-order CV geometry requires person-node factorization"))
+            !residual_context.use_hcv && !residual_context.hcv_active ||
+                throw(ArgumentError(
+                    "direct first-order CV geometry does not use a Hessian CV"))
+            cell_scope = _haskey(envelope_spec, :direct_cv_cell_scope) ?
+                String(_rget(envelope_spec, :direct_cv_cell_scope)) : "cell"
+            cell_scope in ("cell", "event_horizon") || throw(ArgumentError(
+                "direct CV cell scope must be cell or event_horizon"))
+            return _new_omrf_direct_hcv_envelope(anchor, residual_context;
+                hcv_remainder=false,
+                event_horizon_scope=cell_scope == "event_horizon")
+        end
+        if bound_type == "norm_local_hcv_compact"
+            residual_context.factorization === :person_node ||
+                throw(ArgumentError(
+                    "compact HCV norm-local geometry requires person-node factorization"))
+            residual_context.use_hcv && residual_context.hcv_active &&
+                isinf(residual_context.hcv_damping) || throw(ArgumentError(
+                    "compact HCV norm-local geometry requires active undamped HCV"))
+            residual_context.hcv_nodewise && throw(ArgumentError(
+                "compact HCV norm-local geometry requires a global HCV"))
+            weights = _as_float_matrix(_rget(envelope_spec, :norm_weights))
+            P = size(residual_context.X, 2)
+            size(weights) == (4P, size(residual_context.X, 1)) ||
+                throw(DimensionMismatch(
+                    "compact HCV norm-local weights must contain four rows per node"))
+            scales = OMRFCompactHCVNormLocalScales(anchor, residual_context)
+            component_blocks = repeat(collect(1:P), 4)
+            return PDMPSamplers.BlockSeparableResidualEnvelope(
+                weights, component_blocks, P, scales;
+                component_cell_scales! = scales)
+        end
         if _haskey(envelope_spec, :norm_weights) &&
                 !residual_context.use_hcv
             weights = _as_float_matrix(_rget(envelope_spec, :norm_weights))
@@ -4560,6 +9652,14 @@ function _build_omrf_residual_envelope(envelope_spec, anchor,
                 throw(DimensionMismatch(
                     "OMRF norm-local weights must have three rows per node"))
             scales = OMRFNormLocalScales(anchor, residual_context)
+            if residual_context.factorization === :person_node
+                P = size(residual_context.X, 2)
+                component_blocks = vcat(collect(1:P), collect(1:P),
+                    collect(1:P))
+                return PDMPSamplers.BlockSeparableResidualEnvelope(
+                    weights, component_blocks, P, scales;
+                    component_cell_scales! = scales)
+            end
             return SeparableResidualEnvelope(weights, scales;
                 component_cell_scales! = scales)
         end
@@ -4605,6 +9705,111 @@ mutable struct OMRFAnchorEntry
     age::Int
 end
 
+mutable struct OMRFWindowDiagnostics
+    width::Float64
+    origin::Float64
+    next_boundary::Float64
+    last_time::Float64
+    last_wall_ns::UInt64
+    last_reflections::Int
+    last_roof_proposals::Int
+    last_subset_evaluations::Int
+    last_proposal_count::Int
+    last_certificate_sum::Float64
+    last_intrinsic_sum::Float64
+    last_allocated_bytes::UInt64
+    anchor_distance_sum::Float64
+    anchor_distance_count::Int
+    diagnostic_seconds::Float64
+    rows::Vector{Dict{String,Any}}
+    pending_post::Any
+    row_pushed_this_call::Bool
+    last_pipeline_values::Dict{Symbol,Float64}
+end
+
+function OMRFWindowDiagnostics(width::Real)
+    width > 0 || throw(ArgumentError("OMRF diagnostic window width must be positive"))
+    return OMRFWindowDiagnostics(Float64(width), NaN, NaN, NaN, UInt(0),
+        0, 0, 0, 0, 0.0, 0.0, UInt(0), 0.0, 0,
+        0.0, Dict{String,Any}[], nothing, false, Dict{Symbol,Float64}())
+end
+
+@inline _omrf_allocated_bytes() = _OMRF_RESEARCH_DIAGNOSTICS ? begin
+    gc = Base.gc_num()
+    UInt(gc.total_allocd + gc.allocd)
+end : UInt(0)
+
+"""Measure the residual funnel at one retained BPS trajectory state.
+
+This is deliberately opt-in through the existing diagnostic-window path. It
+reuses the exact factor residual oracle for the diagnostic only; it is not
+part of ordinary sampling. The signed quantity is the existing person-node
+pattern certificate, while the compact quantity is the pointwise compact
+aggregate bound.
+"""
+function _omrf_window_funnel(manager, state, flow)
+    actual_flow = flow isa PDMPSamplers.PreconditionedDynamics ?
+        flow.dynamics : flow
+    actual_flow isa Union{BouncyParticle,PDMPSamplers.AnyBoomerang} ||
+        return nothing
+    manager.active_idx > 0 || return nothing
+    prepared = manager.entries[manager.active_idx].state
+    envelope = prepared.envelope
+    oracle = manager.oracle
+    context = oracle.residual_context
+    compact = PDMPSamplers.total_residual_bound(
+        envelope, state, flow, 0.0)
+    signed = 0.0
+    people, nodes = size(context.X)
+    @inbounds for node in 1:nodes, person in 1:people
+        signed += _omrf_person_node_pattern_bound_at(
+            context, oracle.anchor, state, flow, person, node, 0.0)
+    end
+    deterministic_gradient = zeros(Float64, length(state.ξ.x))
+    oracle(deterministic_gradient, state.ξ.x)
+    corrected_deterministic = copy(deterministic_gradient)
+    if actual_flow isa PDMPSamplers.AnyBoomerang
+        z = state.ξ.x .- actual_flow.μ
+        mul!(corrected_deterministic, actual_flow.Γ, z,
+            -1.0, 1.0)
+    end
+    deterministic_rate = PDMPSamplers.λ(
+        state, corrected_deterministic, flow)
+    residual = zeros(Float64, length(state.ξ.x))
+    full_gradient = copy(deterministic_gradient)
+    one_factor = [0]
+    exact_sum = 0.0
+    stochastic_sum = 0.0
+    @inbounds for factor in 1:(people * nodes)
+        one_factor[1] = factor
+        oracle(residual, state.ξ.x, one_factor, oracle.anchor)
+        exact_sum += _omrf_exact_selected_residual_abs_rate(
+            state, residual, flow, context.touched_positions)
+        full_gradient .+= residual
+        stochastic_gradient = deterministic_gradient .+
+            (people * nodes) .* residual
+        if actual_flow isa PDMPSamplers.AnyBoomerang
+            z = state.ξ.x .- actual_flow.μ
+            mul!(stochastic_gradient, actual_flow.Γ, z,
+                -1.0, 1.0)
+        end
+        stochastic_sum += PDMPSamplers.λ(
+            state, stochastic_gradient, flow)
+    end
+    if actual_flow isa PDMPSamplers.AnyBoomerang
+        z = state.ξ.x .- actual_flow.μ
+        mul!(full_gradient, actual_flow.Γ, z, -1.0, 1.0)
+    end
+    full_rate = PDMPSamplers.λ(state, full_gradient, flow)
+    return (compact=compact, signed=signed, exact_sum=exact_sum,
+        exact_mean=exact_sum / (people * nodes),
+        stochastic_rate_mean=stochastic_sum / (people * nodes),
+        deterministic_rate=deterministic_rate,
+        deterministic_grid_roof=deterministic_rate,
+        actual_stochastic_rate=stochastic_sum / (people * nodes),
+        full_rate=full_rate)
+end
+
 """Chain-local LRU bank of fully prepared OMRF anchor states."""
 mutable struct OMRFAnchorManager
     oracle::OMRFAnalyticSubsamplingOracle
@@ -4628,6 +9833,8 @@ mutable struct OMRFAnchorManager
     recycled_state::Union{Nothing,OMRFPreparedAnchorState}
     recycled_preparations::Int
     warmup_finish_preparations::Int
+    warmup_finish_preparation_seconds::Float64
+    warmup_finish_selection_seconds::Float64
     warmup_finish_native_full_data_scans::Int
     warmup_finish_event_bound_observation_visits::Int
     selection_seconds::Float64
@@ -4637,13 +9844,304 @@ mutable struct OMRFAnchorManager
     node_source_checks::Int
     node_source_skips::Int
     node_source_changes::Int
+    window_diagnostics::Any
 end
+
+@inline function _omrf_window_counter(stats, name::Symbol)
+    return Int(getproperty(stats, name))
+end
+
+const _OMRF_PIPELINE_WINDOW_FIELDS = (
+    :clock_candidates, :grid_bound_evaluations,
+    :pointwise_screen_evaluations, :pointwise_screen_passes,
+    :subset_draws, :selected_subset_bound_evaluations,
+    :selected_subset_bound_passes, :residual_oracle_evaluations,
+    :final_thinning_acceptances, :reflection_events, :sticky_events,
+    :grid_bound_seconds, :pointwise_screen_seconds, :subset_draw_seconds,
+    :selected_subset_refinement_seconds, :residual_oracle_seconds,
+    :final_thinning_seconds, :reflection_update_seconds,
+    :sticky_update_seconds,
+)
+
+function _omrf_window_values(manager::OMRFAnchorManager, stats)
+    names = _OMRF_PIPELINE_WINDOW_FIELDS
+    values = Dict{Symbol,Float64}(
+        name => Float64(getproperty(stats, name)) for name in names)
+    values[:anchor_selections] = Float64(manager.main_selections)
+    values[:anchor_switches] = Float64(manager.main_activations)
+    values[:anchor_refreshes] = Float64(manager.main_refreshes)
+    values[:native_full_data_scans] = Float64(
+        manager.oracle.ctx.counts.native_full_data_scans -
+        manager.warmup_finish_native_full_data_scans)
+    return values
+end
+
+function _omrf_nearest_anchor_distance(manager::OMRFAnchorManager, x)
+    isempty(manager.entries) && return NaN
+    return sqrt(minimum(_omrf_anchor_distance2(manager, x, entry.state)
+        for entry in manager.entries))
+end
+
+function _omrf_window_post!(manager::OMRFAnchorManager, state, flow)
+    window = manager.window_diagnostics
+    window === nothing && return nothing
+    # Funnel evaluation scans every person-node factor and is intended only
+    # for bounded research diagnostics.  Evaluate the post-event side only
+    # when the matching pre-event call actually emitted a window row.
+    window.row_pushed_this_call || return nothing
+    diagnostic_started = time_ns()
+    funnel = _omrf_window_funnel(manager, state, flow)
+    window.diagnostic_seconds += (time_ns() - diagnostic_started) * 1e-9
+    distance = manager.active_idx > 0 ? sqrt(_omrf_anchor_distance2(
+        manager, state.ξ.x, manager.entries[manager.active_idx].state)) : NaN
+    snapshot = (funnel=funnel, distance=distance)
+    if window.row_pushed_this_call && !isempty(window.rows)
+        row = window.rows[end]
+        row["post_anchor_distance"] = distance
+        row["post_compact_residual_bound"] = funnel === nothing ? NaN : funnel.compact
+        row["post_signed_predictor_bound"] = funnel === nothing ? NaN : funnel.signed
+        row["post_stochastic_bps_rate_mean"] = funnel === nothing ? NaN : funnel.stochastic_rate_mean
+        row["post_exact_factor_rate_sum"] = funnel === nothing ? NaN : funnel.exact_sum
+        row["post_exact_factor_rate_mean"] = funnel === nothing ? NaN : funnel.exact_mean
+        row["post_full_gradient_bps_rate"] = funnel === nothing ? NaN : funnel.full_rate
+        row["post_deterministic_rate"] = funnel === nothing ? NaN : funnel.deterministic_rate
+        row["post_deterministic_grid_roof"] = funnel === nothing ? NaN : funnel.deterministic_grid_roof
+        row["post_actual_stochastic_rate"] = funnel === nothing ? NaN : funnel.actual_stochastic_rate
+    else
+        window.pending_post = snapshot
+    end
+    return nothing
+end
+
+function _record_omrf_window!(manager::OMRFAnchorManager, state, flow, stats;
+        stage::Symbol=:pre)
+    window = manager.window_diagnostics
+    window === nothing && return nothing
+    stage === :post && return _omrf_window_post!(manager, state, flow)
+    window.row_pushed_this_call = false
+    reflections = _omrf_window_counter(stats, :reflections_events)
+    roofs = _omrf_window_counter(stats, :subsampling_cell_roof_proposals)
+    subsets = _omrf_window_counter(stats, :subsampling_subset_evaluations)
+    proposal_count = manager.oracle.ctx.counts.proposal_count
+    certificate_sum = manager.oracle.ctx.counts.proposal_certificate_ratio_sum
+    intrinsic_sum = manager.oracle.ctx.counts.proposal_intrinsic_ratio_sum
+    time_now = Float64(state.t[])
+    if isnan(window.origin)
+        # Trace times are absolute (warmup plus retained phase).  Establish a
+        # local retained-phase origin at the first main-phase callback and
+        # initialize cumulative baselines there; finalization extends this
+        # local origin by the requested retained horizon.
+        window.origin = time_now
+        window.last_time = time_now
+        window.next_boundary = time_now + window.width
+        window.last_wall_ns = UInt(time_ns())
+        window.last_reflections = reflections
+        window.last_roof_proposals = roofs
+        window.last_subset_evaluations = subsets
+        window.last_proposal_count = proposal_count
+        window.last_certificate_sum = certificate_sum
+        window.last_allocated_bytes = _omrf_allocated_bytes()
+        empty!(window.last_pipeline_values)
+        merge!(window.last_pipeline_values, _omrf_window_values(manager, stats))
+    end
+    distance = sqrt(_omrf_anchor_distance2(manager, state.ξ.x,
+        manager.entries[manager.active_idx].state))
+    window.anchor_distance_sum += distance
+    window.anchor_distance_count += 1
+    # Do not pay an O(NP) diagnostic scan at every event.  A funnel is needed
+    # only when this call crosses a requested diagnostic-window boundary.
+    pre_funnel = nothing
+    if time_now >= window.next_boundary
+        diagnostic_started = time_ns()
+        pre_funnel = _omrf_window_funnel(manager, state, flow)
+        window.diagnostic_seconds += (time_ns() - diagnostic_started) * 1e-9
+    end
+    pre_distance = distance
+    while time_now >= window.next_boundary
+        elapsed = window.next_boundary - window.last_time
+        elapsed = max(elapsed, eps(Float64))
+        wall_now = UInt(time_ns())
+        wall_seconds = max(0.0, (wall_now - window.last_wall_ns) * 1e-9)
+        reflection_delta = reflections - window.last_reflections
+        roof_delta = roofs - window.last_roof_proposals
+        subset_delta = subsets - window.last_subset_evaluations
+        proposal_delta = proposal_count - window.last_proposal_count
+        certificate_delta = certificate_sum - window.last_certificate_sum
+        intrinsic_delta = intrinsic_sum - window.last_intrinsic_sum
+        allocated_now = _omrf_allocated_bytes()
+        allocated_delta = allocated_now - window.last_allocated_bytes
+        current_pipeline = _omrf_window_values(manager, stats)
+        pipeline_delta = Dict{Symbol,Float64}(
+            name => current_pipeline[name] -
+                get(window.last_pipeline_values, name, 0.0)
+            for name in keys(current_pipeline))
+        funnel = pre_funnel
+        pending_post = window.pending_post
+        push!(window.rows, Dict{String,Any}(
+            "window_start" => window.last_time - window.origin,
+            "window_end" => window.next_boundary - window.origin,
+            "anchor_mean_distance" => window.anchor_distance_count == 0 ?
+                NaN : window.anchor_distance_sum / window.anchor_distance_count,
+            "reflection_count" => reflection_delta,
+            "reflection_rate" => reflection_delta / elapsed,
+            "roof_proposals" => roof_delta,
+            "proposal_rate" => roof_delta / elapsed,
+            "subset_evaluations" => subset_delta,
+            "subsets_per_reflection" => reflection_delta == 0 ?
+                NaN : subset_delta / reflection_delta,
+            "proposals_per_reflection" => reflection_delta == 0 ?
+                NaN : roof_delta / reflection_delta,
+            "proposal_count" => proposal_delta,
+            "certificate_ratio" => proposal_delta == 0 ?
+                NaN : certificate_delta / proposal_delta,
+            "intrinsic_ratio" => proposal_delta == 0 ?
+                NaN : intrinsic_delta / proposal_delta,
+            "wall_seconds_per_pdmp_time" => wall_seconds / elapsed,
+            "main_phase_wall_seconds" => wall_seconds,
+            "anchor_distance_active" => pre_distance,
+            "nearest_prepared_anchor_distance" =>
+                _omrf_nearest_anchor_distance(manager, state.ξ.x),
+            "allocated_bytes" => allocated_delta,
+            "allocated_bytes_per_roof_proposal" => roof_delta == 0 ?
+                NaN : allocated_delta / roof_delta,
+            "allocated_bytes_per_subset_evaluation" => subset_delta == 0 ?
+                NaN : allocated_delta / subset_delta,
+            "anchor_distance" => pre_distance,
+            "compact_residual_bound" => funnel === nothing ? NaN : funnel.compact,
+            "signed_predictor_bound" => funnel === nothing ? NaN : funnel.signed,
+            "stochastic_bps_rate_mean" => funnel === nothing ? NaN : funnel.stochastic_rate_mean,
+            "exact_factor_rate_sum" => funnel === nothing ? NaN : funnel.exact_sum,
+            "exact_factor_rate_mean" => funnel === nothing ? NaN : funnel.exact_mean,
+            "full_gradient_bps_rate" => funnel === nothing ? NaN : funnel.full_rate,
+            "deterministic_rate" => funnel === nothing ? NaN : funnel.deterministic_rate,
+            "deterministic_grid_roof" => funnel === nothing ? NaN : funnel.deterministic_grid_roof,
+            "actual_stochastic_rate" => funnel === nothing ? NaN : funnel.actual_stochastic_rate,
+            "pre_anchor_distance" => pre_distance,
+            "pre_compact_residual_bound" => funnel === nothing ? NaN : funnel.compact,
+            "pre_signed_predictor_bound" => funnel === nothing ? NaN : funnel.signed,
+            "pre_stochastic_bps_rate_mean" => funnel === nothing ? NaN : funnel.stochastic_rate_mean,
+            "pre_exact_factor_rate_sum" => funnel === nothing ? NaN : funnel.exact_sum,
+            "pre_exact_factor_rate_mean" => funnel === nothing ? NaN : funnel.exact_mean,
+            "pre_full_gradient_bps_rate" => funnel === nothing ? NaN : funnel.full_rate,
+            "post_anchor_distance" => pending_post === nothing ? NaN : pending_post.distance,
+            "post_compact_residual_bound" => pending_post === nothing || pending_post.funnel === nothing ? NaN : pending_post.funnel.compact,
+            "post_signed_predictor_bound" => pending_post === nothing || pending_post.funnel === nothing ? NaN : pending_post.funnel.signed,
+            "post_stochastic_bps_rate_mean" => pending_post === nothing || pending_post.funnel === nothing ? NaN : pending_post.funnel.stochastic_rate_mean,
+            "post_exact_factor_rate_sum" => pending_post === nothing || pending_post.funnel === nothing ? NaN : pending_post.funnel.exact_sum,
+            "post_exact_factor_rate_mean" => pending_post === nothing || pending_post.funnel === nothing ? NaN : pending_post.funnel.exact_mean,
+            "post_full_gradient_bps_rate" => pending_post === nothing || pending_post.funnel === nothing ? NaN : pending_post.funnel.full_rate,
+            "post_deterministic_rate" => pending_post === nothing || pending_post.funnel === nothing ? NaN : pending_post.funnel.deterministic_rate,
+            "post_deterministic_grid_roof" => pending_post === nothing || pending_post.funnel === nothing ? NaN : pending_post.funnel.deterministic_grid_roof,
+            "post_actual_stochastic_rate" => pending_post === nothing || pending_post.funnel === nothing ? NaN : pending_post.funnel.actual_stochastic_rate))
+        for name in keys(current_pipeline)
+            row = window.rows[end]
+            row[string(name)] = pipeline_delta[name]
+            row[string(Symbol("cumulative_", name))] = current_pipeline[name]
+        end
+        window.pending_post = nothing
+        window.row_pushed_this_call = true
+        window.last_time = window.next_boundary
+        window.next_boundary += window.width
+        window.last_wall_ns = wall_now
+        window.last_reflections = reflections
+        window.last_roof_proposals = roofs
+        window.last_subset_evaluations = subsets
+        window.last_proposal_count = proposal_count
+        window.last_certificate_sum = certificate_sum
+        window.last_intrinsic_sum = intrinsic_sum
+        window.last_allocated_bytes = allocated_now
+        empty!(window.last_pipeline_values)
+        merge!(window.last_pipeline_values, current_pipeline)
+        window.anchor_distance_sum = 0.0
+        window.anchor_distance_count = 0
+    end
+    return nothing
+end
+
+function _finish_omrf_windows!(manager::OMRFAnchorManager, stats, final_time, flow)
+    window = manager.window_diagnostics
+    window === nothing && return nothing
+    if !isnan(window.origin)
+        window.next_boundary = max(window.next_boundary, Float64(final_time))
+        _record_omrf_window!(manager,
+            PDMPState(Float64(final_time), SkeletonPoint(
+                copy(manager.oracle.anchor),
+                zeros(Float64, length(manager.oracle.anchor)))),
+            flow, stats)
+    end
+    return nothing
+end
+
+function _omrf_window_matrix(manager::OMRFAnchorManager)
+    window = manager.window_diagnostics
+    window === nothing && return zeros(Float64, 0, 17)
+    keys = ["window_start", "window_end", "anchor_mean_distance",
+        "reflection_count", "reflection_rate", "roof_proposals",
+        "proposal_rate", "subset_evaluations", "subsets_per_reflection",
+        "proposals_per_reflection", "proposal_count", "certificate_ratio",
+        "intrinsic_ratio", "wall_seconds_per_pdmp_time",
+        "main_phase_wall_seconds", "anchor_distance_active",
+        "nearest_prepared_anchor_distance"]
+    window_fields = (_OMRF_PIPELINE_WINDOW_FIELDS...,
+        :anchor_selections, :anchor_switches, :anchor_refreshes,
+        :native_full_data_scans)
+    append!(keys, [string(name) for name in window_fields])
+    append!(keys, [string(Symbol("cumulative_", name)) for name in
+        window_fields])
+    append!(keys, ["allocated_bytes", "allocated_bytes_per_roof_proposal",
+        "allocated_bytes_per_subset_evaluation", "compact_residual_bound",
+        "signed_predictor_bound", "exact_factor_rate_sum",
+        "exact_factor_rate_mean", "full_gradient_bps_rate",
+        "anchor_distance", "stochastic_bps_rate_mean",
+        "pre_anchor_distance", "pre_compact_residual_bound",
+        "pre_signed_predictor_bound", "pre_stochastic_bps_rate_mean",
+        "pre_exact_factor_rate_sum", "pre_exact_factor_rate_mean",
+        "pre_full_gradient_bps_rate", "post_anchor_distance",
+        "post_compact_residual_bound", "post_signed_predictor_bound",
+        "post_stochastic_bps_rate_mean", "post_exact_factor_rate_sum",
+        "post_exact_factor_rate_mean", "post_full_gradient_bps_rate"])
+    keys = (keys..., "deterministic_rate", "deterministic_grid_roof",
+        "actual_stochastic_rate", "post_deterministic_rate",
+        "post_deterministic_grid_roof", "post_actual_stochastic_rate")
+    out = Matrix{Float64}(undef, length(window.rows), length(keys))
+    @inbounds for i in axes(out, 1), j in axes(out, 2)
+        out[i, j] = Float64(window.rows[i][keys[j]])
+    end
+    return out
+end
+
+_omrf_window_matrix(::Nothing) = zeros(Float64, 0, 0)
 
 function _prepare_omrf_anchor_envelope(manager::OMRFAnchorManager,
         requested, residual_context)
     spec = manager.envelope_spec
     bound_type = _haskey(spec, :bound_type) ?
         String(_rget(spec, :bound_type)) : ""
+    if bound_type in ("direct_person_node_hcv", "direct_person_node_cv") &&
+            (bound_type == "direct_person_node_hcv") == residual_context.use_hcv
+        event_horizon_scope = bound_type == "direct_person_node_cv" &&
+            _haskey(spec, :direct_cv_cell_scope) &&
+            String(_rget(spec, :direct_cv_cell_scope)) == "event_horizon"
+        return _new_omrf_direct_hcv_envelope(requested, residual_context;
+            hcv_remainder=bound_type == "direct_person_node_hcv",
+            event_horizon_scope=event_horizon_scope)
+    end
+    if bound_type == "norm_local_hcv_compact" &&
+            residual_context.use_hcv && !isempty(manager.entries)
+        template = manager.entries[1].state.envelope
+        if template isa PDMPSamplers.BlockSeparableResidualEnvelope
+            P = size(residual_context.X, 2)
+            scales = OMRFCompactHCVNormLocalScales(
+                requested, residual_context)
+            return PDMPSamplers.BlockSeparableResidualEnvelope(
+                template.weights, template.component_blocks,
+                template.block_components, template.n_blocks, scales, scales,
+                template.totals, template.alias_tables,
+                zeros(length(template.scales)),
+                zeros(length(template.cell_scales)),
+                zeros(length(template.cumulative_masses)))
+        end
+    end
     if bound_type == "covariate_local_expansion" &&
             !residual_context.use_hcv && !isempty(manager.entries)
         template = manager.entries[1].state.envelope
@@ -4653,7 +10151,10 @@ function _prepare_omrf_anchor_envelope(manager::OMRFAnchorManager,
                 residual_context.incident_edges; init=0)
             scales = OMRFCovariateLocalScales(requested, residual_context,
                 zeros(max_degree), zeros(max_degree), zeros(length(requested)),
-                zeros(length(requested)), zeros(length(requested)))
+                zeros(length(requested)), zeros(length(requested)),
+                zeros(length(requested)), zeros(length(requested)),
+                zeros(length(requested)), zeros(length(requested)),
+                falses(length(requested)), UInt(0), false)
             # Weights, totals, and alias tables depend only on the observed
             # covariates. Anchor-bank entries share them; only trajectory
             # callbacks and their workspaces are anchor-specific.
@@ -4673,6 +10174,20 @@ function _prepare_omrf_anchor_envelope(manager::OMRFAnchorManager,
                 zeros(length(template.cumulative_masses)))
         end
     end
+    if bound_type == "covariate_local_compact" &&
+            !residual_context.use_hcv && !isempty(manager.entries)
+        template = manager.entries[1].state.envelope
+        if template isa OMRFCompactCovariateLocalEnvelope
+            static = template.component_scales!.static
+            signed_bps = _haskey(spec, :signed_bps) &&
+                Bool(_rget(spec, :signed_bps))
+            signed_harmonic = _haskey(spec, :signed_harmonic) &&
+                Bool(_rget(spec, :signed_harmonic))
+            return _new_omrf_compact_envelope(
+                requested, residual_context, static;
+                signed_bps=signed_bps, signed_harmonic=signed_harmonic)
+        end
+    end
     return _build_omrf_residual_envelope(spec, requested, residual_context)
 end
 
@@ -4681,23 +10196,66 @@ function _prepare_omrf_anchor(manager::OMRFAnchorManager,
     started = time_ns()
     oracle = manager.oracle
     recycled = manager.recycled_state
+    compact_hcv_recycle = recycled !== nothing &&
+        manager.hcv_active && recycled.residual_context.use_hcv &&
+        ((recycled.envelope isa PDMPSamplers.BlockSeparableResidualEnvelope &&
+          recycled.envelope.component_scales! isa
+            OMRFCompactHCVNormLocalScales) ||
+         recycled.envelope isa OMRFDirectPersonNodeHCVEnvelope)
     if recycled !== nothing && oracle.analytic_prior !== nothing &&
-            !manager.hcv_active && !recycled.residual_context.use_hcv &&
+            ((!manager.hcv_active && !recycled.residual_context.use_hcv) ||
+             compact_hcv_recycle) &&
             recycled.envelope isa Union{SeparableResidualEnvelope,
-                PDMPSamplers.BlockSeparableResidualEnvelope} &&
-            recycled.envelope.component_scales! isa OMRFCovariateLocalScales
+                PDMPSamplers.GroupedResidualEnvelope,
+                PDMPSamplers.BlockSeparableResidualEnvelope,
+                OMRFCompactCovariateLocalEnvelope,
+                OMRFDirectPersonNodeHCVEnvelope} &&
+            (recycled.envelope isa OMRFDirectPersonNodeHCVEnvelope ||
+             recycled.envelope.component_scales! isa Union{
+                OMRFNodeLocalScales,
+                OMRFNormLocalScales,
+                OMRFNodeBoxFirstOrderScales,
+                OMRFCellMarkedNodeBoxFirstOrderScales,
+                OMRFCovariateLocalScales,
+                OMRFCompactCovariateLocalScales,
+                OMRFCompactHCVNormLocalScales})
         # The recycled state is not installed in the bank, so it can be
         # mutated without exposing a partially prepared anchor. Its envelope
         # callbacks retain the same anchor/context array identities.
         manager.recycled_state = nothing
         copyto!(recycled.anchor, anchor)
         scales = recycled.envelope.component_scales!
-        scales.anchor === recycled.anchor || copyto!(scales.anchor, anchor)
-        recycled.residual_context.hcv_active = false
+        anchor_storage = recycled.envelope isa
+                OMRFDirectPersonNodeHCVEnvelope ?
+            recycled.envelope.anchor :
+            (scales isa OMRFCompactCovariateLocalScales ?
+                scales.base.anchor :
+             scales isa OMRFCellMarkedNodeBoxFirstOrderScales ?
+                scales.base.anchor : scales.anchor)
+        anchor_storage === recycled.anchor || copyto!(anchor_storage, anchor)
+        if scales isa OMRFCellMarkedNodeBoxFirstOrderScales
+            scales.n_cached_cells = 0
+            scales.active_cell = 0
+            scales.selected_factor_point_bound = NaN
+        end
+        recycled.residual_context.hcv_active = manager.hcv_active &&
+            recycled.residual_context.use_hcv
+        likelihood_started = time_ns()
         _omrf_prior_gradient!(
             recycled.prior_anchor, oracle.analytic_prior, recycled.anchor)
         _cache_omrf_anchor_and_full_gradient!(recycled.residual_context,
             recycled.full_anchor, oracle.analytic_prior, recycled.anchor)
+        if compact_hcv_recycle
+            hessian = recycled.residual_context.likelihood_hessian::Matrix{Float64}
+            _omrf_likelihood_hessian!(hessian, recycled.residual_context)
+            if recycled.envelope isa OMRFDirectPersonNodeHCVEnvelope
+                recycled.envelope.cell_count = 0
+                recycled.envelope.active_cell = 0
+                recycled.envelope.path_valid = false
+            end
+        end
+        oracle.ctx.counts.compact_anchor_likelihood_seconds +=
+            (time_ns() - likelihood_started) * 1e-9
         oracle.ctx.counts.full_gradient += 1
         manager.preparations += 1
         manager.recycled_preparations += 1
@@ -4712,12 +10270,15 @@ function _prepare_omrf_anchor(manager::OMRFAnchorManager,
         residual_context.use_hcv
     full_anchor = zeros(length(requested))
     prior_anchor = zeros(length(requested))
+    likelihood_started = time_ns()
     _clear_gradient!(oracle.ctx, :full, full_anchor, requested)
     if oracle.analytic_prior === nothing
         _clear_gradient!(oracle.ctx, :prior, prior_anchor, requested)
     else
         _omrf_prior_gradient!(prior_anchor, oracle.analytic_prior, requested)
     end
+    oracle.ctx.counts.compact_anchor_likelihood_seconds +=
+        (time_ns() - likelihood_started) * 1e-9
     envelope = _prepare_omrf_anchor_envelope(
         manager, requested, residual_context)
     manager.preparations += 1
@@ -4733,6 +10294,10 @@ function _install_omrf_anchor!(manager::OMRFAnchorManager,
     oracle.full_anchor = state.full_anchor
     oracle.prior_anchor = state.prior_anchor
     oracle.residual_context = state.residual_context
+    if state.residual_context.active_pattern_compression
+        copyto!(state.residual_context.active_free, oracle.active_free)
+        state.residual_context.active_generation = oracle.active_generation
+    end
     oracle.prior_x_valid = false
     return state.envelope
 end
@@ -4743,9 +10308,19 @@ function _insert_omrf_anchor!(manager::OMRFAnchorManager,
         push!(manager.entries, OMRFAnchorEntry(state, 0))
         length(manager.entries)
     else
-        replace_idx = argmax(map(entry -> entry.age, manager.entries))
-        replaced = manager.entries[replace_idx].state
-        manager.entries[replace_idx] = OMRFAnchorEntry(state, 0)
+        replace_idx = firstindex(manager.entries)
+        oldest_age = manager.entries[replace_idx].age
+        @inbounds for candidate_idx in (replace_idx + 1):lastindex(manager.entries)
+            candidate_age = manager.entries[candidate_idx].age
+            if candidate_age > oldest_age
+                replace_idx = candidate_idx
+                oldest_age = candidate_age
+            end
+        end
+        entry = manager.entries[replace_idx]
+        replaced = entry.state
+        entry.state = state
+        entry.age = 0
         manager.recycled_state = replaced
         replace_idx
     end
@@ -4759,10 +10334,10 @@ function _new_omrf_anchor_manager(oracle::OMRFAnalyticSubsamplingOracle,
         OMRFAnchorEntry[], 0, Int(capacity), zeros(length(oracle.full_anchor)),
         ones(length(oracle.full_anchor)),
         0, 0.0, 0, 0, 0, 0, 0.0, 0.0, Inf,
-        oracle.residual_context.hcv_active, nothing, 0, 0,
+        oracle.residual_context.hcv_active, nothing, 0, 0, 0.0, 0.0,
         oracle.ctx.counts.native_full_data_scans,
         oracle.ctx.counts.event_bound_observation_visits, 0.0, 0,
-        0.0, copy(oracle.anchor), 0, 0, 0)
+        0.0, copy(oracle.anchor), 0, 0, 0, nothing)
     initial = OMRFPreparedAnchorState(oracle.anchor, oracle.full_anchor,
         oracle.prior_anchor, oracle.residual_context, initial_envelope)
     manager.active_idx = _insert_omrf_anchor!(manager, initial)
@@ -4923,7 +10498,8 @@ function _select_omrf_warmup_pattern_sources!(manager::OMRFAnchorManager,
                         node_scales, scoring_state, flow, node, anchor)
                     for person in 1:N
                         value = _omrf_node_grouped_person_point_bound(
-                            node_scales, person, node)
+                            node_scales, person, node, scoring_state, flow,
+                            anchor)
                         scores[node, source] += value
                         state_scores[node, source] += value
                     end
@@ -5040,7 +10616,8 @@ function _select_omrf_pattern_count_sources!(manager::OMRFAnchorManager,
                 bound = node_scales === nothing ? _omrf_node_hcv_bound_at(
                     context, anchor, state, flow, persons[pattern], node) :
                     _omrf_node_grouped_person_point_bound(
-                        node_scales, persons[pattern], node)
+                        node_scales, persons[pattern], node, state, flow,
+                        anchor)
                 score += counts[pattern] * bound
             end
             if score < best_score
@@ -5087,7 +10664,7 @@ function _finish_omrf_warmup!(manager::OMRFAnchorManager,
     elseif iszero(manager.preparations)
         prepared = _prepare_omrf_anchor(manager, position)
         manager.active_idx = _insert_omrf_anchor!(manager, prepared)
-        PDMPSamplers.refresh_anchor!(cv, prepared.anchor)
+        PDMPSamplers.refresh_anchor_owned!(cv, prepared.anchor)
     else
         # A scheduled warmup anchor is already an exact control variate. Reuse
         # the closest prepared entry instead of paying for a second anchor that
@@ -5103,7 +10680,7 @@ function _finish_omrf_warmup!(manager::OMRFAnchorManager,
             entry.state.residual_context.hcv_active = true
         end
         active = manager.entries[manager.active_idx].state
-        PDMPSamplers.refresh_anchor!(cv, active.anchor)
+        PDMPSamplers.refresh_anchor_owned!(cv, active.anchor)
     end
     active_scales = cv.envelope.component_scales!
     node_local_hcv = manager.oracle.residual_context.factorization in
@@ -5133,6 +10710,8 @@ function _finish_omrf_warmup!(manager::OMRFAnchorManager,
     # directly testable.  A preparation includes the exact complete anchor
     # sum, whether obtained through BridgeStan or the native OMRF algebra.
     manager.warmup_finish_preparations = manager.preparations
+    manager.warmup_finish_preparation_seconds = manager.preparation_seconds
+    manager.warmup_finish_selection_seconds = manager.selection_seconds
     manager.warmup_finish_native_full_data_scans =
         manager.oracle.ctx.counts.native_full_data_scans
     manager.warmup_finish_event_bound_observation_visits =
@@ -5211,14 +10790,14 @@ function _select_omrf_anchor!(manager::OMRFAnchorManager,
             prepared = _prepare_omrf_anchor(manager, x)
             best_idx = _insert_omrf_anchor!(manager, prepared)
             manager.active_idx = best_idx
-            PDMPSamplers.refresh_anchor!(cv, prepared.anchor)
+            PDMPSamplers.refresh_anchor_owned!(cv, prepared.anchor)
             manager.main_activations += 1
             manager.main_refreshes += 1
             return true
         end
     end
     if best_idx != previous
-        PDMPSamplers.refresh_anchor!(cv,
+        PDMPSamplers.refresh_anchor_owned!(cv,
             manager.entries[best_idx].state.anchor)
         phase === :main && (manager.main_activations += 1)
         return true
@@ -5240,7 +10819,7 @@ function _add_omrf_anchor!(manager::OMRFAnchorManager,
     idx = _insert_omrf_anchor!(manager, prepared)
     if idx == previous
         manager.active_idx = idx
-        PDMPSamplers.refresh_anchor!(cv, prepared.anchor)
+        PDMPSamplers.refresh_anchor_owned!(cv, prepared.anchor)
     end
     return idx
 end
@@ -5270,14 +10849,61 @@ function (target::StanSubsamplingSlabDeterministic)(out, x)
     return out
 end
 
+# The ordinary OMRF control variate has a position-constant likelihood term,
+# so its deterministic HVP is the analytic OMRF prior HVP plus the same
+# all-active-to-current-active slab correction used by the gradient.  Keeping
+# this composition analytic avoids finite-difference errors in Zig--Zag grid
+# endpoint derivatives.
+function (target::StanSubsamplingSlabDeterministic{
+        <:OMRFAnalyticSubsamplingOracle,<:LogLinearGaussianScaleSlab})(
+        out, x, direction)
+    started = _OMRF_RESEARCH_DIAGNOSTICS ? time_ns() : UInt64(0)
+    oracle = target.oracle
+    if oracle.residual_context.hcv_nodewise
+        oracle(out, x, direction)
+    else
+        _omrf_prior_hvp!(out, something(oracle.analytic_prior), x, direction)
+    end
+    PDMPSamplers.active_prior_hvp!(target.slab, target.all_buf, x,
+        direction, target.all_active)
+    PDMPSamplers.active_prior_hvp!(target.slab, target.active_buf, x,
+        direction, target.active)
+    @. out = out - target.all_buf + target.active_buf
+    if _OMRF_RESEARCH_DIAGNOSTICS
+        target.oracle.residual_context.counts.deterministic_hvp_calls += 1
+        target.oracle.residual_context.counts.deterministic_hvp_seconds +=
+            (time_ns() - started) * 1e-9
+    end
+    return out
+end
+
 function PDMPSamplers.set_active_set!(target::StanSubsamplingSlabDeterministic,
         free::BitVector)
     indices = PDMPSamplers.beta_indices(target.slab)
     @inbounds for j in eachindex(indices)
         target.active[j] = free[indices[j]]
     end
+    # The direct fixed-stratum deterministic certificate is owned by the
+    # analytic oracle.  Keep its full-coordinate active mask synchronized
+    # with the slab wrapper; otherwise it bounds the all-active prior while
+    # the evaluated target subtracts inactive slab contributions.
+    PDMPSamplers.set_active_set!(target.oracle, free)
     return nothing
 end
+
+function PDMPSamplers.deterministic_rate_cell_bound(
+        target::StanSubsamplingSlabDeterministic{
+            <:OMRFAnalyticSubsamplingOracle,<:LogLinearGaussianScaleSlab},
+        state::PDMPSamplers.AbstractPDMPState,
+        flow::PDMPSamplers.ContinuousDynamics, left::Real, right::Real)
+    target.oracle.residual_context.use_hcv && return nothing
+    return _omrf_direct_deterministic_cell_bound(
+        target.oracle, target.oracle.active_free, state, flow, left, right)
+end
+PDMPSamplers.has_direct_deterministic_rate_cell_bound(
+    target::StanSubsamplingSlabDeterministic{
+        <:OMRFAnalyticSubsamplingOracle,<:LogLinearGaussianScaleSlab}) =
+    !target.oracle.residual_context.use_hcv
 
 function _new_stan_subsampling_context(lib_path::String, full_data::String,
         prior_data::String, m::Int)
@@ -5312,21 +10938,26 @@ end
 
 function _build_stan_subsampling_model(ctx::StanSubsamplingContext,
         unc_names, subsampling, anchor, slab_prior, can_stick;
-        anchor_capacity::Integer=0)
+        anchor_capacity::Integer=0, manage_during_warmup::Bool=true)
     N = Int(_rget(subsampling, :n_observations))
     m = Int(_rget(subsampling, :subsample_size))
     envelope_spec = _rget(subsampling, :residual_envelope)
-    weights = _as_float_matrix(_rget(envelope_spec, :weights))
-    size(weights, 2) == N || throw(DimensionMismatch(
-        "residual envelope must have N observation columns"))
-    d = ctx.full.d
-    length(anchor) == d || throw(DimensionMismatch("subsampling anchor has the wrong dimension"))
     is_omrf = _haskey(envelope_spec, :type) &&
         String(_rget(envelope_spec, :type)) == "omrf"
     backend = is_omrf && _haskey(envelope_spec, :backend) ?
         String(_rget(envelope_spec, :backend)) : "stan"
     backend in ("analytic", "stan") || throw(ArgumentError(
         "unknown OMRF residual backend: $backend"))
+    # Generic and Stan-backed envelopes retain the matrix-column contract.
+    # Analytic OMRF validates its contribution population from X and the
+    # factorization below, without materializing an unused generic matrix.
+    if !is_omrf || backend != "analytic"
+        weights = _as_float_matrix(_rget(envelope_spec, :weights))
+        size(weights, 2) == N || throw(DimensionMismatch(
+            "residual envelope must have N observation columns"))
+    end
+    d = ctx.full.d
+    length(anchor) == d || throw(DimensionMismatch("subsampling anchor has the wrong dimension"))
     oracle = is_omrf && backend == "analytic" ?
         OMRFAnalyticSubsamplingOracle(ctx, envelope_spec, unc_names, anchor) :
         StanSubsamplingOracle(ctx, anchor, N)
@@ -5338,6 +10969,11 @@ function _build_stan_subsampling_model(ctx::StanSubsamplingContext,
         N == expected || throw(DimensionMismatch(
             "OMRF $(residual_context.factorization) factorization requires " *
             "$expected likelihood contributions; received $N"))
+        bound_type = _haskey(envelope_spec, :bound_type) ?
+            String(_rget(envelope_spec, :bound_type)) : ""
+        bound_type == "cell_marked_node_box_first_order" && m != 1 &&
+            throw(ArgumentError(
+                "cell-marked node-box geometry requires subsample size one"))
     end
     # Analytic OMRF oracles own their anchor storage. Point the initial
     # envelope at that owned vector as well, so later state recycling cannot
@@ -5375,19 +11011,58 @@ function _build_stan_subsampling_model(ctx::StanSubsamplingContext,
     else
         throw(ArgumentError("unknown OMRF factor sampling design: $factor_sampling"))
     end
+    deterministic_hvp = if oracle isa OMRFAnalyticSubsamplingOracle &&
+            oracle.analytic_prior !== nothing
+        if slab_prior === nothing
+            oracle.residual_context.hcv_nodewise ? oracle : nothing
+        elseif deterministic isa StanSubsamplingSlabDeterministic &&
+                deterministic.slab isa LogLinearGaussianScaleSlab
+            deterministic
+        else
+            nothing
+        end
+    else
+        nothing
+    end
     cv = SubsampledControlVariate(deterministic, oracle, envelope, anchor, m;
+        deterministic_hvp! = deterministic_hvp,
         refresh_anchor! = refresh_callback, subset_design)
     model = PDMPModel(d, cv)
     if manager === nothing
         return model, ctx, unc_names
     end
     adapter = PDMPSamplers.SubsamplingAnchorBankAdapter(
-        (grad, state, flow, phase) -> _select_omrf_anchor!(manager, grad,
-            state.ξ.x; phase, state, flow),
-        (grad, trace) -> _add_omrf_anchor!(manager, grad, trace),
-        (grad, state, flow, trace_manager, stats) ->
-            _finish_omrf_warmup!(manager, grad, state.ξ.x, trace_manager;
-                state, flow),
+        (live_grad, state, flow, phase, stats) -> begin
+            phase === :warmup && !manage_during_warmup && return false
+            # `with_stats` reconstructs the retained control variate. Anchor
+            # selection must therefore update the chain-local live gradient,
+            # not the pre-wrapping `cv` captured while the model was built.
+            # Updating the captured object leaves the live envelope and its
+            # factor certificate at an old anchor while the shared analytic
+            # oracle advances to the newly installed bank entry.
+            active_cv = live_grad isa PDMPSamplers.SubsampledControlVariate ?
+                live_grad : cv
+            if phase === :main
+                _record_omrf_window!(manager, state, flow, stats; stage=:pre)
+            end
+            changed = _select_omrf_anchor!(manager, active_cv, state.ξ.x;
+                phase, state, flow)
+            if phase === :main
+                _record_omrf_window!(manager, state, flow, stats; stage=:post)
+            end
+            return changed
+        end,
+        (warmup_grad, trace) -> begin
+            active_cv = warmup_grad isa PDMPSamplers.SubsampledControlVariate ?
+                warmup_grad : cv
+            _add_omrf_anchor!(manager, active_cv, trace)
+        end,
+        (warmup_grad, state, flow, trace_manager, stats) -> begin
+            active_cv = warmup_grad isa PDMPSamplers.SubsampledControlVariate ?
+                warmup_grad : cv
+            _finish_omrf_warmup!(manager, active_cv, state.ξ.x, trace_manager;
+                state, flow)
+        end,
         Inf, 0.0)
     return model, ctx, unc_names, adapter, manager
 end
@@ -5606,6 +11281,7 @@ function r_pdmp_stan_subsampling(prepared, subsampling, x0, flow_type::String,
         show_progress::Bool=true, n_chains::Int=1, threaded::Bool=false,
         seed::Union{Integer,Nothing}=nothing,
         adaptive_scheme::String="diagonal",
+        refresh_rate::Float64=1.0,
         warmup_mode::String="subsampled",
         n_anchor_updates::Int=0,
         use_anchor_bank::Bool=false,
@@ -5620,7 +11296,8 @@ function r_pdmp_stan_subsampling(prepared, subsampling, x0, flow_type::String,
         support_boundary_clip_fraction::Float64=1 - 1e-10,
         support_boundary_max_refresh_attempts::Int=20,
         support_boundary_refresh_probe_time::Float64=1e-4,
-        support_boundary_min_safe_time::Float64=1e-12)
+        support_boundary_min_safe_time::Float64=1e-12,
+        diagnostic_window_width::Float64=0.0)
     algorithm_type in ("GridThinningStrategy", "ThinningStrategy") ||
         throw(ArgumentError("subsampling custom-Stan sampling requires GridThinningStrategy or ThinningStrategy"))
     warmup_mode in ("subsampled", "full") || throw(ArgumentError(
@@ -5655,14 +11332,19 @@ function r_pdmp_stan_subsampling(prepared, subsampling, x0, flow_type::String,
     unc_names = prepared.unc_names
     for ctx in contexts
         built = _build_stan_subsampling_model(ctx, unc_names,
-            subsampling, anchor, slab_prior, can_stick_vec; anchor_capacity)
+            subsampling, anchor, slab_prior, can_stick_vec; anchor_capacity,
+            manage_during_warmup=warmup_mode != "full")
         if length(built) == 5
             model, _, _, adapter, manager = built
-            adapter.update_dt = n_anchor_updates > 0 ?
+            adapter.update_dt = warmup_mode == "full" ? Inf : n_anchor_updates > 0 ?
                 t_warmup / n_anchor_updates : Inf
             adapter.last_update = t0
             manager.main_refresh_distance = main_anchor_refresh_distance
             manager.node_source_check_distance = node_source_check_distance
+            if diagnostic_window_width > 0
+                manager.window_diagnostics = OMRFWindowDiagnostics(
+                    diagnostic_window_width)
+            end
             push!(models, model)
             push!(anchor_adapters, adapter)
             push!(anchor_managers, manager)
@@ -5682,22 +11364,49 @@ function r_pdmp_stan_subsampling(prepared, subsampling, x0, flow_type::String,
     ) for ctx in contexts]
     d = first(models).d
     flow = build_flow(flow_type, _to_precision(_as_flow_cov(flow_cov, d), d),
-        _as_flow_mean(flow_mean, d); adaptive_scheme)
+        _as_flow_mean(flow_mean, d); adaptive_scheme, refresh_rate)
     alg0 = build_algorithm(algorithm_type; c0, d, grid_n, grid_t_max,
         use_fd_hvp, curvature_backend,
         post_warmup_simplify, grid_bound, grid_curvature_bound,
         linear_area_threshold, linear_min_area_gain,
         lazy_low_tightness_threshold, lazy_max_low_tightness_rejections,
         lazy_max_rejections)
-    alg = isnothing(slab_prior) ?
-        wrap_sticky(alg0, sticky, model_prior,
-            isnothing(parameter_prior) ? nothing : _as_float_vector(parameter_prior),
-            can_stick_vec) :
-        wrap_dependent_sticky(alg0, sticky, model_prior, slab_prior,
-            can_stick_vec, flow, unc_names)
+    parameter_prior_vec = isnothing(parameter_prior) ? nothing :
+        _as_float_vector(parameter_prior)
+    alg = _build_sticky_event_algorithm(alg0, sticky, model_prior,
+        parameter_prior_vec, slab_prior, can_stick_vec, flow, unc_names)
+    # The retained model is an active-slab target.  The full-data warmup
+    # model must represent the same target, otherwise adaptation follows the
+    # all-active analytic prior and then switches target at the warmup/main
+    # boundary.  This is especially important for node-shared slabs: freezing
+    # one interaction also changes its node-scale contribution.
+    native_warmup_gradient_types = String[]
+    native_warmup_hvp_types = String[]
     warmup_models = warmup_mode == "full" ?
-        [build_omrf_full_model(_rget(subsampling, :residual_envelope),
-            unc_names, d) for _ in 1:n_chains] : nothing
+        [begin
+            native = build_omrf_full_model(
+                _rget(subsampling, :residual_envelope), unc_names, d)
+            push!(native_warmup_gradient_types, string(typeof(native.grad.f)))
+            push!(native_warmup_hvp_types, string(typeof(native.hvp)))
+            _build_sticky_target(native, model_prior, slab_prior,
+                can_stick_vec, unc_names)
+        end for _ in 1:n_chains] : nothing
+    # This invariant must be checked while the native warmup providers still
+    # exist.  After the dependent-slab wrapper is applied, the public model
+    # type is intentionally different and is not evidence about the native
+    # provider used for warmup.
+    if warmup_mode == "full"
+        all(occursin("OMRFFullGradientProvider", provider_type) for
+            provider_type in native_warmup_gradient_types) ||
+            throw(ArgumentError(
+                "full-gradient warmup did not construct native " *
+                "OMRFFullGradientProvider providers"))
+        all(occursin("OMRFFullHVPProvider", provider_type) for
+            provider_type in native_warmup_hvp_types) ||
+            throw(ArgumentError(
+                "full-gradient warmup did not construct native " *
+                "OMRFFullHVPProvider providers"))
+    end
     warmup_alg0 = warmup_mode == "full" ? build_algorithm(algorithm_type;
         c0, d, grid_n, grid_t_max, use_fd_hvp=false,
         curvature_backend="exact", post_warmup_simplify,
@@ -5705,12 +11414,8 @@ function r_pdmp_stan_subsampling(prepared, subsampling, x0, flow_type::String,
         linear_min_area_gain, lazy_low_tightness_threshold,
         lazy_max_low_tightness_rejections, lazy_max_rejections) : nothing
     warmup_alg = if warmup_mode == "full"
-        isnothing(slab_prior) ?
-            wrap_sticky(warmup_alg0, sticky, model_prior,
-                isnothing(parameter_prior) ? nothing :
-                    _as_float_vector(parameter_prior), can_stick_vec) :
-            wrap_dependent_sticky(warmup_alg0, sticky, model_prior,
-                slab_prior, can_stick_vec, flow, unc_names)
+        _build_sticky_event_algorithm(warmup_alg0, sticky, model_prior,
+            parameter_prior_vec, slab_prior, can_stick_vec, flow, unc_names)
     else
         nothing
     end
@@ -5726,9 +11431,16 @@ function r_pdmp_stan_subsampling(prepared, subsampling, x0, flow_type::String,
         min_safe_time = support_boundary_min_safe_time)
     initial = isnothing(theta0) ? x0_vec :
         SkeletonPoint(x0_vec, _as_float_vector(theta0))
+    # Adaptation must see the same gradient provider as the warmup event
+    # process.  Keep this selection identical for both the anchor-manager and
+    # no-anchor-manager paths; the retained subsampling provider is not a
+    # substitute for the full-gradient warmup target.
+    warmup_adaptation_gradient(i) = isnothing(warmup_models) ? models[i].grad :
+        warmup_models[i].grad
     chains = if all(isnothing, anchor_managers)
+        adaptation_grad = warmup_adaptation_gradient(1)
         adapter = PDMPSamplers.default_warmup_adapter(
-            flow, first(models).grad, t_warmup, t0;
+            flow, adaptation_grad, t_warmup, t0;
             warmup_adaptation_interval,
             can_stick=sticky ? can_stick_vec : nothing)
         pdmp_sample(initial, flow, models, alg, t0, T, t_warmup;
@@ -5742,8 +11454,9 @@ function r_pdmp_stan_subsampling(prepared, subsampling, x0, flow_type::String,
         run_chain = function(i)
             seed_i = isnothing(seed) ? nothing : seed + i - 1
             flow_i = deepcopy(flow)
+            adaptation_grad = warmup_adaptation_gradient(i)
             dynamics_adapter = PDMPSamplers.default_warmup_adapter(
-                flow_i, models[i].grad, t_warmup, t0;
+                flow_i, adaptation_grad, t_warmup, t0;
                 warmup_adaptation_interval,
                 can_stick=sticky ? can_stick_vec : nothing)
             adapter_i = dynamics_adapter isa PDMPSamplers.NoAdaptation ?
@@ -5766,8 +11479,58 @@ function r_pdmp_stan_subsampling(prepared, subsampling, x0, flow_type::String,
         end
         PDMPChains(first.(chain_results), last.(chain_results))
     end
-    result = _pack_result(chains)
+    if diagnostic_window_width > 0
+        for (manager, trace, stats) in zip(
+                anchor_managers, chains.traces, chains.stats)
+            manager === nothing && continue
+            # PDMPTrace stores event times in a flat `times` vector.  Keep
+            # finalization compatible with the current Julia trace layout;
+            # this is reached only when opt-in window diagnostics are active.
+            # Window diagnostics cover the requested local retained interval,
+            # not merely the last event time.  T is the total horizon passed
+            # by the R interface, so remove the warmup portion here.
+            final_time = isnan(manager.window_diagnostics.origin) ?
+                t0 + max(0.0, T - t_warmup) :
+                manager.window_diagnostics.origin + max(0.0, T - t_warmup)
+            _finish_omrf_windows!(manager, stats, final_time, flow)
+        end
+    end
+    initial_refresh_rate = try Float64(PDMPSamplers.refresh_rate(flow)) catch; NaN end
+    result = _pack_result(chains; requested_flow=flow_type,
+        adaptive_scheme=adaptive_scheme, initial_refresh_rate=initial_refresh_rate,
+        warmup_adaptation_interval=warmup_adaptation_interval, t_warmup=t_warmup)
     subsampling_context_counters = [Dict(
+        "requested_full_gradient_backend" =>
+            warmup_mode == "full" ? "native" : "bridgestan",
+        "resolved_full_gradient_backend" => if warmup_mode == "full" &&
+                !isempty(native_warmup_gradient_types)
+            provider_type = first(native_warmup_gradient_types)
+            occursin("OMRFFullGradientProvider", provider_type) ?
+                "native" : "unresolved"
+        else
+            "bridgestan"
+        end,
+        "warmup_gradient_provider_type" => if warmup_mode == "full" &&
+                !isempty(native_warmup_gradient_types)
+            string(typeof(first(warmup_models).grad.f))
+        else
+            "none"
+        end,
+        "warmup_hvp_provider_type" => if warmup_mode == "full" &&
+                !isempty(native_warmup_hvp_types)
+            string(typeof(first(warmup_models).hvp))
+        else
+            "none"
+        end,
+        "native_warmup_gradient_provider_type" =>
+            warmup_mode == "full" && !isempty(native_warmup_gradient_types) ?
+            first(native_warmup_gradient_types) : "none",
+        "native_warmup_hvp_provider_type" =>
+            warmup_mode == "full" && !isempty(native_warmup_hvp_types) ?
+            first(native_warmup_hvp_types) : "none",
+        "deterministic_hvp_provider_type" => model.hvp === nothing ? "none" :
+            (hasproperty(model.hvp, :f) ? string(typeof(model.hvp.f)) :
+             string(typeof(model.hvp))),
         "full_gradient_calls" => ctx.counts.full_gradient,
         "prior_gradient_calls" => ctx.counts.prior_gradient,
         "selected_gradient_calls" => ctx.counts.selected_gradient,
@@ -5775,9 +11538,30 @@ function r_pdmp_stan_subsampling(prepared, subsampling, x0, flow_type::String,
             ctx.counts.analytic_persons,
         "selected_persons_evaluated" => ctx.counts.persons_evaluated,
         "analytic_residual_calls" => ctx.counts.analytic_residual,
+        "selected_refinement_calls" => ctx.counts.selected_refinement_calls,
+        # This counter is incremented only inside the exact selected-residual
+        # branch.  It is deliberately separate from the public flag so a
+        # request that is short-circuited by the generic bound remains visible.
+        "exact_selected_refinement_branch_calls" =>
+            (model.grad.residual_oracle isa OMRFAnalyticSubsamplingOracle &&
+             model.grad.residual_oracle.exact_selected_refinement) ?
+            ctx.counts.selected_refinement_calls : 0,
         "analytic_persons_evaluated" => ctx.counts.analytic_persons,
         "analytic_factors_evaluated" => ctx.counts.analytic_factors,
         "node_conditionals_evaluated" => ctx.counts.analytic_node_conditionals,
+        "compact_person_bounds_constructed" =>
+            ctx.counts.compact_person_bounds,
+        "compact_static_constructions" =>
+            ctx.counts.compact_static_constructions,
+        "compact_aggregate_point_calls" =>
+            ctx.counts.compact_aggregate_point_calls,
+        "compact_cell_bound_calls" => ctx.counts.compact_cell_bound_calls,
+        "compact_term_selection_calls" =>
+            ctx.counts.compact_term_selection_calls,
+        "compact_person_selection_calls" =>
+            ctx.counts.compact_person_selection_calls,
+        "compact_observation_bound_calls" =>
+            ctx.counts.compact_observation_bound_calls,
         "native_full_gradient_seconds" =>
             ctx.counts.native_full_gradient_seconds,
         "analytic_residual_seconds" => ctx.counts.analytic_residual_seconds,
@@ -5785,6 +11569,12 @@ function r_pdmp_stan_subsampling(prepared, subsampling, x0, flow_type::String,
         "envelope_point_seconds" => ctx.counts.envelope_point_seconds,
         "envelope_cell_calls" => ctx.counts.envelope_cell_calls,
         "envelope_cell_seconds" => ctx.counts.envelope_cell_seconds,
+        "harmonic_coefficient_preparations" =>
+            ctx.counts.harmonic_coefficient_preparations,
+        "harmonic_coefficient_cache_hits" =>
+            ctx.counts.harmonic_coefficient_cache_hits,
+        "harmonic_coefficient_seconds" =>
+            ctx.counts.harmonic_coefficient_seconds,
         "proposal_deterministic_bound_sum" =>
             ctx.counts.proposal_deterministic_bound_sum,
         "proposal_aggregate_residual_bound_sum" =>
@@ -5811,6 +11601,143 @@ function r_pdmp_stan_subsampling(prepared, subsampling, x0, flow_type::String,
         "lazy_sampling_seconds" => ctx.counts.lazy_sampling_seconds,
         "cell_cached_point_screen_seconds" =>
             ctx.counts.cell_cached_point_screen_seconds,
+        "cell_marked_component_draws" =>
+            (model.grad.envelope isa PDMPSamplers.GroupedResidualEnvelope &&
+             model.grad.envelope.component_scales! isa
+                OMRFCellMarkedNodeBoxFirstOrderScales) ?
+            model.grad.envelope.component_scales!.component_marks : 0,
+        "cell_marked_factor_point_evaluations" =>
+            (model.grad.envelope isa PDMPSamplers.GroupedResidualEnvelope &&
+             model.grad.envelope.component_scales! isa
+                OMRFCellMarkedNodeBoxFirstOrderScales) ?
+            model.grad.envelope.component_scales!.factor_point_evaluations : 0,
+        "cell_marked_factor_point_seconds" =>
+            (model.grad.envelope isa PDMPSamplers.GroupedResidualEnvelope &&
+             model.grad.envelope.component_scales! isa
+                OMRFCellMarkedNodeBoxFirstOrderScales) ?
+            model.grad.envelope.component_scales!.factor_point_seconds : 0.0,
+        "cell_marked_cell_cache_hits" =>
+            (model.grad.envelope isa PDMPSamplers.GroupedResidualEnvelope &&
+             model.grad.envelope.component_scales! isa
+                OMRFCellMarkedNodeBoxFirstOrderScales) ?
+            model.grad.envelope.component_scales!.cell_cache_hits : 0,
+        "cell_marked_cell_cache_misses" =>
+            (model.grad.envelope isa PDMPSamplers.GroupedResidualEnvelope &&
+             model.grad.envelope.component_scales! isa
+                OMRFCellMarkedNodeBoxFirstOrderScales) ?
+            model.grad.envelope.component_scales!.cell_cache_misses : 0,
+        "compact_static_seconds" => ctx.counts.compact_static_seconds,
+        "compact_aggregate_point_seconds" =>
+            ctx.counts.compact_aggregate_point_seconds,
+        "compact_cell_bound_seconds" =>
+            ctx.counts.compact_cell_bound_seconds,
+        "compact_term_selection_seconds" =>
+            ctx.counts.compact_term_selection_seconds,
+        "compact_person_selection_seconds" =>
+            ctx.counts.compact_person_selection_seconds,
+        "compact_observation_bound_seconds" =>
+            ctx.counts.compact_observation_bound_seconds,
+        "compact_anchor_likelihood_seconds" =>
+            ctx.counts.compact_anchor_likelihood_seconds,
+        "direct_factor_bound_scans" =>
+            ctx.counts.direct_factor_bound_scans,
+        "direct_factors_evaluated" =>
+            ctx.counts.direct_factors_evaluated,
+        "direct_cell_certificate_seconds" =>
+            ctx.counts.direct_cell_certificate_seconds,
+        "direct_cached_cell_hits" =>
+            ctx.counts.direct_cached_cell_hits,
+        "direct_selected_factor_exact_evaluations" =>
+            ctx.counts.direct_selected_factor_exact_evaluations,
+        "direct_path_preparations" =>
+            ctx.counts.direct_path_preparations,
+        "direct_path_factors_prepared" =>
+            ctx.counts.direct_path_factors_prepared,
+        "direct_path_preparation_seconds" =>
+            ctx.counts.direct_path_preparation_seconds,
+        "direct_adjacent_endpoint_reuses" =>
+            ctx.counts.direct_adjacent_endpoint_reuses,
+        "direct_left_endpoint_evaluations" =>
+            ctx.counts.direct_left_endpoint_evaluations,
+        "direct_right_endpoint_evaluations" =>
+            ctx.counts.direct_right_endpoint_evaluations,
+        "direct_residual_table_constructions" =>
+            ctx.counts.direct_residual_table_constructions,
+        "direct_horizon_table_hits" =>
+            ctx.counts.direct_horizon_table_hits,
+        "direct_internal_cell_uses" =>
+            ctx.counts.direct_internal_cell_uses,
+        "deterministic_hvp_calls" => ctx.counts.deterministic_hvp_calls,
+        "deterministic_hvp_seconds" => ctx.counts.deterministic_hvp_seconds,
+        "deterministic_source_proposals" =>
+            ctx.counts.deterministic_source_proposals,
+        "residual_source_proposals" => ctx.counts.residual_source_proposals,
+        "deterministic_source_acceptances" =>
+            ctx.counts.deterministic_source_acceptances,
+        "residual_source_acceptances" =>
+            ctx.counts.residual_source_acceptances,
+        "signed_bps" => model.grad.envelope isa
+            OMRFCompactCovariateLocalEnvelope && model.grad.envelope.signed_bps,
+        "signed_harmonic" => model.grad.envelope isa
+            OMRFCompactCovariateLocalEnvelope && model.grad.envelope.signed_harmonic,
+        "signed_cell_preparations" =>
+            ctx.counts.signed_bps.cell_preparations,
+        "signed_endpoint_fills" => ctx.counts.signed_bps.endpoint_fills,
+        "signed_person_node_masses_filled" =>
+            ctx.counts.signed_bps.person_node_masses_filled,
+        "signed_endpoint_reuses" => ctx.counts.signed_bps.endpoint_reuses,
+        "signed_interaction_field_preparations" =>
+            ctx.counts.signed_bps.interaction_field_preparations,
+        "signed_endpoint_range_fills" =>
+            ctx.counts.signed_bps.endpoint_range_fills,
+        "signed_point_screens" => ctx.counts.signed_bps.point_screens,
+        "signed_screen_copy_checks" =>
+            ctx.counts.signed_bps.screen_copy_checks,
+        "signed_component_draws" => ctx.counts.signed_bps.component_draws,
+        "signed_cell_preparation_seconds" =>
+            ctx.counts.signed_bps.cell_preparation_seconds,
+        "signed_endpoint_fill_seconds" =>
+            ctx.counts.signed_bps.endpoint_fill_seconds,
+        "signed_interaction_field_seconds" =>
+            ctx.counts.signed_bps.interaction_field_seconds,
+        "signed_endpoint_range_seconds" =>
+            ctx.counts.signed_bps.endpoint_range_seconds,
+        "signed_point_screen_seconds" =>
+            ctx.counts.signed_bps.point_screen_seconds,
+        "signed_screen_copy_seconds" =>
+            ctx.counts.signed_bps.screen_copy_seconds,
+        "signed_component_draw_seconds" =>
+            ctx.counts.signed_bps.component_draw_seconds,
+        "signed_cell_preparation_allocated_bytes" =>
+            ctx.counts.signed_bps.cell_preparation_allocated_bytes,
+        "signed_endpoint_fill_allocated_bytes" =>
+            ctx.counts.signed_bps.endpoint_fill_allocated_bytes,
+        "signed_interaction_field_allocated_bytes" =>
+            ctx.counts.signed_bps.interaction_field_allocated_bytes,
+        "signed_endpoint_range_allocated_bytes" =>
+            ctx.counts.signed_bps.endpoint_range_allocated_bytes,
+        "signed_point_screen_allocated_bytes" =>
+            ctx.counts.signed_bps.point_screen_allocated_bytes,
+        "signed_screen_copy_allocated_bytes" =>
+            ctx.counts.signed_bps.screen_copy_allocated_bytes,
+        "signed_component_draw_allocated_bytes" =>
+            ctx.counts.signed_bps.component_draw_allocated_bytes,
+        "harmonic_cell_mass_constructions" =>
+            ctx.counts.signed_bps.harmonic_cell_mass_constructions,
+        "harmonic_factor_masses_filled" =>
+            ctx.counts.signed_bps.harmonic_factor_masses_filled,
+        "harmonic_all_factor_point_scans" =>
+            ctx.counts.signed_bps.harmonic_all_factor_point_scans,
+        "harmonic_selected_point_bounds" =>
+            ctx.counts.signed_bps.harmonic_selected_point_bounds,
+        "harmonic_cell_mass_seconds" =>
+            ctx.counts.signed_bps.harmonic_cell_mass_seconds,
+        "harmonic_selected_point_seconds" =>
+            ctx.counts.signed_bps.harmonic_selected_point_seconds,
+        "harmonic_cell_mass_allocated_bytes" =>
+            ctx.counts.signed_bps.harmonic_cell_mass_allocated_bytes,
+        "harmonic_selected_point_allocated_bytes" =>
+            ctx.counts.signed_bps.harmonic_selected_point_allocated_bytes,
         "proposal_envelope_acceptance_ratio" =>
             ctx.counts.proposal_actual_rate_sum /
             max(ctx.counts.proposal_subset_bound_sum, eps(Float64)),
@@ -5860,13 +11787,25 @@ function r_pdmp_stan_subsampling(prepared, subsampling, x0, flow_type::String,
                 manager.warmup_finish_event_bound_observation_visits,
         "anchor_recycled_preparations" => manager === nothing ? 0 :
             manager.recycled_preparations,
-        "anchor_preparation_seconds" => manager === nothing ? 0.0 : manager.preparation_seconds,
+        "anchor_total_preparation_seconds" => manager === nothing ? 0.0 : manager.preparation_seconds,
         "anchor_activations" => manager === nothing ? 0 : manager.activations,
         "anchor_main_activations" => manager === nothing ? 0 : manager.main_activations,
         "anchor_main_refreshes" => manager === nothing ? 0 : manager.main_refreshes,
         "anchor_main_selections" => manager === nothing ? 0 : manager.main_selections,
+        "anchor_selections" => manager === nothing ? 0 : manager.main_selections,
+        "anchor_switches" => manager === nothing ? 0 : manager.main_activations,
+        "anchor_refreshes" => manager === nothing ? 0 : manager.main_refreshes,
         "anchor_selection_seconds" => manager === nothing ? 0.0 :
-            manager.selection_seconds,
+            manager.selection_seconds - manager.warmup_finish_selection_seconds,
+        "anchor_preparation_seconds" => manager === nothing ? 0.0 :
+            manager.preparation_seconds - manager.warmup_finish_preparation_seconds,
+        "window_diagnostic_seconds" => manager === nothing ||
+            manager.window_diagnostics === nothing ? 0.0 :
+            manager.window_diagnostics.diagnostic_seconds,
+        "retained_native_full_data_scans" => manager === nothing ?
+            ctx.counts.native_full_data_scans - snapshot.native_full_data_scans :
+            ctx.counts.native_full_data_scans -
+                manager.warmup_finish_native_full_data_scans,
         "anchor_selection_component_evaluations" => manager === nothing ? 0 :
             manager.selection_component_evaluations,
         "node_source_check_distance" => manager === nothing ? 0.0 :
@@ -5891,6 +11830,32 @@ function r_pdmp_stan_subsampling(prepared, subsampling, x0, flow_type::String,
             Base.summarysize((manager.entries, manager.recycled_state)),
         "analytic_hcv" => model.grad.residual_oracle isa OMRFAnalyticSubsamplingOracle &&
             model.grad.residual_oracle.residual_context.use_hcv,
+        "resolved_signed_bps" => model.grad.envelope isa
+            OMRFCompactCovariateLocalEnvelope &&
+            model.grad.envelope.signed_bps,
+        "resolved_signed_harmonic" => model.grad.envelope isa
+            OMRFCompactCovariateLocalEnvelope &&
+            model.grad.envelope.signed_harmonic,
+        "resolved_flow" => flow_type,
+        "resolved_factorization" => model.grad.residual_oracle isa
+            OMRFAnalyticSubsamplingOracle ? String(
+                model.grad.residual_oracle.residual_context.factorization) :
+            "unavailable",
+        "resolved_geometry" => model.grad.envelope isa
+            OMRFCompactCovariateLocalEnvelope ? "covariate_local_compact" :
+            string(nameof(typeof(model.grad.envelope.scales))),
+        "envelope_components" => try
+            length(model.grad.envelope.totals)
+        catch
+            0
+        end,
+        "exact_selected_refinement" =>
+            model.grad.residual_oracle isa OMRFAnalyticSubsamplingOracle &&
+            model.grad.residual_oracle.exact_selected_refinement,
+        "resolved_subsample_size" => ctx.m,
+        "resolved_use_hcv" => model.grad.residual_oracle isa
+            OMRFAnalyticSubsamplingOracle &&
+            model.grad.residual_oracle.residual_context.use_hcv,
         "analytic_prior" => model.grad.residual_oracle isa
             OMRFAnalyticSubsamplingOracle &&
             model.grad.residual_oracle.analytic_prior !== nothing,
@@ -5900,6 +11865,80 @@ function r_pdmp_stan_subsampling(prepared, subsampling, x0, flow_type::String,
     ) for (model, ctx, snapshot, manager) in
         zip(models, contexts, construction_snapshots, anchor_managers)]
     result["subsampling_context_counters"] = subsampling_context_counters
+    candidate_values = [model.grad.residual_oracle isa
+        OMRFAnalyticSubsamplingOracle ?
+        _omrf_candidate_record_matrix(model.grad.residual_oracle) :
+        zeros(Float64, 0, 7) for model in models]
+    result["candidate_records"] = isone(length(candidate_values)) ?
+        first(candidate_values) : candidate_values
+    # Publish phase-local pipeline fields under the stable research names.
+    # These are copied from the sampler statistics object, not reconstructed
+    # from provider-level call counters.
+    phase_aliases = Dict(
+        "cell_roof_candidates" => "main_clock_candidates",
+        "grid_bound_evaluations" => "main_grid_bound_evaluations",
+        "pointwise_screen_evaluations" => "main_pointwise_screen_evaluations",
+        "pointwise_screen_passes" => "main_pointwise_screen_passes",
+        "subset_draws" => "main_subset_draws",
+        "selected_subset_bound_evaluations" => "main_selected_subset_bound_evaluations",
+        "selected_subset_bound_passes" => "main_selected_subset_bound_passes",
+        "residual_oracle_evaluations" => "main_residual_oracle_evaluations",
+        "final_thinning_acceptances" => "main_final_thinning_acceptances",
+        "grid_schedule_builds" => "main_grid_schedule_builds",
+        "grid_schedule_searches" => "main_grid_schedule_searches",
+        "poisson_time_generations" => "main_poisson_time_generations",
+        "candidate_state_copies" => "main_candidate_state_copies",
+        "candidate_move_forwards" => "main_candidate_move_forwards",
+        "candidate_loop_iterations" => "main_candidate_loop_iterations",
+        "statistic_recordings" => "main_statistic_recordings",
+        "reflection_events" => "main_reflection_events",
+        "sticky_events" => "main_sticky_events",
+        "cell_roof_construction_seconds" => "main_grid_bound_seconds",
+        "pointwise_screen_seconds" => "main_pointwise_screen_seconds",
+        "subset_draw_seconds" => "main_subset_draw_seconds",
+        "selected_subset_bound_seconds" => "main_selected_subset_refinement_seconds",
+        "residual_oracle_seconds" => "main_residual_oracle_seconds",
+        "final_thinning_seconds" => "main_final_thinning_seconds",
+        "reflection_update_seconds" => "main_reflection_update_seconds",
+        "reflection_gradient_seconds" => "main_reflection_gradient_seconds",
+        "reflection_covariance_seconds" => "main_reflection_covariance_seconds",
+        "reflection_sticky_schedule_seconds" => "main_reflection_sticky_schedule_seconds",
+        "reflection_state_validation_seconds" => "main_reflection_state_validation_seconds",
+        "sticky_update_seconds" => "main_sticky_update_seconds",
+        "grid_schedule_build_seconds" => "main_grid_schedule_build_seconds",
+        "grid_schedule_search_seconds" => "main_grid_schedule_search_seconds",
+        "poisson_time_generation_seconds" => "main_poisson_time_generation_seconds",
+        "candidate_state_copy_seconds" => "main_candidate_state_copy_seconds",
+        "candidate_move_forward_seconds" => "main_candidate_move_forward_seconds",
+        "candidate_loop_overhead_seconds" => "main_candidate_loop_overhead_seconds",
+        "statistic_recording_seconds" => "main_statistic_recording_seconds",
+        "warmup_phase_elapsed_seconds" => "warmup_phase_elapsed_seconds",
+        "main_phase_elapsed_seconds" => "main_phase_elapsed_seconds")
+    for (public_name, phase_name) in phase_aliases
+        result["stats"][public_name] = result["stats"][phase_name]
+    end
+    result["stats"]["anchor_selections"] = Float64[c["anchor_selections"] for c in subsampling_context_counters]
+    result["stats"]["anchor_switches"] = Float64[c["anchor_switches"] for c in subsampling_context_counters]
+    result["stats"]["anchor_refreshes"] = Float64[c["anchor_refreshes"] for c in subsampling_context_counters]
+    result["stats"]["native_full_data_scans"] = Float64[c["retained_native_full_data_scans"] for c in subsampling_context_counters]
+    result["stats"]["anchor_selection_seconds"] = Float64[c["anchor_selection_seconds"] for c in subsampling_context_counters]
+    result["stats"]["anchor_preparation_seconds"] = Float64[c["anchor_preparation_seconds"] for c in subsampling_context_counters]
+    # The schedule-search and candidate-loop timers are inclusive diagnostic
+    # timers.  Only the established pipeline timers enter this residual so
+    # the unattributed main-loop time is explicit rather than silently zero.
+    exclusive_main = result["stats"]["main_grid_bound_seconds"] .+
+        result["stats"]["main_pointwise_screen_seconds"] .+
+        result["stats"]["main_subset_draw_seconds"] .+
+        result["stats"]["main_selected_subset_refinement_seconds"] .+
+        result["stats"]["main_residual_oracle_seconds"] .+
+        result["stats"]["main_final_thinning_seconds"] .+
+        result["stats"]["main_reflection_update_seconds"] .+
+        result["stats"]["main_sticky_update_seconds"]
+    result["stats"]["other_main_loop_seconds"] =
+        result["stats"]["main_phase_elapsed_seconds"] .- exclusive_main
+    window_values = [_omrf_window_matrix(manager) for manager in anchor_managers]
+    result["window_diagnostics"] = isone(length(window_values)) ?
+        first(window_values) : window_values
     require_no_main_full_data && _enforce_no_main_full_data!(
         result["stats"]["main_full_gradient_calls"],
         subsampling_context_counters)

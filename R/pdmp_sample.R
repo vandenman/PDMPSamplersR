@@ -20,6 +20,20 @@ with_seed <- function(code, seed = NULL) {
   force(code)
 }
 
+.flow_spec_agreement <- function(resolved, requested_mean,
+                                 requested_covariance, tolerance = 1e-12) {
+  stopifnot(length(resolved) >= 1L)
+  mean_agreement <- vapply(resolved, function(x)
+    isTRUE(all.equal(as.numeric(x$mean), as.numeric(requested_mean),
+                     tolerance = tolerance)), logical(1L))
+  covariance_agreement <- vapply(resolved, function(x)
+    isTRUE(all.equal(as.matrix(x$covariance), as.matrix(requested_covariance),
+                     tolerance = tolerance, check.attributes = FALSE)),
+    logical(1L))
+  list(mean = mean_agreement, covariance = covariance_agreement,
+       chain = mean_agreement & covariance_agreement)
+}
+
 # Internal function to validate and prepare common PDMP parameters
 validate_pdmp_params <- function(d, flow, algorithm, T, t0 = 0.0, t_warmup = 0.0,
                                 flow_mean = NULL, flow_cov = NULL, c0 = 1e-2,
@@ -610,6 +624,7 @@ pdmp_sample <- function(f, d,
                         show_progress = TRUE,
                         n_chains = 1L, threaded = FALSE, seed = NULL,
                         adaptive_scheme = c("diagonal", "fullrank"),
+                        refresh_rate = 1.0,
                         materialize = TRUE,
                         support_boundary = support_boundary_control()) {
 
@@ -788,6 +803,11 @@ pdmp_sample <- function(f, d,
 #'   adaptation attempts during warmup. `NULL` uses ten equally spaced warmup
 #'   windows (`t_warmup / 10`); zero attempts adaptation at every event. The
 #'   same interval is used by full-gradient and subsampling runs.
+#' @param flow_specification Role of an explicitly supplied `flow_mean` or
+#'   `flow_cov`. `"initial"` permits legitimate warmup adaptation and records
+#'   every chain's retained flow. `"frozen"` requires every retained chain to
+#'   match the request and fails closed otherwise. `"auto"` uses `"initial"`
+#'   when `t_warmup > 0` and `"frozen"` otherwise.
 #' @inheritParams pdmp_sample
 #'
 #' @return A \code{pdmp_result} object. Use \code{mean}, \code{var},
@@ -806,6 +826,7 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
                         subsampling_main_anchor_refresh_distance = Inf,
                         subsampling_node_source_check_distance = 0,
                         subsampling_require_no_main_full_data = FALSE,
+                        subsampling_diagnostic_window = 0,
                         flow = c("ZigZag", "BouncyParticle", "Boomerang", "AdaptiveBoomerang", "PreconditionedZigZag", "PreconditionedBPS"),
                         algorithm = c("ThinningStrategy", "GridThinningStrategy",
                                       "PositiveVariationGridThinningStrategy", "VectorVariationThinningStrategy",
@@ -813,6 +834,7 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
                         T = 50000, t0 = 0.0, t_warmup = 0.0,
                         warmup_adaptation_interval = NULL,
                         flow_mean = NULL, flow_cov = NULL, c0 = 1e-2,
+                        flow_specification = c("auto", "initial", "frozen"),
                         x0 = NULL, theta0 = NULL,
                         sticky = FALSE, can_stick = NULL, model_prior = NULL, parameter_prior = NULL,
                         slab_prior = NULL,
@@ -830,6 +852,7 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
                         show_progress = TRUE,
                         n_chains = 1L, threaded = FALSE, seed = NULL,
                         adaptive_scheme = c("diagonal", "fullrank"),
+                        refresh_rate = 1.0,
                         materialize = TRUE,
                         support_boundary = support_boundary_control()) {
 
@@ -838,7 +861,12 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
   flow <- match.arg(flow)
   algorithm <- match.arg(algorithm)
   adaptive_scheme <- match.arg(adaptive_scheme)
+  flow_specification <- match.arg(flow_specification)
   subsampling_warmup <- match.arg(subsampling_warmup)
+  supplied_flow_specification <- !is.null(flow_mean) || !is.null(flow_cov)
+  resolved_flow_specification <- if (!supplied_flow_specification) "generated" else
+    if (flow_specification != "auto") flow_specification else
+      if (t_warmup > 0) "initial" else "frozen"
   if (!is.null(warmup_adaptation_interval)) {
     if (!is.numeric(warmup_adaptation_interval) ||
         length(warmup_adaptation_interval) != 1L ||
@@ -881,8 +909,14 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
     }
   }
   if (!is.null(full_gradient)) {
-    full_gradient$spec <- .attach_omrf_analytic_prior(
-      full_gradient$spec, standata, "standata")
+    # Preserve an explicitly supplied prior-only specification. This is
+    # necessary for dependent OMRF data objects that contain both independent
+    # Cauchy and node-scale fields; inferring from the full data would select
+    # the wrong analytic branch.
+    if (is.null(full_gradient$spec$analytic_prior)) {
+      full_gradient$spec <- .attach_omrf_analytic_prior(
+        full_gradient$spec, standata, "standata")
+    }
   }
   if (!rlang::is_integerish(subsampling_anchor_updates, n = 1L, finite = TRUE) ||
       subsampling_anchor_updates < 0L) {
@@ -918,6 +952,16 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
   }
   subsampling_node_source_check_distance <-
     as.numeric(subsampling_node_source_check_distance)
+  if (!is.numeric(subsampling_diagnostic_window) ||
+      length(subsampling_diagnostic_window) != 1L ||
+      is.na(subsampling_diagnostic_window) ||
+      !is.finite(subsampling_diagnostic_window) ||
+      subsampling_diagnostic_window < 0) {
+    cli::cli_abort(paste0(
+      "Argument {.arg subsampling_diagnostic_window} must be a finite ",
+      "nonnegative number."))
+  }
+  subsampling_diagnostic_window <- as.numeric(subsampling_diagnostic_window)
   if (!is.logical(subsampling_require_no_main_full_data) ||
       length(subsampling_require_no_main_full_data) != 1L ||
       is.na(subsampling_require_no_main_full_data)) {
@@ -961,14 +1005,32 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
 
   validate_type(use_fd_hvp, type = "logical", n = 1)
   if (!is.null(subsampling)) {
+    analytic_omrf_hvp <- inherits(subsampling$residual_envelope,
+      "omrf_residual_envelope") &&
+      identical(subsampling$residual_envelope$backend, "analytic") &&
+      identical(subsampling$residual_envelope$analytic_prior$type,
+                "node_scale_gaussian") &&
+      is.list(slab_prior) && identical(slab_prior$type,
+                                      "loglinear_gaussian_scale")
     if (!is.null(curvature_backend)) {
       curvature_backend <- match.arg(curvature_backend, c("exact", "finite_difference"))
-      if (curvature_backend == "exact") {
-        cli::cli_abort("Custom-Stan subsampling has no deterministic exact HVP; use {.val finite_difference} curvature.")
+      if (curvature_backend == "exact" && !analytic_omrf_hvp) {
+        cli::cli_abort(paste0(
+          "This custom-Stan subsampling specification has no deterministic exact HVP; ",
+          "use {.val finite_difference} curvature."))
       }
     }
-    curvature_backend <- "finite_difference"
-    use_fd_hvp <- TRUE
+    if (analytic_omrf_hvp) {
+      if (identical(curvature_backend, "finite_difference") || isTRUE(use_fd_hvp)) {
+        cli::cli_inform(paste0(
+          "Using the exact composed HVP for analytic dependent OMRF subsampling; ",
+          "finite-difference curvature is not supported for this combination."))
+      }
+      curvature_backend <- "exact"
+    } else {
+      curvature_backend <- curvature_backend %||% "finite_difference"
+    }
+    use_fd_hvp <- curvature_backend == "finite_difference"
   } else if (is.null(curvature_backend)) {
     curvature_backend <- if (isTRUE(use_fd_hvp)) "finite_difference" else "exact"
   } else {
@@ -1138,7 +1200,18 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
       envelope_spec$thresholds, unc_names, "thresholds")
     interaction_idx <- .resolve_unconstrained_spec(
       envelope_spec$interactions, unc_names, "interactions")
-    covered <- sort(c(threshold_idx, interaction_idx))
+    prior_idx <- integer()
+    if (identical(envelope_spec$analytic_prior$type,
+                  "node_scale_gaussian")) {
+      prior_idx <- c(
+        .resolve_unconstrained_spec(
+          envelope_spec$analytic_prior$global_scale, unc_names,
+          "global_scale"),
+        .resolve_unconstrained_spec(
+          envelope_spec$analytic_prior$node_scale, unc_names,
+          "node_scale"))
+    }
+    covered <- sort(c(threshold_idx, interaction_idx, prior_idx))
     if (!identical(covered, seq_len(d))) {
       cli::cli_abort(c(
         "Native OMRF full gradients require threshold and interaction blocks to cover the complete unconstrained state.",
@@ -1169,6 +1242,57 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
     ))
   }
 
+  verify_flow_specification <- supplied_flow_specification
+  flow_hash <- function(value) {
+    path <- tempfile("pdmpsamplers-flow-")
+    on.exit(unlink(path, force = TRUE), add = TRUE)
+    writeBin(serialize(value, NULL, version = 3L), path)
+    unname(tools::md5sum(path))
+  }
+  # Flow construction may make an algebraically neutral covariance ->
+  # precision -> scale -> covariance round trip.  Hash the numerical
+  # representation at the same precision used by the fail-closed comparison,
+  # rather than treating sub-ULP reconstruction noise as different provenance.
+  flow_vector_hash <- function(value) flow_hash(signif(as.numeric(value), 12L))
+  flow_matrix_hash <- function(value) {
+    value <- as.matrix(value)
+    flow_hash(list(dimensions = as.integer(dim(value)),
+                   values = signif(as.numeric(value), 12L)))
+  }
+  requested_flow_provenance <- NULL
+  if (verify_flow_specification) {
+    resolved_preflight <- .pdmpsamplers_julia_call(
+      "r_resolve_flow_spec", params$flow, params$flow_mean, params$flow_cov,
+      adaptive_scheme = params$adaptive_scheme,
+      refresh_rate = as.numeric(refresh_rate))
+    if (is.environment(resolved_preflight)) resolved_preflight <- as.list(resolved_preflight)
+    same_mean <- isTRUE(all.equal(as.numeric(resolved_preflight$mean),
+                                  as.numeric(params$flow_mean), tolerance = 1e-12))
+    same_cov <- isTRUE(all.equal(as.matrix(resolved_preflight$covariance),
+                                 as.matrix(params$flow_cov), tolerance = 1e-12,
+                                 check.attributes = FALSE))
+    if (!same_mean || !same_cov) {
+      cli::cli_abort(c(
+        "The resolved Julia flow does not match the requested flow specification.",
+        "i" = "Mean agreement: {same_mean}; covariance agreement: {same_cov}.",
+        "i" = "Refusing to begin retained sampling."
+      ))
+    }
+    requested_flow_provenance <- list(
+      specification_role = resolved_flow_specification,
+      requested_flow_type = params$flow,
+      requested_mean_hash = flow_vector_hash(params$flow_mean),
+      requested_covariance_hash = flow_matrix_hash(params$flow_cov),
+      requested_covariance_dimensions = dim(as.matrix(params$flow_cov)),
+      preflight_flow_type = resolved_preflight$flow_type,
+      preflight_inner_flow_type = resolved_preflight$inner_flow_type,
+      preflight_mean_hash = flow_vector_hash(resolved_preflight$mean),
+      preflight_covariance_hash = flow_matrix_hash(resolved_preflight$covariance),
+      preflight_agreement = same_mean && same_cov,
+      requested_mean = as.numeric(params$flow_mean),
+      requested_covariance = unname(as.matrix(params$flow_cov)))
+  }
+
   # Pass arguments to Julia
   for (nm in names(params))
     JuliaCall::julia_assign(nm, params[[nm]])
@@ -1183,8 +1307,11 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
                           subsampling_node_source_check_distance)
   JuliaCall::julia_assign("subsampling_require_no_main_full_data",
                           subsampling_require_no_main_full_data)
+  JuliaCall::julia_assign("subsampling_diagnostic_window",
+                          subsampling_diagnostic_window)
   JuliaCall::julia_assign("warmup_adaptation_interval",
                           warmup_adaptation_interval)
+  JuliaCall::julia_assign("refresh_rate", as.numeric(refresh_rate))
   JuliaCall::julia_assign("support_boundary_mode", support_boundary$mode)
   JuliaCall::julia_assign("support_boundary_max_bisection_steps", support_boundary$max_bisection_steps)
   JuliaCall::julia_assign("support_boundary_time_rtol", support_boundary$time_rtol)
@@ -1218,6 +1345,7 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
       show_progress = show_progress, n_chains = n_chains, threaded = threaded,
       seed = seed,
       adaptive_scheme = adaptive_scheme,
+      refresh_rate = refresh_rate,
       support_boundary_mode = support_boundary_mode,
       support_boundary_max_bisection_steps = support_boundary_max_bisection_steps,
       support_boundary_time_rtol = support_boundary_time_rtol,
@@ -1233,7 +1361,7 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
       flow_mean, flow_cov;
       theta0 = theta0,
       c0 = c0, grid_n = grid_n, grid_t_max = grid_t_max,
-      use_fd_hvp = true,
+      use_fd_hvp = _curvature_backend == \"finite_difference\",
       curvature_backend = _curvature_backend,
       post_warmup_simplify = post_warmup_simplify,
       grid_bound = grid_bound,
@@ -1251,6 +1379,7 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
       show_progress = show_progress, n_chains = n_chains,
       threaded = threaded, seed = seed,
       adaptive_scheme = adaptive_scheme,
+      refresh_rate = refresh_rate,
       warmup_mode = subsampling_warmup,
       n_anchor_updates = subsampling_anchor_updates,
       use_anchor_bank = subsampling_use_anchor_bank,
@@ -1258,6 +1387,7 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
       main_anchor_refresh_distance = subsampling_main_anchor_refresh_distance,
       node_source_check_distance = subsampling_node_source_check_distance,
       require_no_main_full_data = subsampling_require_no_main_full_data,
+      diagnostic_window_width = subsampling_diagnostic_window,
       support_boundary_mode = support_boundary_mode,
       support_boundary_max_bisection_steps = support_boundary_max_bisection_steps,
       support_boundary_time_rtol = support_boundary_time_rtol,
@@ -1268,8 +1398,63 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
       support_boundary_min_safe_time = support_boundary_min_safe_time
     );")
   }
+  backend_provenance <- if (!is.null(full_gradient)) {
+    gradient_type <- tryCatch(as.character(JuliaCall::julia_eval(
+      "string(typeof(_pdmp_model.grad.f))")),
+      error = function(e) NA_character_)
+    hvp_type <- tryCatch(as.character(JuliaCall::julia_eval(
+      "string(typeof(_pdmp_model.hvp))")),
+      error = function(e) NA_character_)
+    resolved <- if (grepl("OMRFFullGradientProvider", gradient_type,
+                           fixed = TRUE)) "native" else "unresolved"
+    list(requested_backend = "native", resolved_backend = resolved,
+         gradient_provider_type = gradient_type,
+         hvp_provider_type = hvp_type)
+  } else {
+    list(requested_backend = "bridgestan", resolved_backend = "bridgestan",
+         gradient_provider_type = NA_character_,
+         hvp_provider_type = NA_character_)
+  }
   if (is.environment(result)) result <- as.list(result)
+  if (verify_flow_specification) {
+    resolved_chains <- lapply(seq_len(params$n_chains), function(chain) {
+      value <- .pdmpsamplers_julia_call(
+        "r_chain_flow_spec", result$chains, chain = as.integer(chain))
+      if (is.environment(value)) value <- as.list(value)
+      value
+    })
+    agreement <- .flow_spec_agreement(resolved_chains,
+      requested_flow_provenance$requested_mean,
+      requested_flow_provenance$requested_covariance)
+    mean_agreement <- agreement$mean
+    covariance_agreement <- agreement$covariance
+    chain_agreement <- agreement$chain
+    if (resolved_flow_specification == "frozen" && !all(chain_agreement)) {
+      mismatched <- paste(which(!chain_agreement), collapse = ", ")
+      cli::cli_abort(c(
+        "At least one sampled Julia chain did not retain the requested frozen flow.",
+        "i" = "Mismatched chain indices: {mismatched}.",
+        "i" = "Refusing to return a frozen-flow result."
+      ))
+    }
+    requested_flow_provenance$resolved_flow_type <- vapply(
+      resolved_chains, `[[`, "", "flow_type")
+    requested_flow_provenance$resolved_inner_flow_type <- vapply(
+      resolved_chains, `[[`, "", "inner_flow_type")
+    requested_flow_provenance$resolved_mean_hash <- vapply(
+      resolved_chains, function(x) flow_vector_hash(x$mean), "")
+    requested_flow_provenance$resolved_covariance_hash <- vapply(
+      resolved_chains, function(x) flow_matrix_hash(x$covariance), "")
+    requested_flow_provenance$resolved_mean_agreement <- mean_agreement
+    requested_flow_provenance$resolved_covariance_agreement <- covariance_agreement
+    requested_flow_provenance$resolved_agreement <- all(chain_agreement)
+    requested_flow_provenance$verification_passed <-
+      resolved_flow_specification == "initial" || all(chain_agreement)
+    requested_flow_provenance$n_verified_chains <- length(resolved_chains)
+  }
   subsampling_context_counters <- result$subsampling_context_counters
+  window_diagnostics <- result$window_diagnostics
+  candidate_records <- result$candidate_records
   if (!is.null(subsampling_context_counters)) {
     subsampling_context_counters <- lapply(subsampling_context_counters, function(counter) {
       if (is.environment(counter)) as.list(counter) else counter
@@ -1281,9 +1466,13 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
     d        = result$d,
     n_chains = result$n_chains
   )
+  attr(result, "backend_provenance") <- backend_provenance
+  attr(result, "flow_provenance") <- requested_flow_provenance
   if (!is.null(subsampling)) {
     attr(result, "subsampling") <- TRUE
     attr(result, "subsampling_context_counters") <- subsampling_context_counters
+    attr(result, "omrf_window_diagnostics") <- window_diagnostics
+    attr(result, "omrf_candidate_records") <- candidate_records
   }
   if (materialize) result <- .materialize(result)
   result

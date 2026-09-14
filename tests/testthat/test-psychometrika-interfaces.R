@@ -28,10 +28,8 @@ test_that("subsampling Stan specification validates certified envelopes", {
   )
   expect_s3_class(subsampling, "stan_subsampling")
   expect_equal(subsampling$subsample_size, 1L)
-  expect_error(
-    stan_subsampling(3, 3, list(), envelope),
-    "1 <= m < N"
-  )
+  full_batch <- stan_subsampling(3, 3, list(), envelope)
+  expect_equal(full_batch$subsample_size, 3L)
   expect_error(
     stan_subsampling(3, 1, list(), list(weights = matrix(1, 1, 3))),
     "certified"

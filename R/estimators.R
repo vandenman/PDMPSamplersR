@@ -10,7 +10,30 @@
         "i" = "Call {.fn materialize} before {.fn saveRDS} to enable reload.")
     )
   check_for_julia_setup()
-  if (isTRUE(x$skeleton[[1L]]$sparse)) {
+  if (isTRUE(x$skeleton[[1L]]$streaming)) {
+    if (is.null(x$retained_initial_states) || is.null(x$terminal_states))
+      cli::cli_abort("Streaming skeleton is missing endpoint provenance.")
+    .pdmpsamplers_julia_call("r_from_streaming_skeleton",
+      lapply(x$skeleton, `[[`, "directory"),
+      lapply(x$skeleton, `[[`, "chunk_count"),
+      lapply(x$skeleton, `[[`, "physical_events"),
+      lapply(x$skeleton, `[[`, "computational_boundaries"),
+      lapply(x$skeleton, `[[`, "buffer_maximum"),
+      lapply(x$retained_initial_states, `[[`, "time"),
+      lapply(x$retained_initial_states, `[[`, "position"),
+      lapply(x$retained_initial_states, `[[`, "physical_velocity"),
+      lapply(x$retained_initial_states, `[[`, "stored_frozen_velocity"),
+      lapply(x$retained_initial_states, `[[`, "free_mask"),
+      lapply(x$terminal_states, `[[`, "time"),
+      lapply(x$terminal_states, `[[`, "position"),
+      lapply(x$terminal_states, `[[`, "physical_velocity"),
+      lapply(x$terminal_states, `[[`, "stored_frozen_velocity"),
+      lapply(x$terminal_states, `[[`, "free_mask"),
+      lapply(x$skeleton, `[[`, "is_boomerang"),
+      lapply(x$skeleton, `[[`, "mu"),
+      lapply(x$skeleton, `[[`, "flow_cov")
+    )
+  } else if (isTRUE(x$skeleton[[1L]]$sparse)) {
     .pdmpsamplers_julia_call("r_from_sparse_skeleton",
       lapply(x$skeleton, `[[`, "initial_time"),
       lapply(x$skeleton, `[[`, "initial_position"),

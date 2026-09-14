@@ -131,12 +131,37 @@ end
         SkeletonPoint(copy(second_anchor), ones(9)), trues(9))
     switching_flow = BouncyParticle(9, 0.0)
     @test live_adapter.select_fn!(wrapped_model.grad, switching_state,
-        switching_flow, :main, wrapped_stats)
+        switching_flow, :main, wrapped_stats, :reflection, false)
     @test wrapped_model.grad.anchor == live_manager.oracle.anchor
     @test wrapped_model.grad.envelope.component_scales!.anchor ==
         live_manager.oracle.anchor
     @test wrapped_model.grad.residual_oracle.f.anchor ==
         live_manager.oracle.anchor
+
+    # Phase-boundary regression: a statistics-wrapped CV owns a copied
+    # envelope.  When warmup has already installed an entry and selection
+    # keeps the same index, finish_warmup! must still synchronize that live
+    # envelope before the first retained event.
+    boundary_model, _, _, _, boundary_manager =
+        PDMPSamplersRBridge._build_stan_subsampling_model(
+            manager_ctx, manager_names, subsampling, anchor, nothing,
+            falses(9); anchor_capacity=2)
+    boundary_wrapped = PDMPSamplers.with_stats(boundary_model, wrapped_stats)
+    boundary_anchor = anchor .+ 0.06
+    boundary_prepared = PDMPSamplersRBridge._prepare_omrf_anchor(
+        boundary_manager, boundary_anchor)
+    boundary_manager.active_idx = PDMPSamplersRBridge._insert_omrf_anchor!(
+        boundary_manager, boundary_prepared)
+    PDMPSamplersRBridge._install_omrf_anchor!(
+        boundary_manager, boundary_prepared)
+    @test boundary_wrapped.grad.anchor != boundary_manager.oracle.anchor
+    @test PDMPSamplersRBridge._finish_omrf_warmup!(boundary_manager,
+        boundary_wrapped.grad, boundary_anchor)
+    @test boundary_wrapped.grad.anchor == boundary_manager.oracle.anchor
+    @test boundary_wrapped.grad.envelope.component_scales!.anchor ==
+        boundary_manager.oracle.anchor
+    @test boundary_wrapped.grad.residual_oracle.f.anchor ==
+        boundary_manager.oracle.anchor
     # Restore a recycled owner, then measure the same prepared branch without
     # assigning its return value (which would box a local in global test code).
     manager.recycled_state = recycled
@@ -368,6 +393,107 @@ end
     end
     @test recovered_sum ≈ marked_sum atol=2e-12 rtol=2e-12
 
+    # The m=1 branch retains the established random-number order exactly.
+    legacy_cv = SubsampledControlVariate(
+        (out, x) -> fill!(out, 0.0), oracle, cell_marked, anchor, 1)
+    production_cv = SubsampledControlVariate(
+        (out, x) -> fill!(out, 0.0), oracle, cell_marked, anchor, 1)
+    legacy_rng = Xoshiro(0xb471)
+    production_rng = copy(legacy_rng)
+    D_legacy = 0.37
+    for _ in 1:1_000
+        residual_source = !iszero(B_cell) &&
+            (iszero(D_legacy) || rand(legacy_rng) *
+                (D_legacy + B_cell) > D_legacy)
+        if residual_source
+            component = PDMPSamplers._draw_component(
+                legacy_rng, cell_marked, B_cell)
+            legacy_cv.subset[1] = PDMPSamplers._draw_distinguished(
+                legacy_rng, cell_marked, component)
+        else
+            PDMPSamplers._draw_base_subset!(legacy_rng, legacy_cv,
+                legacy_cv.subset_design)
+        end
+        PDMPSamplers.draw_subset!(production_rng, production_cv,
+            D_legacy, B_cell)
+        @test production_cv.subset == legacy_cv.subset
+    end
+
+    # The specialized cell-marked path implements the complete size-biased
+    # subset law, not merely a removed batch-one guard. Enumerate every
+    # subset for intermediate and full batches, then compare production draws
+    # with their exact probabilities.
+    M_population = N * P
+    for m in (1, 2, M_population)
+        batch_cv = SubsampledControlVariate(
+            (out, x) -> fill!(out, 0.0), oracle, cell_marked, anchor, m)
+        inclusion_vectors = Iterators.filter(s -> sum(s) == m,
+            (collect(s) for s in Iterators.product(
+                ntuple(_ -> 0:1, M_population)...)))
+        subsets = [findall(!iszero, subset) for subset in inclusion_vectors]
+        averaged_gradient = zeros(9)
+        subset_residual = zeros(9)
+        for subset in subsets
+            fill!(subset_residual, 0.0)
+            oracle(subset_residual, x, subset, oracle.anchor)
+            averaged_gradient .+= deterministic .+
+                (M_population / m) .* subset_residual
+        end
+        averaged_gradient ./= length(subsets)
+        @test averaged_gradient ≈ complete atol=2e-9 rtol=2e-10
+        if m == M_population
+            @test averaged_gradient ≈ deterministic + residual
+        end
+        D_mix = 0.37
+        probabilities = Float64[]
+        accepted_intensity = 0.0
+        uniform_intensity = 0.0
+        for subset in subsets
+            cell_sum = sum(cell_marked.scales[
+                cell_marked.groups[1, factor]] for factor in subset)
+            selected_roof = D_mix + (M_population / m) * cell_sum
+            proposal_probability =
+                PDMPSamplers._selected_subset_probability(
+                    batch_cv, D_mix, B_cell, selected_roof)
+            push!(probabilities, proposal_probability)
+            fill!(subset_residual, 0.0)
+            oracle(subset_residual, x, subset, oracle.anchor)
+            subset_gradient = deterministic .+
+                (M_population / m) .* subset_residual
+            exact_rate = PDMPSamplers.λ(state, subset_gradient, flow)
+            accepted_intensity += (D_mix + B_cell) *
+                proposal_probability * exact_rate / selected_roof
+            uniform_intensity += exact_rate / length(subsets)
+        end
+        @test sum(probabilities) ≈ 1.0 atol=2e-13 rtol=2e-13
+        @test accepted_intensity ≈ uniform_intensity atol=3e-12 rtol=3e-12
+        if m == M_population
+            @test uniform_intensity ≈ PDMPSamplers.λ(state, complete, flow)
+        end
+
+        draws = m == M_population ? 100 : 80_000
+        observed = zeros(Int, length(subsets))
+        lookup = Dict(Tuple(subset) => i for (i, subset) in enumerate(subsets))
+        batch_rng = Xoshiro(0x51a5 + m)
+        for _ in 1:draws
+            selected_roof = PDMPSamplers.draw_subset!(
+                batch_rng, batch_cv, D_mix, B_cell)
+            @test length(unique(batch_cv.subset)) == m
+            chosen = sort(copy(batch_cv.subset))
+            observed[lookup[Tuple(chosen)]] += 1
+            expected_roof = D_mix + (M_population / m) * sum(
+                cell_marked.scales[cell_marked.groups[1, factor]]
+                for factor in chosen)
+            @test selected_roof ≈ expected_roof atol=2e-14 rtol=2e-14
+        end
+        if m != M_population
+            @test maximum(abs.(observed ./ draws .- probabilities)) < 0.012
+        else
+            @test observed == [draws]
+        end
+    end
+    oracle.lazy_residual_subset_bound = NaN
+
     # Prewarmed point, cell, selection, and exact-refinement paths allocate
     # no memory. The diagnostic arrays above are deliberately outside this.
     PDMPSamplers.total_residual_bound(envelope, state, flow, 0.1)
@@ -382,15 +508,23 @@ end
         PDMPSamplers.observation_residual_bound(envelope, cv.subset[1])
     PDMPSamplers.subsampling_residual_subset_bound(oracle, state,
         deterministic_state, flow, D, selected_roof, cv.subset, N * P)
+    PDMPSamplers.subsampling_residual_subset_bound(oracle, state,
+        deterministic_state, flow, D, selected_roof, cv.subset, N * P)
     @test @allocated(PDMPSamplers.total_residual_bound(
         envelope, state, flow, 0.1)) == 0
     @test @allocated(PDMPSamplers.component_cell_scales!(envelope.cell_scales,
         envelope, state, flow, 0.0, 0.3)) == 0
     @test @allocated(PDMPSamplers.draw_subset!(draw_rng, cv, 0.0,
         dot(envelope.scales, envelope.totals))) == 0
-    @test @allocated(PDMPSamplers.subsampling_residual_subset_bound(
-        oracle, state, deterministic_state, flow, D, selected_roof,
-        cv.subset, N * P)) == 0
+    residual_bound_allocations(oracle, state, deterministic_state, flow, D,
+            selected_roof, subset, scale) = @allocated(
+        PDMPSamplers.subsampling_residual_subset_bound(
+            oracle, state, deterministic_state, flow, D, selected_roof,
+            subset, scale))
+    residual_bound_allocations(oracle, state, deterministic_state, flow, D,
+        selected_roof, cv.subset, N * P)
+    @test residual_bound_allocations(oracle, state, deterministic_state, flow,
+        D, selected_roof, cv.subset, N * P) == 0
     cell_marked.component_scales!.n_cached_cells = 0
     PDMPSamplers.component_cell_scales!(cell_marked.cell_scales,
         cell_marked, state, flow, 0.0, 0.3)

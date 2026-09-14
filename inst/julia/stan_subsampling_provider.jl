@@ -118,6 +118,12 @@ mutable struct StanSubsamplingCallCounts
     residual_source_proposals::Int
     deterministic_source_acceptances::Int
     residual_source_acceptances::Int
+    categorical_point_evaluations::Int
+    categorical_point_displacement_gt_four::Int
+    categorical_point_old_bound_sum::Float64
+    categorical_point_new_bound_sum::Float64
+    categorical_cell_cache_hits::Int
+    categorical_cell_cache_misses::Int
 end
 StanSubsamplingCallCounts() = StanSubsamplingCallCounts(
     # 4:24 are integer counters.
@@ -132,7 +138,8 @@ StanSubsamplingCallCounts() = StanSubsamplingCallCounts(
     OMRFSignedBPSCallCounts(), 0, 0, 0.0,
     0, 0, 0.0, 0, 0,
     0, 0, 0.0, 0, 0, 0, 0, 0, 0,
-    0, 0.0, false, 0, 0, 0, 0)
+    0, 0.0, false, 0, 0, 0, 0,
+    0, 0, 0.0, 0.0, 0, 0)
 
 mutable struct StanSubsamplingContext
     full::PDMPModel
@@ -1174,15 +1181,17 @@ function _omrf_prior_intervals!(glo, ghi, prior::OMRFNodeScaleAnalyticPrior,
     return nothing
 end
 
-function _omrf_interval_rate_bound(full_anchor, prior_anchor,
+function _omrf_interval_rate_bound(likelihood_baseline, prior_baseline,
         glo, ghi, xlo, xhi, vlo, vhi,
         state, flow)
     actual = _omrf_actual_flow(flow)
     zigzag = actual isa ZigZag
     signed_lo = 0.0; signed_hi = 0.0; total = 0.0
-    indices = full_anchor === nothing ? eachindex(glo) : eachindex(full_anchor)
+    indices = likelihood_baseline === nothing ? eachindex(glo) :
+        eachindex(likelihood_baseline)
     @inbounds for i in indices
-        c = full_anchor === nothing ? 0.0 : full_anchor[i] - prior_anchor[i]
+        c = likelihood_baseline === nothing ? 0.0 : likelihood_baseline[i] -
+            (prior_baseline === nothing ? 0.0 : prior_baseline[i])
         gl, gh = _omrf_iadd(glo[i], ghi[i], c, c)
         if actual isa PDMPSamplers.AnyBoomerang
             gamma = actual.Γ isa Diagonal ? actual.Γ.diag[i] : throw(ArgumentError(
@@ -1217,7 +1226,11 @@ function _omrf_direct_deterministic_cell_bound(oracle, active, state, flow,
         Float64(left), Float64(right))
     prior = something(oracle.analytic_prior)
     _omrf_prior_intervals!(glo, ghi, prior, xlo, xhi, active)
-    return _omrf_interval_rate_bound(oracle.full_anchor, oracle.prior_anchor,
+    nodecv = oracle.node_position_cv
+    likelihood_baseline = nodecv === nothing ? oracle.full_anchor :
+        nodecv.likelihood_baseline
+    prior_baseline = nodecv === nothing ? oracle.prior_anchor : nothing
+    return _omrf_interval_rate_bound(likelihood_baseline, prior_baseline,
         glo, ghi, xlo, xhi,
         vlo, vhi, state, flow)
 end
@@ -1788,6 +1801,21 @@ struct OMRFNodeLocalFrozenBank
     candidates::Matrix{Float64}
 end
 
+"""Frozen ordinary first-order node-position control-variate state."""
+mutable struct OMRFNodePositionCV
+    bank::OMRFNodeLocalFrozenBank
+    supports::Vector{Vector{Int}}
+    grams::Vector{Matrix{Float64}}
+    linear_terms::Vector{Matrix{Float64}}
+    constants::Matrix{Float64}
+    sources::Vector{Int}
+    requested_sources::Vector{Int}
+    pending_sources::Vector{Int}
+    likelihood_baseline::Vector{Float64}
+    metric_variances::Vector{Float64}
+    installation_generation::UInt64
+end
+
 """Warmup-prepared node-specific gradient/Hessian control-variate bank."""
 mutable struct OMRFNodeLocalHCVBank
     contexts::Vector{OMRFResidualContext}
@@ -2209,6 +2237,137 @@ function _omrf_node_local_residual!(bank::OMRFNodeLocalFrozenBank, out, x,
     return out
 end
 
+function _omrf_node_position_metric_variances(flow, d::Int)
+    actual = _omrf_actual_flow(flow)
+    actual isa BouncyParticle || throw(ArgumentError(
+        "node-position selection is available only for linear BPS flows"))
+    if flow isa PDMPSamplers.PreconditionedDynamics
+        hasproperty(flow.metric, :scale) || throw(ArgumentError(
+            "node-position selection requires a diagonal preconditioner"))
+        scale = flow.metric.scale
+        length(scale) == d || throw(DimensionMismatch(
+            "preconditioner dimension does not match the OMRF parameter order"))
+        return abs2.(Float64.(scale))
+    end
+    return ones(d)
+end
+
+"""Build the specification's weighted-logit Gram matrices without dense designs."""
+function _prepare_omrf_node_position_cv(envelope_spec, unc_names,
+        candidates::AbstractMatrix, flow_or_metric_variances,
+        counts::StanSubsamplingCallCounts=StanSubsamplingCallCounts())
+    bank = _prepare_omrf_node_local_bank(
+        envelope_spec, unc_names, candidates, counts)
+    context = bank.contexts[1]
+    N, P = size(context.X)
+    d, K = size(bank.candidates)
+    metric_variances = flow_or_metric_variances isa AbstractVector ?
+        collect(Float64, flow_or_metric_variances) :
+        _omrf_node_position_metric_variances(flow_or_metric_variances, d)
+    length(metric_variances) == d || throw(DimensionMismatch(
+        "node-position metric variances have the wrong dimension"))
+    supports = Vector{Vector{Int}}(undef, P)
+    grams = Vector{Matrix{Float64}}(undef, P)
+    linear_terms = Vector{Matrix{Float64}}(undef, P)
+    constants = zeros(P, K)
+    @inbounds for node in 1:P
+        q = context.seen[node] - 1
+        threshold_start = context.threshold_starts[node]
+        threshold_support = q == 0 ? Int[] : collect(
+            context.threshold_indices[threshold_start:(threshold_start + q - 1)])
+        edge_support = q == 0 ? Int[] : [context.interaction_indices[edge]
+            for edge in context.incident_edges[node]]
+        support = q == 0 ? Int[] : vcat(threshold_support, edge_support)
+        supports[node] = support
+        s = length(support)
+        Q = zeros(s, s)
+        if q > 0
+            L = length(edge_support)
+            c2 = sum(abs2, 1:q)
+            m0 = 0.0
+            m1 = zeros(L)
+            M2 = zeros(L, L)
+            threshold_variance = sum(metric_variances[index]
+                for index in threshold_support)
+            for person in 1:N
+                weight = threshold_variance
+                for local_edge in 1:L
+                    y = context.X[person,
+                        context.incident_neighbours[node][local_edge]]
+                    weight += c2 * metric_variances[edge_support[local_edge]] * y^2
+                end
+                m0 += weight
+                for a in 1:L
+                    ya = context.X[person,
+                        context.incident_neighbours[node][a]]
+                    m1[a] += weight * ya
+                    for b in 1:L
+                        yb = context.X[person,
+                            context.incident_neighbours[node][b]]
+                        M2[a, b] += weight * ya * yb
+                    end
+                end
+            end
+            m0 /= N
+            m1 ./= N
+            M2 ./= N
+            for u in 1:q
+                Q[u, u] = m0
+                for edge in 1:L
+                    value = u * m1[edge]
+                    Q[u, q + edge] = value
+                    Q[q + edge, u] = value
+                end
+            end
+            for a in 1:L, b in 1:L
+                Q[q + a, q + b] = c2 * M2[a, b]
+            end
+        end
+        grams[node] = Q
+        terms = zeros(s, K)
+        for source in 1:K
+            a = view(bank.candidates, support, source)
+            mul!(view(terms, :, source), Q, a)
+            constants[node, source] = dot(a, view(terms, :, source))
+        end
+        linear_terms[node] = terms
+    end
+    sources = ones(Int, P)
+    return OMRFNodePositionCV(bank, supports, grams, linear_terms, constants,
+        sources, similar(sources), similar(sources), zeros(d),
+        metric_variances, UInt64(1))
+end
+
+@inline function _omrf_node_position_score(nodecv::OMRFNodePositionCV,
+        node::Int, source::Int, x)
+    support = nodecv.supports[node]
+    score = nodecv.constants[node, source]
+    terms = nodecv.linear_terms[node]
+    @inbounds for local_index in eachindex(support)
+        score -= 2x[support[local_index]] * terms[local_index, source]
+    end
+    return score
+end
+
+function _omrf_node_position_sources!(out, nodecv::OMRFNodePositionCV, x)
+    K = size(nodecv.bank.candidates, 2)
+    @inbounds for node in eachindex(out)
+        isempty(nodecv.supports[node]) && (out[node] = 1; continue)
+        best = 1
+        best_score = _omrf_node_position_score(nodecv, node, 1, x)
+        for source in 2:K
+            score = _omrf_node_position_score(nodecv, node, source, x)
+            tolerance = 64eps(Float64) * max(1.0, abs(score), abs(best_score))
+            if score < best_score - tolerance
+                best = source
+                best_score = score
+            end
+        end
+        out[node] = best
+    end
+    return out
+end
+
 function _record_omrf_touched_support!(context::OMRFResidualContext, node::Int)
     q = context.seen[node] - 1
     start = context.threshold_starts[node]
@@ -2240,6 +2399,7 @@ mutable struct OMRFAnalyticSubsamplingOracle
     residual_context::OMRFResidualContext
     analytic_prior::Union{Nothing,OMRFAnalyticPrior}
     node_local_hcv::Union{Nothing,OMRFNodeLocalHCVBank}
+    node_position_cv::Union{Nothing,OMRFNodePositionCV}
     lazy_residual_subset_bound::Float64
     exact_selected_refinement::Bool
     cached_residual::Vector{Float64}
@@ -2340,6 +2500,7 @@ function OMRFAnalyticSubsamplingOracle(ctx::StanSubsamplingContext,
         envelope_spec, "exact_selected_refinement", false)
     oracle = OMRFAnalyticSubsamplingOracle(ctx, copy(anchor), zeros(d), zeros(d),
         zeros(d), zeros(d), false, residual_context, analytic_prior, nothing,
+        nothing,
         NaN, exact_selected_refinement, zeros(d), false, trues(d), 0,
         zeros(d), zeros(d), zeros(d), zeros(d), zeros(d), zeros(d))
     _clear_gradient!(ctx, :full, oracle.full_anchor, anchor)
@@ -2364,7 +2525,7 @@ function OMRFAnalyticSubsamplingOracle(ctx::StanSubsamplingContext,
         lazy_residual_subset_bound::Float64)
     return OMRFAnalyticSubsamplingOracle(ctx, anchor, full_anchor,
         prior_anchor, prior_x, prior_x_position, prior_x_valid,
-        residual_context, analytic_prior, node_local_hcv,
+        residual_context, analytic_prior, node_local_hcv, nothing,
         lazy_residual_subset_bound, false, zeros(length(anchor)), false,
         trues(length(anchor)), 0,
         zeros(length(anchor)), zeros(length(anchor)), zeros(length(anchor)),
@@ -2394,7 +2555,8 @@ function PDMPSamplers.deterministic_rate_cell_bound(
         oracle::OMRFAnalyticSubsamplingOracle,
         state::PDMPSamplers.AbstractPDMPState,
         flow::PDMPSamplers.ContinuousDynamics, left::Real, right::Real)
-    oracle.residual_context.use_hcv && return nothing
+    (oracle.residual_context.use_hcv || oracle.analytic_prior === nothing) &&
+        return nothing
     active = oracle.analytic_prior isa OMRFNodeScaleAnalyticPrior ?
         oracle.active_free : nothing
     return _omrf_direct_deterministic_cell_bound(
@@ -2402,7 +2564,7 @@ function PDMPSamplers.deterministic_rate_cell_bound(
 end
 PDMPSamplers.has_direct_deterministic_rate_cell_bound(
     oracle::OMRFAnalyticSubsamplingOracle) =
-    !oracle.residual_context.use_hcv
+    !oracle.residual_context.use_hcv && oracle.analytic_prior !== nothing
 
 function _prior_gradient_at_x!(oracle::OMRFAnalyticSubsamplingOracle, x)
     if !oracle.prior_x_valid || oracle.prior_x_position != x
@@ -2418,6 +2580,17 @@ function _prior_gradient_at_x!(oracle::OMRFAnalyticSubsamplingOracle, x)
 end
 
 function (oracle::OMRFAnalyticSubsamplingOracle)(out, x)
+    if oracle.node_position_cv !== nothing
+        nodecv = oracle.node_position_cv
+        if oracle.analytic_prior === nothing
+            _prior_gradient_at_x!(oracle, x)
+            @. out = nodecv.likelihood_baseline + oracle.prior_x
+        else
+            _omrf_prior_gradient!(out, oracle.analytic_prior, x)
+            @. out += nodecv.likelihood_baseline
+        end
+        return out
+    end
     if oracle.node_local_hcv !== nothing
         prior = something(oracle.analytic_prior)
         _omrf_prior_gradient!(out, prior, x)
@@ -2505,6 +2678,35 @@ function (oracle::OMRFAnalyticSubsamplingOracle)(out, x, direction)
 end
 
 function (oracle::OMRFAnalyticSubsamplingOracle)(out, x, subset, anchor)
+    if oracle.node_position_cv !== nothing
+        started = time_ns()
+        context = oracle.residual_context
+        @inbounds for index in context.touched_positions
+            context.touched_mask[index] = false
+        end
+        empty!(context.touched_positions)
+        N, P = size(context.X)
+        if context.factorization === :person
+            @inbounds for _ in subset, node in 1:P
+                _record_omrf_touched_support!(context, node)
+            end
+            context.counts.analytic_persons += length(subset)
+            context.counts.analytic_node_conditionals += P * length(subset)
+        else
+            @inbounds for factor in subset
+                node0, _ = divrem(factor - 1, N)
+                _record_omrf_touched_support!(context, node0 + 1)
+            end
+            context.counts.analytic_factors += length(subset)
+            context.counts.analytic_node_conditionals += length(subset)
+        end
+        nodecv = oracle.node_position_cv
+        _omrf_node_local_residual!(nodecv.bank, out, x, subset,
+            nodecv.sources; factorization=context.factorization)
+        context.counts.analytic_residual += 1
+        context.counts.analytic_residual_seconds += (time_ns() - started) * 1e-9
+        return out
+    end
     if oracle.node_local_hcv !== nothing
         started = time_ns()
         _omrf_node_local_hcv_residual!(oracle.node_local_hcv, out, x, subset,
@@ -2770,6 +2972,10 @@ mutable struct OMRFNodeBoxFirstOrderScales
     displacement_upper::Vector{Float64}
     velocity_lower::Vector{Float64}
     velocity_upper::Vector{Float64}
+    node_bank::Union{Nothing,OMRFNodeLocalFrozenBank}
+    node_sources::Vector{Int}
+    node_installation_generation::UInt64
+    categorical_residual_cap::Bool
 end
 
 """
@@ -2802,6 +3008,9 @@ mutable struct OMRFCellMarkedNodeBoxFirstOrderScales
     factor_point_seconds::Float64
     cell_cache_hits::Int
     cell_cache_misses::Int
+    point_displacement_gt_four::Int
+    point_old_bound_sum::Float64
+    point_new_bound_sum::Float64
 end
 
 """
@@ -6659,10 +6868,10 @@ end
 function _cache_omrf_node_box_point!(scales::OMRFNodeBoxFirstOrderScales,
         state, flow, t)
     @inbounds for index in eachindex(scales.anchor)
-        displacement, velocity = _omrf_coordinate_at_anchor_value(
-            state, flow, scales.anchor[index], index, t)
-        scales.displacement_lower[index] = displacement
-        scales.displacement_upper[index] = displacement
+        value, velocity = _omrf_coordinate_at_anchor_value(
+            state, flow, 0.0, index, t)
+        scales.displacement_lower[index] = value
+        scales.displacement_upper[index] = value
         scales.velocity_lower[index] = velocity
         scales.velocity_upper[index] = velocity
     end
@@ -6673,7 +6882,7 @@ function _cache_omrf_node_box_cell!(scales::OMRFNodeBoxFirstOrderScales,
         state, flow::PDMPSamplers.AnyBoomerang, left, right)
     @inbounds for index in eachindex(scales.anchor)
         offset, cosine, sine = _omrf_harmonic_coefficients_anchor_value(
-            state, flow, scales.anchor[index], index)
+            state, flow, 0.0, index)
         scales.displacement_lower[index], scales.displacement_upper[index] =
             _omrf_harmonic_cell_interval(
                 offset, cosine, sine, left, right)
@@ -6688,9 +6897,9 @@ function _cache_omrf_node_box_cell!(scales::OMRFNodeBoxFirstOrderScales,
         state, flow::BouncyParticle, left, right)
     @inbounds for index in eachindex(scales.anchor)
         left_displacement, velocity = _omrf_coordinate_at_anchor_value(
-            state, flow, scales.anchor[index], index, left)
+            state, flow, 0.0, index, left)
         right_displacement, _ = _omrf_coordinate_at_anchor_value(
-            state, flow, scales.anchor[index], index, right)
+            state, flow, 0.0, index, right)
         scales.displacement_lower[index] = min(
             left_displacement, right_displacement)
         scales.displacement_upper[index] = max(
@@ -6699,6 +6908,23 @@ function _cache_omrf_node_box_cell!(scales::OMRFNodeBoxFirstOrderScales,
         scales.velocity_upper[index] = velocity
     end
     return scales
+end
+
+@inline function _omrf_node_reference(scales::OMRFNodeBoxFirstOrderScales,
+        node::Int, index::Int)
+    bank = scales.node_bank
+    return bank === nothing ? scales.anchor[index] :
+        bank.candidates[index, scales.node_sources[node]]
+end
+
+"""Certified categorical residual bound, optionally using total variation."""
+@inline function _omrf_categorical_residual_bound(
+        displacement_range::Float64, velocity_range::Float64,
+        capped::Bool)
+    multiplier = capped ? min(0.25 * displacement_range, 1.0) :
+        0.25 * displacement_range
+    value = velocity_range * multiplier
+    return iszero(value) ? 0.0 : nextfloat(value)
 end
 
 @inline function _omrf_node_box_first_order_bound(
@@ -6713,17 +6939,18 @@ end
     @inbounds for k in eachindex(context.incident_edges[node])
         edge_index = context.interaction_indices[
             context.incident_edges[node][k]]
+        reference = _omrf_node_reference(scales, node, edge_index)
         neighbour = context.incident_neighbours[node][k]
         covariate_lower = scales.minima[component, neighbour]
         covariate_upper = scales.maxima[component, neighbour]
         field_displacement_lower += _omrf_interval_product_lower(
             covariate_lower, covariate_upper,
-            scales.displacement_lower[edge_index],
-            scales.displacement_upper[edge_index])
+            scales.displacement_lower[edge_index] - reference,
+            scales.displacement_upper[edge_index] - reference)
         field_displacement_upper += _omrf_interval_product_upper(
             covariate_lower, covariate_upper,
-            scales.displacement_lower[edge_index],
-            scales.displacement_upper[edge_index])
+            scales.displacement_lower[edge_index] - reference,
+            scales.displacement_upper[edge_index] - reference)
         field_velocity_lower += _omrf_interval_product_lower(
             covariate_lower, covariate_upper,
             scales.velocity_lower[edge_index],
@@ -6741,11 +6968,13 @@ end
     @inbounds for category in 1:q
         threshold_index = context.threshold_indices[
             threshold_start + category - 1]
+        threshold_reference = _omrf_node_reference(
+            scales, node, threshold_index)
         category_displacement_lower =
-            scales.displacement_lower[threshold_index] +
+            scales.displacement_lower[threshold_index] - threshold_reference +
             category * field_displacement_lower
         category_displacement_upper =
-            scales.displacement_upper[threshold_index] +
+            scales.displacement_upper[threshold_index] - threshold_reference +
             category * field_displacement_upper
         category_velocity_lower = scales.velocity_lower[threshold_index] +
             category * field_velocity_lower
@@ -6763,7 +6992,8 @@ end
     # For categorical p, Hoeffding's covariance inequality yields
     # |b'*(p(x)-p(anchor))| <= range(a)*range(b)/4.  The zero reference
     # category is included by the zero initial extrema above.
-    return nextfloat(0.25 * displacement_range * velocity_range)
+    return _omrf_categorical_residual_bound(displacement_range,
+        velocity_range, scales.categorical_residual_cap)
 end
 
 @inline function _omrf_node_box_two_bounds!(out,
@@ -6786,9 +7016,10 @@ end
     @inbounds for k in eachindex(context.incident_edges[node])
         edge_index = context.interaction_indices[
             context.incident_edges[node][k]]
+        reference = _omrf_node_reference(scales, node, edge_index)
         neighbour = context.incident_neighbours[node][k]
-        displacement_lower = scales.displacement_lower[edge_index]
-        displacement_upper = scales.displacement_upper[edge_index]
+        displacement_lower = scales.displacement_lower[edge_index] - reference
+        displacement_upper = scales.displacement_upper[edge_index] - reference
         velocity_lower = scales.velocity_lower[edge_index]
         velocity_upper = scales.velocity_upper[edge_index]
 
@@ -6822,8 +7053,12 @@ end
     @inbounds for category in 1:q
         threshold_index = context.threshold_indices[
             threshold_start + category - 1]
-        threshold_dl = scales.displacement_lower[threshold_index]
-        threshold_du = scales.displacement_upper[threshold_index]
+        threshold_reference = _omrf_node_reference(
+            scales, node, threshold_index)
+        threshold_dl = scales.displacement_lower[threshold_index] -
+            threshold_reference
+        threshold_du = scales.displacement_upper[threshold_index] -
+            threshold_reference
         threshold_vl = scales.velocity_lower[threshold_index]
         threshold_vu = scales.velocity_upper[threshold_index]
         first_dmin = min(first_dmin, threshold_dl + category * first_dl)
@@ -6835,10 +7070,12 @@ end
         second_vmin = min(second_vmin, threshold_vl + category * second_vl)
         second_vmax = max(second_vmax, threshold_vu + category * second_vu)
     end
-    out[first_component] = nextfloat(0.25 *
-        (first_dmax - first_dmin) * (first_vmax - first_vmin))
-    out[second_component] = nextfloat(0.25 *
-        (second_dmax - second_dmin) * (second_vmax - second_vmin))
+    out[first_component] = _omrf_categorical_residual_bound(
+        first_dmax - first_dmin, first_vmax - first_vmin,
+        scales.categorical_residual_cap)
+    out[second_component] = _omrf_categorical_residual_bound(
+        second_dmax - second_dmin, second_vmax - second_vmin,
+        scales.categorical_residual_cap)
     return nothing
 end
 
@@ -7023,6 +7260,7 @@ function (scales::OMRFCellMarkedNodeBoxFirstOrderScales)(out, state,
     slot = _omrf_cell_marked_lookup(scales, time)
     if iszero(slot)
         scales.cell_cache_misses += 1
+        scales.base.context.counts.categorical_cell_cache_misses += 1
         throw(ErrorException(
             "cell-marked node-box proposal lies outside the active cell cache"))
     end
@@ -7032,6 +7270,7 @@ function (scales::OMRFCellMarkedNodeBoxFirstOrderScales)(out, state,
     _omrf_cell_marked_set_point!(scales, state, flow, time, true)
     scales.active_cell = slot
     scales.cell_cache_hits += 1
+    scales.base.context.counts.categorical_cell_cache_hits += 1
     return out
 end
 
@@ -7042,6 +7281,7 @@ function (scales::OMRFCellMarkedNodeBoxFirstOrderScales)(out, state,
     slot = _omrf_cell_marked_lookup(scales, time)
     if iszero(slot)
         scales.cell_cache_misses += 1
+        scales.base.context.counts.categorical_cell_cache_misses += 1
         throw(ErrorException(
             "cell-marked node-box proposal lies outside the active cell cache"))
     end
@@ -7051,6 +7291,7 @@ function (scales::OMRFCellMarkedNodeBoxFirstOrderScales)(out, state,
     _omrf_cell_marked_set_point!(scales, state, flow, time, false)
     scales.active_cell = slot
     scales.cell_cache_hits += 1
+    scales.base.context.counts.categorical_cell_cache_hits += 1
     return out
 end
 
@@ -7078,6 +7319,7 @@ function PDMPSamplers.subsampling_failure_context(
     slot = scales.active_cell
     return (
         selected_factor=factor,
+        selected_factors=copy(subset),
         selected_person=person0 + 1,
         selected_node=node0 + 1,
         selected_component=component,
@@ -7100,6 +7342,16 @@ function PDMPSamplers.subsampling_failure_context(
         oracle_anchor_identity=objectid(oracle.anchor),
         envelope_anchor=copy(scales.base.anchor),
         envelope_anchor_identity=objectid(scales.base.anchor),
+        envelope_weights=copy(envelope.weights),
+        envelope_groups=copy(envelope.groups),
+        envelope_totals=copy(envelope.totals),
+        live_component_scales=copy(envelope.scales),
+        live_component_cumulative_masses=copy(envelope.cumulative_masses),
+        component_membership_counts=copy(scales.component_totals),
+        cached_cell_component_scales=iszero(slot) ? Float64[] :
+            copy(view(scales.cell_scales, :, slot)),
+        envelope_wrapper_type=string(typeof(envelope)),
+        component_provider_type=string(typeof(scales)),
         anchor_probabilities=copy(context.anchor_probabilities),
         touched_coordinates=copy(context.touched_positions),
         active_generation=context.active_generation,
@@ -7120,17 +7372,18 @@ function PDMPSamplers.screening_residual_bound(
 end
 
 @inline function _omrf_cell_marked_coordinate(scales,
-        index::Int, sine::Float64, cosine::Float64)
+        node::Int, index::Int, sine::Float64, cosine::Float64)
+    reference = _omrf_node_reference(scales.base, node, index)
     if scales.point_is_sticky && !scales.point_free[index]
-        return scales.point_x[index] - scales.base.anchor[index], 0.0
+        return scales.point_x[index] - reference, 0.0
     end
     if !scales.point_harmonic
-        displacement = scales.point_x[index] - scales.base.anchor[index] +
+        displacement = scales.point_x[index] - reference +
             scales.cached_time * scales.point_theta[index]
         return displacement, scales.point_theta[index]
     end
     centered = scales.point_x[index] - scales.point_mu[index]
-    displacement = scales.point_mu[index] - scales.base.anchor[index] +
+    displacement = scales.point_mu[index] - reference +
         centered * cosine + scales.point_theta[index] * sine
     velocity = -centered * sine + scales.point_theta[index] * cosine
     return displacement, velocity
@@ -7153,7 +7406,7 @@ end
         iszero(covariate) && continue
         index = context.interaction_indices[context.incident_edges[node][k]]
         displacement, velocity = _omrf_cell_marked_coordinate(
-            scales, index, sine, cosine)
+            scales, node, index, sine, cosine)
         field_displacement += covariate * displacement
         field_velocity += covariate * velocity
     end
@@ -7166,7 +7419,7 @@ end
     @inbounds for category in 1:q
         index = context.threshold_indices[threshold_start + category - 1]
         displacement, velocity = _omrf_cell_marked_coordinate(
-            scales, index, sine, cosine)
+            scales, node, index, sine, cosine)
         logit_displacement = displacement + category * field_displacement
         logit_velocity = velocity + category * field_velocity
         displacement_minimum = min(displacement_minimum, logit_displacement)
@@ -7174,9 +7427,21 @@ end
         velocity_minimum = min(velocity_minimum, logit_velocity)
         velocity_maximum = max(velocity_maximum, logit_velocity)
     end
-    return nextfloat(0.25 *
-        (displacement_maximum - displacement_minimum) *
-        (velocity_maximum - velocity_minimum))
+    displacement_range = displacement_maximum - displacement_minimum
+    velocity_range = velocity_maximum - velocity_minimum
+    old_bound = _omrf_categorical_residual_bound(
+        displacement_range, velocity_range, false)
+    new_bound = _omrf_categorical_residual_bound(
+        displacement_range, velocity_range, true)
+    scales.point_displacement_gt_four += displacement_range > 4.0
+    scales.point_old_bound_sum += old_bound
+    scales.point_new_bound_sum += new_bound
+    counts = scales.base.context.counts
+    counts.categorical_point_evaluations += 1
+    counts.categorical_point_displacement_gt_four += displacement_range > 4.0
+    counts.categorical_point_old_bound_sum += old_bound
+    counts.categorical_point_new_bound_sum += new_bound
+    return scales.base.categorical_residual_cap ? new_bound : old_bound
 end
 
 function PDMPSamplers.draw_subset!(rng::Random.AbstractRNG,
@@ -7186,33 +7451,51 @@ function PDMPSamplers.draw_subset!(rng::Random.AbstractRNG,
         D::Real, B::Real)
     envelope = cv.envelope
     scales = envelope.component_scales!
-    cv.m == 1 || throw(ArgumentError(
-        "cell-marked node-box geometry requires batch size one"))
     N = PDMPSamplers.n_observations(envelope)
+    m = cv.m
     total = D + B
-    if !iszero(B) && (iszero(D) || rand(rng) * total > D)
+    residual_source = !iszero(B) &&
+        (iszero(D) || rand(rng) * total > D)
+    if residual_source
         component = PDMPSamplers._draw_component(rng, envelope, B)
-        cv.subset[1] = PDMPSamplers._draw_distinguished(
+        distinguished = PDMPSamplers._draw_distinguished(
             rng, envelope, component)
+        if isone(m)
+            # Preserve the established batch-one draw stream exactly.
+            cv.subset[1] = distinguished
+        else
+            PDMPSamplers._draw_base_subset_conditional!(
+                rng, cv, cv.subset_design, distinguished)
+        end
         scales.component_marks += 1
     else
         PDMPSamplers._draw_base_subset!(rng, cv, cv.subset_design)
     end
-    factor = cv.subset[1]
-    component = envelope.groups[1, factor]
-    cell_bound = envelope.scales[component]
+    PDMPSamplers.record_subsampling_mark_source!(
+        cv.residual_oracle, residual_source)
     started = time_ns()
-    point_bound = _omrf_cell_marked_factor_point_bound(scales, factor)
-    scales.factor_point_evaluations += 1
+    cell_bound = 0.0
+    point_bound = 0.0
+    @inbounds for factor in cv.subset
+        component = envelope.groups[1, factor]
+        factor_cell_bound = envelope.scales[component]
+        factor_point_bound = _omrf_cell_marked_factor_point_bound(
+            scales, factor)
+        factor_point_bound <= factor_cell_bound * (1 + 64eps(Float64)) ||
+            throw(ErrorException(
+                "selected person-node point bound exceeds its closed-cell certificate"))
+        cell_bound += factor_cell_bound
+        point_bound += factor_point_bound
+    end
+    scales.factor_point_evaluations += m
     scales.factor_point_seconds += (time_ns() - started) * 1e-9
-    point_bound <= cell_bound * (1 + 64eps(Float64)) || throw(ErrorException(
-        "selected person-node point bound exceeds its closed-cell certificate"))
-    scales.selected_factor_point_bound = point_bound
+    scale = N / m
+    scales.selected_factor_point_bound = scale * point_bound
     oracle = cv.residual_oracle
     oracle isa PDMPSamplers.WithResidualStats && (oracle = oracle.f)
     oracle isa OMRFAnalyticSubsamplingOracle &&
-        (oracle.lazy_residual_subset_bound = N * point_bound)
-    return D + N * cell_bound
+        (oracle.lazy_residual_subset_bound = scale * point_bound)
+    return D + scale * cell_bound
 end
 
 function _cache_omrf_pattern_harmonic_coefficients!(
@@ -9238,9 +9521,12 @@ function _build_omrf_residual_envelope(envelope_spec, anchor,
         # represents exactly NP factors without a dense P-by-NP matrix.
         groups = reshape(vec(permutedims(groups_by_node)), 1, N * P)
         d = length(anchor)
+        categorical_residual_cap = _haskey(envelope_spec,
+            :categorical_residual_cap) && Bool(_rget(
+                envelope_spec, :categorical_residual_cap))
         scales = OMRFNodeBoxFirstOrderScales(copy(anchor), component_nodes,
             minima, maxima, residual_context, zeros(d), zeros(d), zeros(d),
-            zeros(d))
+            zeros(d), nothing, Int[], UInt64(0), categorical_residual_cap)
         if bound_type == "cell_marked_node_box_first_order"
             component_totals = zeros(n_components)
             @inbounds for factor in axes(groups, 2)
@@ -9255,7 +9541,7 @@ function _build_omrf_residual_envelope(envelope_spec, anchor,
                 zeros(n_components, capacity),
                 zeros(n_components, capacity), zeros(capacity), 0,
                 0.0, 0, zeros(d), zeros(d), trues(d), false, zeros(d), false, NaN,
-                0, 0, 0.0, 0, 0)
+                0, 0, 0.0, 0, 0, 0, 0.0, 0.0)
             return PDMPSamplers.GroupedResidualEnvelope(
                 groups, n_components, cell_marked;
                 component_cell_scales! = cell_marked)
@@ -9845,6 +10131,13 @@ mutable struct OMRFAnchorManager
     node_source_skips::Int
     node_source_changes::Int
     window_diagnostics::Any
+    selection_policy::Symbol
+    pending_boundary_idx::Int
+    pending_boundary_time::Float64
+    boundary_generation::UInt64
+    pending_boundary_generation::UInt64
+    selection_boundaries::Int
+    node_position_policy_version::Int
 end
 
 @inline function _omrf_window_counter(stats, name::Symbol)
@@ -10337,23 +10630,81 @@ function _new_omrf_anchor_manager(oracle::OMRFAnalyticSubsamplingOracle,
         oracle.residual_context.hcv_active, nothing, 0, 0, 0.0, 0.0,
         oracle.ctx.counts.native_full_data_scans,
         oracle.ctx.counts.event_bound_observation_visits, 0.0, 0,
-        0.0, copy(oracle.anchor), 0, 0, 0, nothing)
+        0.0, copy(oracle.anchor), 0, 0, 0, nothing,
+        :adaptive, 0, Inf, UInt64(0), UInt64(0), 0, 0)
     initial = OMRFPreparedAnchorState(oracle.anchor, oracle.full_anchor,
         oracle.prior_anchor, oracle.residual_context, initial_envelope)
     manager.active_idx = _insert_omrf_anchor!(manager, initial)
     return manager
 end
 
+function _install_omrf_node_position_sources!(manager::OMRFAnchorManager,
+        cv::SubsampledControlVariate, requested::AbstractVector{<:Integer})
+    nodecv = manager.oracle.node_position_cv::OMRFNodePositionCV
+    scales = cv.envelope.component_scales!
+    base = scales isa OMRFCellMarkedNodeBoxFirstOrderScales ? scales.base :
+        (scales isa OMRFNodeBoxFirstOrderScales ? scales : nothing)
+    base === nothing && throw(ArgumentError(
+        "node-position requires the first-order node-box certificate"))
+    sources_changed = false
+    @inbounds for node in eachindex(nodecv.sources, requested)
+        sources_changed |= nodecv.sources[node] != requested[node]
+    end
+    installed_sources_match = length(base.node_sources) == length(requested)
+    if installed_sources_match
+        @inbounds for node in eachindex(base.node_sources, requested)
+            installed_sources_match &= base.node_sources[node] == requested[node]
+        end
+    end
+    authoritative_installation = base.node_bank === nodecv.bank &&
+        base.node_installation_generation == nodecv.installation_generation &&
+        installed_sources_match
+    if !sources_changed && authoritative_installation
+        return false
+    end
+    sources_changed && (nodecv.installation_generation += UInt64(1))
+    copyto!(nodecv.sources, requested)
+    _omrf_node_local_baseline!(nodecv.likelihood_baseline,
+        nodecv.bank, nodecv.sources)
+    # Keep the legacy full/prior fields coherent for the direct deterministic
+    # certificate, but never interpret this sum as one global anchor.
+    @. manager.oracle.full_anchor = nodecv.likelihood_baseline +
+        manager.oracle.prior_anchor
+    manager.oracle.prior_x_valid = false
+    manager.oracle.cached_residual_valid = false
+    base.node_bank === nodecv.bank || (base.node_bank = nodecv.bank)
+    resize!(base.node_sources, length(nodecv.sources))
+    copyto!(base.node_sources, nodecv.sources)
+    base.node_installation_generation = nodecv.installation_generation
+    base.context = manager.oracle.residual_context
+    if scales isa OMRFCellMarkedNodeBoxFirstOrderScales
+        scales.n_cached_cells = 0
+        scales.active_cell = 0
+        scales.selected_factor_point_bound = NaN
+    end
+    # `true` means downstream proposal caches must be invalidated.  This is
+    # also required for same-index installation into a replacement wrapper.
+    return true
+end
+
 function _omrf_warmup_candidates(trace::PDMPSamplers.AbstractPDMPTrace,
         position::AbstractVector, capacity::Integer;
         retained_fraction::Real=0.5)
+    0 < retained_fraction <= 1 || throw(ArgumentError(
+        "warmup candidate retained fraction must lie in (0, 1]"))
+    n_grid = min(512, max(8 * Int(capacity), Int(capacity)))
+    if trace isa PDMPSamplers.StreamingPDMPTrace
+        grid_positions = PDMPSamplers.streaming_dense_time_uniform_states(
+            trace, retained_fraction, n_grid)
+        candidates = Matrix{Float64}(undef, length(position), n_grid + 1)
+        copyto!(view(candidates, :, 1), position)
+        copyto!(view(candidates, :, 2:(n_grid + 1)), grid_positions)
+        return candidates
+    end
     pdmp_trace = trace isa PDMPSamplers.PDMPTrace ? trace :
         PDMPSamplers.PDMPTrace(trace)
     n_events = length(pdmp_trace.times)
     n_events >= 2 || return reshape(collect(Float64, position), :, 1)
-    0 < retained_fraction <= 1 || throw(ArgumentError(
-        "warmup candidate retained fraction must lie in (0, 1]"))
-    n_grid = min(512, max(8 * Int(capacity), Int(capacity)))
     final_time = last(pdmp_trace.times)
     initial_time = first(pdmp_trace.times)
     pool_start = final_time - retained_fraction * (final_time - initial_time)
@@ -10437,20 +10788,25 @@ function _select_omrf_warmup_pattern_sources!(manager::OMRFAnchorManager,
         state, flow; retained_fraction::Real=0.5)
     started = time_ns()
     bank = something(manager.oracle.node_local_hcv)
-    pdmp_trace = trace isa PDMPSamplers.PDMPTrace ? trace :
-        PDMPSamplers.PDMPTrace(trace)
     N, P = size(bank.contexts[1].X)
     K = size(bank.candidates, 2)
-    n_events = length(pdmp_trace.times)
-    n_events >= 2 || return _select_omrf_node_local_sources!(
-        manager, cv, state, flow)
     0 < retained_fraction <= 1 || throw(ArgumentError(
         "warmup scoring retained fraction must lie in (0, 1]"))
     n_grid = min(128, max(8K, 32))
-    final_time = last(pdmp_trace.times)
-    initial_time = first(pdmp_trace.times)
-    grid_start = final_time - retained_fraction *
-        (final_time - initial_time)
+    pdmp_trace = trace isa PDMPSamplers.StreamingPDMPTrace ? nothing :
+        (trace isa PDMPSamplers.PDMPTrace ? trace :
+            PDMPSamplers.PDMPTrace(trace))
+    pdmp_trace !== nothing && length(pdmp_trace.times) < 2 &&
+        return _select_omrf_node_local_sources!(manager, cv, state, flow)
+    streaming_positions, streaming_velocities =
+        trace isa PDMPSamplers.StreamingPDMPTrace ?
+        PDMPSamplers.streaming_time_uniform_states(
+            trace, retained_fraction, n_grid) : (nothing, nothing)
+    final_time = trace isa PDMPSamplers.StreamingPDMPTrace ?
+        trace.terminal_state.t : last(pdmp_trace.times)
+    initial_time = trace isa PDMPSamplers.StreamingPDMPTrace ?
+        trace.initial_state.t : first(pdmp_trace.times)
+    grid_start = final_time - retained_fraction * (final_time - initial_time)
     scores = zeros(P, K)
     state_scores = zeros(P, K)
     selector_positions = Matrix{Float64}(
@@ -10469,12 +10825,18 @@ function _select_omrf_warmup_pattern_sources!(manager::OMRFAnchorManager,
             envelope_scales : nothing)
     @inbounds for (grid_index, time) in enumerate(
             range(grid_start, final_time; length=n_grid))
-        idx = clamp(searchsortedlast(pdmp_trace.times, time), 1, n_events)
-        copyto!(position, view(pdmp_trace.positions, :, idx))
-        copyto!(velocity, view(pdmp_trace.velocities, :, idx))
-        if idx < n_events && time > pdmp_trace.times[idx]
-            PDMPSamplers.move_forward_time!(
-                scoring_state.ξ, time - pdmp_trace.times[idx], flow)
+        if trace isa PDMPSamplers.StreamingPDMPTrace
+            copyto!(position, view(streaming_positions, :, grid_index))
+            copyto!(velocity, view(streaming_velocities, :, grid_index))
+        else
+            n_events = length(pdmp_trace.times)
+            idx = clamp(searchsortedlast(pdmp_trace.times, time), 1, n_events)
+            copyto!(position, view(pdmp_trace.positions, :, idx))
+            copyto!(velocity, view(pdmp_trace.velocities, :, idx))
+            if idx < n_events && time > pdmp_trace.times[idx]
+                PDMPSamplers.move_forward_time!(
+                    scoring_state.ξ, time - pdmp_trace.times[idx], flow)
+            end
         end
         copyto!(view(selector_positions, :, grid_index), position)
         copyto!(view(selector_velocities, :, grid_index), velocity)
@@ -10644,7 +11006,10 @@ function _finish_omrf_warmup!(manager::OMRFAnchorManager,
         cv::SubsampledControlVariate, position, trace_manager=nothing;
         state=nothing, flow=nothing)
     previous_anchor = copy(manager.oracle.anchor)
-    frozen_bank = isinf(manager.main_refresh_distance) && manager.capacity > 1
+    # The position policy owns a fixed bank explicitly.  The legacy `Inf`
+    # refresh sentinel remains meaningful only for the adaptive comparator.
+    frozen_bank = manager.selection_policy in (:position, :node_position) ||
+        (isinf(manager.main_refresh_distance) && manager.capacity > 1)
     trace = trace_manager === nothing ? nothing :
         PDMPSamplers.get_warmup_trace(trace_manager)
     if frozen_bank && trace !== nothing &&
@@ -10660,7 +11025,11 @@ function _finish_omrf_warmup!(manager::OMRFAnchorManager,
         for state in prepared
             _insert_omrf_anchor!(manager, state)
         end
-        _select_omrf_anchor!(manager, cv, position; phase=:warmup)
+        if manager.selection_policy === :node_position
+            manager.active_idx = 1
+        else
+            _select_omrf_anchor!(manager, cv, position; phase=:warmup)
+        end
     elseif iszero(manager.preparations)
         prepared = _prepare_omrf_anchor(manager, position)
         manager.active_idx = _insert_omrf_anchor!(manager, prepared)
@@ -10706,6 +11075,35 @@ function _finish_omrf_warmup!(manager::OMRFAnchorManager,
         end
         copyto!(manager.node_source_last_position, state.ξ.x)
     end
+    if manager.selection_policy === :node_position
+        manager.hcv_active && throw(ArgumentError(
+            "node-position is an ordinary first-order CV policy; HCV is disabled"))
+        candidates = reduce(hcat,
+            (entry.state.anchor for entry in manager.entries))
+        manager.oracle.node_position_cv = _prepare_omrf_node_position_cv(
+            manager.envelope_spec, manager.unc_names, candidates, flow,
+            manager.oracle.ctx.counts)
+        manager.node_position_policy_version = 1
+        nodecv = manager.oracle.node_position_cv
+        _omrf_node_position_sources!(nodecv.requested_sources, nodecv, position)
+        _install_omrf_node_position_sources!(
+            manager, cv, nodecv.requested_sources)
+    end
+    # `with_stats` reconstructs the retained control variate with a copied
+    # envelope, while the manager and the wrapped deterministic/residual
+    # oracles retain their shared prepared-anchor state.  If warmup selection
+    # keeps the manager's current entry, `_select_omrf_anchor!` legitimately
+    # returns without calling the refresh callback; the copied live envelope
+    # can then enter the first retained event at its pre-finish anchor.  Make
+    # the phase boundary authoritative even when the selected entry index did
+    # not change.
+    active_state = manager.entries[manager.active_idx].state
+    envelope_anchor = PDMPSamplers._trajectory_scale_anchor(cv.envelope)
+    needs_sync = manager.selection_policy === :node_position ? false :
+        cv.anchor != active_state.anchor ||
+        manager.oracle.anchor != active_state.anchor ||
+        (envelope_anchor !== nothing && envelope_anchor != active_state.anchor)
+    needs_sync && PDMPSamplers.refresh_anchor_owned!(cv, active_state.anchor)
     # This phase-boundary snapshot makes the no-full-data-main invariant
     # directly testable.  A preparation includes the exact complete anchor
     # sum, whether obtained through BridgeStan or the native OMRF algebra.
@@ -10716,7 +11114,7 @@ function _finish_omrf_warmup!(manager::OMRFAnchorManager,
         manager.oracle.ctx.counts.native_full_data_scans
     manager.warmup_finish_event_bound_observation_visits =
         manager.oracle.ctx.counts.event_bound_observation_visits
-    return anchor_changed || hcv_changed
+    return anchor_changed || hcv_changed || needs_sync
 end
 
 @inline function _omrf_anchor_distance2(manager::OMRFAnchorManager, x,
@@ -10729,6 +11127,537 @@ end
     return distance
 end
 
+function _omrf_position_anchor_index(manager::OMRFAnchorManager, x)
+    best = firstindex(manager.entries)
+    best_distance = _omrf_anchor_distance2(manager, x,
+        manager.entries[best].state)
+    @inbounds for idx in eachindex(manager.entries)
+        idx == best && continue
+        distance = _omrf_anchor_distance2(manager, x,
+            manager.entries[idx].state)
+        tolerance = 64eps(Float64) * max(1.0, abs(distance),
+            abs(best_distance))
+        # Numerically coincident Voronoi distances use deterministic
+        # lowest-index ties; this is a selection rule, not physical travel.
+        if distance < best_distance - tolerance
+            best = idx
+            best_distance = distance
+        end
+    end
+    return best
+end
+
+"""Rebuild a fixed position bank from its versioned mathematical spec.
+
+Only values are restored.  Prepared gradients, envelopes, callbacks, and
+scratch caches are reconstructed against the current immutable provider.
+"""
+function _restore_omrf_position_bank!(manager::OMRFAnchorManager,
+        cv::SubsampledControlVariate, spec, position)
+    Int(_rget(spec, :version)) == 1 || throw(ArgumentError(
+        "unsupported position-anchor bank specification version"))
+    policy = String(_rget(spec, :selection_policy))
+    policy in ("position", "node_position") || throw(ArgumentError(
+        "restored anchor bank is not a supported position policy"))
+    Symbol(policy) == manager.selection_policy || throw(ArgumentError(
+        "restored anchor policy does not match the requested live policy"))
+    String(_rget(spec, :tie_policy)) == "lowest_index_outgoing" ||
+        throw(ArgumentError("unsupported position-anchor tie policy"))
+    saved_names = String.(_rget(spec, :parameter_order))
+    saved_names == manager.unc_names || throw(ArgumentError(
+        "position-anchor parameter order does not match the live provider"))
+    anchors = Matrix{Float64}(_rget(spec, :ordered_anchor_positions))
+    scales = _as_float_vector(_rget(spec, :distance_scales))
+    size(anchors, 1) == length(manager.unc_names) || throw(DimensionMismatch(
+        "restored anchor positions have the wrong parameter dimension"))
+    size(anchors, 2) <= manager.capacity || throw(DimensionMismatch(
+        "restored anchor bank exceeds the requested capacity"))
+    length(scales) == size(anchors, 1) || throw(DimensionMismatch(
+        "restored distance scales have the wrong dimension"))
+    all(x -> isfinite(x) && x > 0, scales) || throw(ArgumentError(
+        "restored distance scales must be positive and finite"))
+    prepared = [_prepare_omrf_anchor(manager, view(anchors, :, idx))
+        for idx in axes(anchors, 2)]
+    empty!(manager.entries)
+    manager.active_idx = 0
+    manager.recycled_state = nothing
+    copyto!(manager.distance_scales, scales)
+    for prepared_state in prepared
+        _insert_omrf_anchor!(manager, prepared_state)
+    end
+    if policy == "node_position"
+        Int(_rget(spec, :policy_version)) == 1 || throw(ArgumentError(
+            "unsupported node-position mathematical policy version"))
+        metric_variances = _as_float_vector(
+            _rget(spec, :physical_velocity_variances))
+        manager.oracle.node_position_cv = _prepare_omrf_node_position_cv(
+            manager.envelope_spec, manager.unc_names, anchors,
+            metric_variances, manager.oracle.ctx.counts)
+        manager.node_position_policy_version = Int(_rget(spec, :policy_version))
+        nodecv = manager.oracle.node_position_cv
+        saved_supports = [Int.(support)
+            for support in _rget(spec, :node_support_order)]
+        saved_supports == nodecv.supports || throw(ArgumentError(
+            "restored node-position support ordering does not match the provider"))
+        _omrf_node_position_sources!(
+            nodecv.requested_sources, nodecv, position)
+        _install_omrf_node_position_sources!(
+            manager, cv, nodecv.requested_sources)
+        manager.active_idx = 1
+    else
+        manager.active_idx = _omrf_position_anchor_index(manager, position)
+        PDMPSamplers.refresh_anchor_owned!(cv,
+            manager.entries[manager.active_idx].state.anchor)
+    end
+    manager.pending_boundary_idx = 0
+    manager.pending_boundary_time = Inf
+    manager.pending_boundary_generation = UInt64(0)
+    return true
+end
+
+function _omrf_outgoing_position_anchor_index(manager::OMRFAnchorManager,
+        x, v)
+    positional = _omrf_position_anchor_index(manager, x)
+    minimum_distance = _omrf_anchor_distance2(manager, x,
+        manager.entries[positional].state)
+    best = positional
+    best_slope = Inf
+    @inbounds for idx in eachindex(manager.entries)
+        distance = _omrf_anchor_distance2(manager, x,
+            manager.entries[idx].state)
+        tolerance = 64eps(Float64) * max(1.0, abs(distance),
+            abs(minimum_distance))
+        abs(distance - minimum_distance) <= tolerance || continue
+        anchor = manager.entries[idx].state.anchor
+        slope = 0.0
+        for j in eachindex(x, v, anchor)
+            scale = manager.distance_scales[j]
+            slope += 2v[j] * (x[j] - anchor[j]) / (scale * scale)
+        end
+        if slope < best_slope || (slope == best_slope && idx < best)
+            best = idx
+            best_slope = slope
+        end
+    end
+    return best
+end
+
+"""Exact next Voronoi-boundary time for a frozen weighted anchor bank.
+
+For a linear path `x + t v`, each competitor difference is affine.  The
+pending target records the outgoing cell at a transverse crossing, allowing a
+zero-time computational boundary without moving the physical state.
+"""
+function _omrf_position_anchor_horizon_impl!(manager::OMRFAnchorManager,
+        state, flow, phase::Symbol)
+    manager.boundary_generation += UInt64(1)
+    manager.pending_boundary_idx = 0
+    manager.pending_boundary_time = Inf
+    manager.pending_boundary_generation = manager.boundary_generation
+    x = state.ξ.x
+    v = state.ξ.θ
+    current = manager.active_idx
+    outgoing = _omrf_outgoing_position_anchor_index(manager, x, v)
+    if outgoing != current
+        manager.pending_boundary_idx = outgoing
+        manager.pending_boundary_time = state.t[]
+        return 0.0
+    end
+    current_anchor = manager.entries[current].state.anchor
+    earliest = Inf
+    target = 0
+    @inbounds for idx in eachindex(manager.entries)
+        idx == current && continue
+        competitor = manager.entries[idx].state.anchor
+        difference = _omrf_anchor_distance2(manager, x,
+            manager.entries[idx].state) -
+            _omrf_anchor_distance2(manager, x,
+                manager.entries[current].state)
+        slope = 0.0
+        for j in eachindex(x, v, current_anchor, competitor)
+            scale = manager.distance_scales[j]
+            slope += 2v[j] * (current_anchor[j] - competitor[j]) /
+                (scale * scale)
+        end
+        if slope < 0.0
+            crossing = max(0.0, difference / -slope)
+            if crossing < earliest || (crossing == earliest && idx < target)
+                earliest = crossing
+                target = idx
+            end
+        end
+    end
+    manager.pending_boundary_idx = target
+    manager.pending_boundary_time = isfinite(earliest) ? state.t[] + earliest : Inf
+    return earliest
+end
+
+@inline function _omrf_harmonic_anchor_jet(manager::OMRFAnchorManager,
+        state, flow::PDMPSamplers.AnyBoomerang, anchor_index::Int,
+        t::Float64)
+    anchor = manager.entries[anchor_index].state.anchor
+    cosine, sine = cos(t), sin(t)
+    value = 0.0
+    first = 0.0
+    second = 0.0
+    third = 0.0
+    @inbounds for j in eachindex(anchor, state.ξ.x, state.ξ.θ, flow.μ)
+        scale = manager.distance_scales[j]
+        weight = inv(scale * scale)
+        if _omrf_is_free(state, j)
+            u = state.ξ.x[j] - flow.μ[j]
+            w = state.ξ.θ[j]
+            y = flow.μ[j] + u * cosine + w * sine - anchor[j]
+            y1 = -u * sine + w * cosine
+            y2 = -u * cosine - w * sine
+            y3 = -y1
+            value += weight * y * y
+            first += 2weight * y * y1
+            second += 2weight * (y1 * y1 + y * y2)
+            third += 2weight * (3y1 * y2 + y * y3)
+        else
+            y = state.ξ.x[j] - anchor[j]
+            value += weight * y * y
+        end
+    end
+    return value, first, second, third
+end
+
+@inline function _omrf_harmonic_jet_precedes(candidate, incumbent,
+        candidate_index::Int, incumbent_index::Int)
+    @inbounds for order in 1:4
+        left, right = candidate[order], incumbent[order]
+        tolerance = 128eps(Float64) * max(1.0, abs(left), abs(right))
+        left < right - tolerance && return true
+        left > right + tolerance && return false
+    end
+    return candidate_index < incumbent_index
+end
+
+function _omrf_harmonic_outgoing_position_anchor_index(
+        manager::OMRFAnchorManager, state,
+        flow::PDMPSamplers.AnyBoomerang, t::Float64)
+    best = firstindex(manager.entries)
+    best_jet = _omrf_harmonic_anchor_jet(manager, state, flow, best, t)
+    @inbounds for idx in eachindex(manager.entries)
+        idx == best && continue
+        candidate = _omrf_harmonic_anchor_jet(manager, state, flow, idx, t)
+        if _omrf_harmonic_jet_precedes(candidate, best_jet, idx, best)
+            best = idx
+            best_jet = candidate
+        end
+    end
+    return best
+end
+
+@inline function _omrf_harmonic_anchor_difference_coefficients(
+        manager::OMRFAnchorManager, state,
+        flow::PDMPSamplers.AnyBoomerang, current::Int, competitor::Int)
+    a = manager.entries[current].state.anchor
+    b = manager.entries[competitor].state.anchor
+    constant = 0.0
+    cosine = 0.0
+    sine = 0.0
+    @inbounds for j in eachindex(a, b, state.ξ.x, state.ξ.θ, flow.μ)
+        scale = manager.distance_scales[j]
+        weight = inv(scale * scale)
+        delta = b[j] - a[j]
+        if _omrf_is_free(state, j)
+            centre = flow.μ[j]
+            u = state.ξ.x[j] - centre
+            w = state.ξ.θ[j]
+            constant += weight * (b[j] * b[j] - a[j] * a[j] -
+                2centre * delta)
+            cosine -= 2weight * u * delta
+            sine -= 2weight * w * delta
+        else
+            x = state.ξ.x[j]
+            constant += weight * (b[j] * b[j] - a[j] * a[j] -
+                2x * delta)
+        end
+    end
+    return constant, cosine, sine
+end
+
+@inline function _omrf_positive_periodic_root(base::Float64)
+    root = mod(base, 2pi)
+    tolerance = 128eps(Float64) * max(1.0, abs(base))
+    return root <= tolerance ? root + 2pi : root
+end
+
+"""Exact next weighted-Voronoi boundary along a sticky harmonic path.
+
+Each pairwise distance difference is `C + A*cos(t) + B*sin(t)`. Roots are
+only deadlines: a root is retained when the deterministic outgoing selector
+shows that the minimizer genuinely changes immediately after it.
+"""
+function _omrf_harmonic_position_anchor_horizon_impl!(
+        manager::OMRFAnchorManager, state,
+        flow::PDMPSamplers.AnyBoomerang, phase::Symbol)
+    manager.boundary_generation += UInt64(1)
+    manager.pending_boundary_idx = 0
+    manager.pending_boundary_time = Inf
+    manager.pending_boundary_generation = manager.boundary_generation
+    current = manager.active_idx
+    outgoing = _omrf_harmonic_outgoing_position_anchor_index(
+        manager, state, flow, 0.0)
+    if outgoing != current
+        manager.pending_boundary_idx = outgoing
+        manager.pending_boundary_time = state.t[]
+        return 0.0
+    end
+    earliest = Inf
+    target = 0
+    @inbounds for competitor in eachindex(manager.entries)
+        competitor == current && continue
+        constant, cosine, sine =
+            _omrf_harmonic_anchor_difference_coefficients(
+                manager, state, flow, current, competitor)
+        radius = hypot(cosine, sine)
+        tolerance = 128eps(Float64) * max(1.0, abs(constant), radius)
+        radius <= tolerance && continue
+        abs(constant) > radius + tolerance && continue
+        phase_angle = atan(sine, cosine)
+        offset = acos(clamp(-constant / radius, -1.0, 1.0))
+        for base in (phase_angle - offset, phase_angle + offset)
+            crossing = _omrf_positive_periodic_root(base)
+            crossing > 2pi + tolerance && continue
+            selected = _omrf_harmonic_outgoing_position_anchor_index(
+                manager, state, flow, crossing)
+            selected == current && continue
+            if crossing < earliest ||
+                    (crossing == earliest && selected < target)
+                earliest = crossing
+                target = selected
+            end
+        end
+    end
+    manager.pending_boundary_idx = target
+    manager.pending_boundary_time = isfinite(earliest) ?
+        state.t[] + earliest : Inf
+    return earliest
+end
+
+function _omrf_position_anchor_horizon!(manager::OMRFAnchorManager,
+        state, flow, phase::Symbol)
+    manager.selection_policy === :position || return Inf
+    phase === :main || return Inf
+    started = time_ns()
+    actual = _omrf_actual_flow(flow)
+    horizon = if actual isa Union{BouncyParticle,ZigZag}
+        _omrf_position_anchor_horizon_impl!(manager, state, flow, phase)
+    elseif actual isa PDMPSamplers.AnyBoomerang
+        _omrf_harmonic_position_anchor_horizon_impl!(
+            manager, state, actual, phase)
+    else
+        throw(ArgumentError(
+            "position-selected anchor banks require linear or harmonic dynamics"))
+    end
+    manager.selection_seconds += (time_ns() - started) * 1e-9
+    manager.selection_component_evaluations += length(manager.entries)
+    return horizon
+end
+
+@inline function _omrf_node_position_score_slope(nodecv::OMRFNodePositionCV,
+        node::Int, source::Int, velocity)
+    support = nodecv.supports[node]
+    terms = nodecv.linear_terms[node]
+    slope = 0.0
+    @inbounds for local_index in eachindex(support)
+        slope -= 2velocity[support[local_index]] * terms[local_index, source]
+    end
+    return slope
+end
+
+function _omrf_node_position_outgoing_sources!(out,
+        nodecv::OMRFNodePositionCV, x, velocity)
+    K = size(nodecv.bank.candidates, 2)
+    @inbounds for node in eachindex(out)
+        isempty(nodecv.supports[node]) && (out[node] = 1; continue)
+        minimum_score = Inf
+        for source in 1:K
+            minimum_score = min(minimum_score,
+                _omrf_node_position_score(nodecv, node, source, x))
+        end
+        best = 1
+        best_slope = Inf
+        for source in 1:K
+            score = _omrf_node_position_score(nodecv, node, source, x)
+            tolerance = 64eps(Float64) * max(1.0, abs(score),
+                abs(minimum_score))
+            abs(score - minimum_score) <= tolerance || continue
+            slope = _omrf_node_position_score_slope(
+                nodecv, node, source, velocity)
+            if slope < best_slope || (slope == best_slope && source < best)
+                best = source
+                best_slope = slope
+            end
+        end
+        out[node] = best
+    end
+    return out
+end
+
+function _omrf_node_position_horizon_impl!(manager::OMRFAnchorManager,
+        state)
+    nodecv = manager.oracle.node_position_cv::OMRFNodePositionCV
+    manager.boundary_generation += UInt64(1)
+    manager.pending_boundary_idx = 0
+    manager.pending_boundary_time = Inf
+    manager.pending_boundary_generation = manager.boundary_generation
+    x, velocity = state.ξ.x, state.ξ.θ
+    _omrf_node_position_outgoing_sources!(
+        nodecv.pending_sources, nodecv, x, velocity)
+    if nodecv.pending_sources != nodecv.sources
+        manager.pending_boundary_idx = 1
+        manager.pending_boundary_time = state.t[]
+        return 0.0
+    end
+    earliest = Inf
+    K = size(nodecv.bank.candidates, 2)
+    @inbounds for node in eachindex(nodecv.sources)
+        current = nodecv.sources[node]
+        isempty(nodecv.supports[node]) && continue
+        current_score = _omrf_node_position_score(nodecv, node, current, x)
+        current_slope = _omrf_node_position_score_slope(
+            nodecv, node, current, velocity)
+        for competitor in 1:K
+            competitor == current && continue
+            alpha = _omrf_node_position_score(
+                nodecv, node, competitor, x) - current_score
+            beta = _omrf_node_position_score_slope(
+                nodecv, node, competitor, velocity) - current_slope
+            tolerance = 64eps(Float64) * max(1.0, abs(alpha))
+            if alpha >= -tolerance && beta < 0.0
+                crossing = max(0.0, alpha / -beta)
+                earliest = min(earliest, crossing)
+            end
+        end
+    end
+    manager.pending_boundary_idx = isfinite(earliest) ? 1 : 0
+    manager.pending_boundary_time = isfinite(earliest) ?
+        state.t[] + earliest : Inf
+    return earliest
+end
+
+function _omrf_node_position_anchor_horizon!(manager::OMRFAnchorManager,
+        state, flow, phase::Symbol)
+    manager.selection_policy === :node_position || return Inf
+    phase === :main || return Inf
+    _omrf_actual_flow(flow) isa BouncyParticle || throw(ArgumentError(
+        "node-position anchor banks require linear BPS dynamics"))
+    started = time_ns()
+    horizon = _omrf_node_position_horizon_impl!(manager, state)
+    manager.selection_seconds += (time_ns() - started) * 1e-9
+    nodecv = manager.oracle.node_position_cv::OMRFNodePositionCV
+    manager.selection_component_evaluations +=
+        length(nodecv.sources) * size(nodecv.bank.candidates, 2)
+    return horizon
+end
+
+function _select_omrf_node_position_core!(manager::OMRFAnchorManager,
+        cv::SubsampledControlVariate, x, phase::Symbol,
+        state, boundary_won::Bool)
+    nodecv = manager.oracle.node_position_cv::OMRFNodePositionCV
+    owns_boundary = boundary_won && phase === :main &&
+        manager.pending_boundary_idx > 0 && state !== nothing &&
+        manager.pending_boundary_generation == manager.boundary_generation &&
+        state.t[] == manager.pending_boundary_time
+    started = time_ns()
+    if owns_boundary
+        _omrf_node_position_outgoing_sources!(
+            nodecv.requested_sources, nodecv, x, state.ξ.θ)
+        manager.selection_boundaries += 1
+    else
+        _omrf_node_position_sources!(nodecv.requested_sources, nodecv, x)
+    end
+    changes = 0
+    @inbounds for node in eachindex(nodecv.sources)
+        changes += nodecv.sources[node] != nodecv.requested_sources[node]
+    end
+    changed = _install_omrf_node_position_sources!(
+        manager, cv, nodecv.requested_sources)
+    manager.selection_seconds += (time_ns() - started) * 1e-9
+    manager.selection_component_evaluations +=
+        length(nodecv.sources) * size(nodecv.bank.candidates, 2)
+    manager.pending_boundary_idx = 0
+    manager.pending_boundary_time = Inf
+    manager.pending_boundary_generation = UInt64(0)
+    if phase === :main
+        manager.main_selections += 1
+        changed && (manager.main_activations += 1)
+        manager.node_source_checks += 1
+        changed && (manager.node_source_changes += changes)
+    end
+    return changed
+end
+
+function _select_omrf_node_position!(manager::OMRFAnchorManager,
+        cv::SubsampledControlVariate, x; phase::Symbol=:unknown,
+        state=nothing, boundary_won::Bool=false)
+    _attach_omrf_live_envelope_context!(manager, cv)
+    return _select_omrf_node_position_core!(
+        manager, cv, x, phase, state, boundary_won)
+end
+
+"""Attach observational envelope counters to the authoritative live oracle.
+
+`with_stats` copies the envelope while sharing the prepared oracle.  This
+attachment must happen before the first retained proposal (and after every
+subsequent wrapper reconstruction), rather than waiting for an anchor change.
+It changes counter ownership only; certificate values and caches are untouched.
+"""
+function _attach_omrf_live_envelope_context!(manager::OMRFAnchorManager,
+        cv::SubsampledControlVariate)
+    scales = cv.envelope.component_scales!
+    base = scales isa OMRFCellMarkedNodeBoxFirstOrderScales ? scales.base :
+        (scales isa OMRFNodeBoxFirstOrderScales ? scales : nothing)
+    if base !== nothing && base.context !== manager.oracle.residual_context
+        base.context = manager.oracle.residual_context
+        return true
+    end
+    return false
+end
+
+function _select_omrf_position_anchor!(manager::OMRFAnchorManager,
+        cv::SubsampledControlVariate, x; phase::Symbol=:unknown,
+        state=nothing, boundary_won::Bool=false)
+    # `with_stats` copies the envelope but deliberately shares the live
+    # oracle.  Reattach the cell certificate's context on first selection so
+    # observational counters (and active-set generation) belong to that
+    # authoritative oracle even when the bank index itself is unchanged.
+    _attach_omrf_live_envelope_context!(manager, cv)
+    previous = manager.active_idx
+    owns_boundary = boundary_won && phase === :main &&
+        manager.pending_boundary_idx > 0 && state !== nothing &&
+        manager.pending_boundary_generation == manager.boundary_generation &&
+        state.t[] == manager.pending_boundary_time
+    started = time_ns()
+    selected = if owns_boundary
+        idx = manager.pending_boundary_idx
+        manager.selection_boundaries += 1
+        idx
+    else
+        _omrf_position_anchor_index(manager, x)
+    end
+    manager.selection_seconds += (time_ns() - started) * 1e-9
+    manager.selection_component_evaluations += length(manager.entries)
+    # Every completed step consumes or invalidates the prediction.  The next
+    # search derives a fresh deadline from the actual outgoing state.
+    manager.pending_boundary_idx = 0
+    manager.pending_boundary_time = Inf
+    manager.pending_boundary_generation = UInt64(0)
+    manager.active_idx = selected
+    phase === :main && (manager.main_selections += 1)
+    if selected != previous
+        PDMPSamplers.refresh_anchor_owned!(cv,
+            manager.entries[selected].state.anchor)
+        phase === :main && (manager.main_activations += 1)
+        return true
+    end
+    return false
+end
+
 function _activate_omrf_anchor!(manager::OMRFAnchorManager, requested)
     entry = manager.entries[manager.active_idx]
     entry.state.anchor == requested || throw(ArgumentError(
@@ -10739,7 +11668,16 @@ end
 
 function _select_omrf_anchor!(manager::OMRFAnchorManager,
         cv::SubsampledControlVariate, x; phase::Symbol=:unknown,
-        state=nothing, flow=nothing)
+        state=nothing, flow=nothing, boundary_won::Bool=false,
+        event_type::Symbol=:unknown)
+    if manager.selection_policy === :position
+        return _select_omrf_position_anchor!(manager, cv, x;
+            phase, state, boundary_won)
+    end
+    if manager.selection_policy === :node_position
+        return _select_omrf_node_position_core!(
+            manager, cv, x, phase, state, boundary_won)
+    end
     if phase === :main && manager.oracle.node_local_hcv !== nothing
         state === nothing && throw(ArgumentError(
             "node-local HCV selection requires the PDMP state"))
@@ -10969,11 +11907,6 @@ function _build_stan_subsampling_model(ctx::StanSubsamplingContext,
         N == expected || throw(DimensionMismatch(
             "OMRF $(residual_context.factorization) factorization requires " *
             "$expected likelihood contributions; received $N"))
-        bound_type = _haskey(envelope_spec, :bound_type) ?
-            String(_rget(envelope_spec, :bound_type)) : ""
-        bound_type == "cell_marked_node_box_first_order" && m != 1 &&
-            throw(ArgumentError(
-                "cell-marked node-box geometry requires subsample size one"))
     end
     # Analytic OMRF oracles own their anchor storage. Point the initial
     # envelope at that owned vector as well, so later state recycling cannot
@@ -11032,7 +11965,8 @@ function _build_stan_subsampling_model(ctx::StanSubsamplingContext,
         return model, ctx, unc_names
     end
     adapter = PDMPSamplers.SubsamplingAnchorBankAdapter(
-        (live_grad, state, flow, phase, stats) -> begin
+        (live_grad, state, flow, phase, stats, event_type,
+                anchor_boundary_won) -> begin
             phase === :warmup && !manage_during_warmup && return false
             # `with_stats` reconstructs the retained control variate. Anchor
             # selection must therefore update the chain-local live gradient,
@@ -11046,7 +11980,8 @@ function _build_stan_subsampling_model(ctx::StanSubsamplingContext,
                 _record_omrf_window!(manager, state, flow, stats; stage=:pre)
             end
             changed = _select_omrf_anchor!(manager, active_cv, state.ξ.x;
-                phase, state, flow)
+                phase, state, flow, boundary_won=anchor_boundary_won,
+                event_type)
             if phase === :main
                 _record_omrf_window!(manager, state, flow, stats; stage=:post)
             end
@@ -11062,6 +11997,16 @@ function _build_stan_subsampling_model(ctx::StanSubsamplingContext,
                 warmup_grad : cv
             _finish_omrf_warmup!(manager, active_cv, state.ξ.x, trace_manager;
                 state, flow)
+        end,
+        (live_grad, state, flow, phase, stats) -> begin
+            active_cv = live_grad isa PDMPSamplers.SubsampledControlVariate ?
+                live_grad : cv
+            # The horizon callback is invoked before event search, including
+            # the first retained proposal after `with_stats` or restoration.
+            _attach_omrf_live_envelope_context!(manager, active_cv)
+            min(_omrf_position_anchor_horizon!(manager, state, flow, phase),
+                _omrf_node_position_anchor_horizon!(
+                    manager, state, flow, phase))
         end,
         Inf, 0.0)
     return model, ctx, unc_names, adapter, manager
@@ -11083,6 +12028,225 @@ function prepare_stan_subsampling(lib_path::String, full_data::String,
     end
     d = first(contexts).full.d
     return (; contexts, unc_names, d)
+end
+
+"""Enumerate the batch-one accepted marked BPS generator at one complete state."""
+function r_omrf_bps_matched_generator(prepared, subsampling, position,
+        velocity, free, flow_cov, anchor, model_prior, slab_prior, can_stick)
+    x = _as_float_vector(position)
+    v = _as_float_vector(velocity)
+    free_vec = BitVector(_as_bool_vector(free))
+    can_stick_vec = _as_bool_vector(can_stick)
+    covariance = _as_float_matrix(flow_cov)
+    names = prepared.unc_names
+    d = length(x)
+    length(v) == d == length(free_vec) == length(names) ||
+        throw(DimensionMismatch("matched BPS state dimensions disagree"))
+    size(covariance) == (d, d) || throw(DimensionMismatch(
+        "matched BPS covariance has the wrong dimension"))
+    m = Int(_rget(subsampling, :subsample_size))
+    m == 1 || throw(ArgumentError("matched BPS enumeration requires batch one"))
+    N = Int(_rget(subsampling, :n_observations))
+    scale_idx = findall(name -> name == "global_scale" ||
+        startswith(name, "node_scale."), names)
+    structural_idx = setdiff(collect(1:d), scale_idx)
+
+    function reflected_increment(g)
+        gm = copy(g)
+        @inbounds for i in eachindex(gm, free_vec)
+            free_vec[i] || (gm[i] = 0.0)
+        end
+        rate = max(0.0, dot(v, gm))
+        Σg = covariance * gm
+        denominator = dot(gm, Σg)
+        dv = zeros(d)
+        if denominator > 0
+            dv .= (-2 * dot(v, gm) / denominator) .* Σg
+            @inbounds for i in eachindex(dv, free_vec)
+                free_vec[i] || (dv[i] = 0.0)
+            end
+        end
+        num_scale = dot(view(v, scale_idx), view(gm, scale_idx))
+        num_struct = dot(view(v, structural_idx), view(gm, structural_idx))
+        den_scale = dot(view(gm, scale_idx), view(Σg, scale_idx))
+        den_struct = dot(view(gm, structural_idx), view(Σg, structural_idx))
+        return rate, dv, num_scale, num_struct, den_scale, den_struct
+    end
+
+    spec = _rget(subsampling, :residual_envelope)
+    full_model = _build_sticky_target(
+        build_omrf_full_model(spec, names, d), model_prior, slab_prior,
+        can_stick_vec, names)
+    PDMPSamplers.set_active_set!(full_model, free_vec)
+    g_full = zeros(d)
+    PDMPSamplers.compute_gradient_for_reflection!(full_model.grad, x, g_full)
+    full_rate, full_dv, full_ns, full_nt, full_ds, full_dt =
+        reflected_increment(g_full)
+
+    function enumerate_anchor(anchor_value)
+        built = _build_stan_subsampling_model(first(prepared.contexts), names,
+            subsampling, _as_float_vector(anchor_value), slab_prior,
+            can_stick_vec; anchor_capacity=0)
+        model = first(built)
+        PDMPSamplers.set_active_set!(model, free_vec)
+        cv = model.grad
+        deterministic = zeros(d)
+        PDMPSamplers.deterministic_gradient!(deterministic, cv, x)
+        residual = zeros(d)
+        g = similar(deterministic)
+        b = zeros(length(scale_idx))
+        Q = zeros(length(scale_idx))
+        intensity = 0.0
+        weighted_ns = weighted_nt = weighted_ds = weighted_dt = 0.0
+        max_scale_residual = 0.0
+        for mark in 1:N
+            fill!(residual, 0.0)
+            cv.residual_oracle(residual, x, [mark], cv.anchor)
+            max_scale_residual = max(max_scale_residual,
+                maximum(abs, view(residual, scale_idx); init=0.0))
+            @. g = deterministic + N * residual
+            rate, dv, ns, nt, ds, dt = reflected_increment(g)
+            a = rate / N
+            intensity += a
+            @inbounds for (j, index) in pairs(scale_idx)
+                b[j] += a * dv[index]
+                Q[j] += a * dv[index]^2
+            end
+            weighted_ns += a * ns
+            weighted_nt += a * nt
+            weighted_ds += a * ds
+            weighted_dt += a * dt
+        end
+        return (intensity=intensity, scale_drift=b, scale_squared_jump=Q,
+            weighted_scale_numerator=weighted_ns,
+            weighted_structural_numerator=weighted_nt,
+            weighted_scale_denominator=weighted_ds,
+            weighted_structural_denominator=weighted_dt,
+            max_selected_scale_residual=max_scale_residual)
+    end
+
+    current = enumerate_anchor(anchor)
+    anchor_current = enumerate_anchor(x)
+    return (parameter_names=names, scale_indices=scale_idx,
+        full=(intensity=full_rate,
+            scale_drift=full_rate .* full_dv[scale_idx],
+            scale_squared_jump=full_rate .* abs2.(full_dv[scale_idx]),
+            weighted_scale_numerator=full_rate * full_ns,
+            weighted_structural_numerator=full_rate * full_nt,
+            weighted_scale_denominator=full_rate * full_ds,
+            weighted_structural_denominator=full_rate * full_dt),
+        subsampled=current, anchor_current=anchor_current)
+end
+
+"""Uniform-base-subset fixed-state intensity audit for BPS/Boomerang.
+
+This samples subsets from the base law, not from the size-biased proposal.
+The returned rate and canonical jump-intensity Monte Carlo errors therefore
+refer directly to the marked event law in the minibatch specification.
+"""
+function r_omrf_minibatch_fixed_state(prepared, subsampling, position,
+        velocity, free, flow_cov, flow_mean, flow_type::String, anchor,
+        model_prior, slab_prior, can_stick, batches_raw::AbstractVector,
+        draws::Integer, seed::Integer)
+    x = _as_float_vector(position); v = _as_float_vector(velocity)
+    free_vec = BitVector(_as_bool_vector(free))
+    covariance = _as_float_matrix(flow_cov)
+    mean = _as_float_vector(flow_mean)
+    can_stick_vec = _as_bool_vector(can_stick)
+    names = prepared.unc_names; d = length(x)
+    length(v) == d == length(free_vec) == length(mean) == length(names) ||
+        throw(DimensionMismatch("fixed-state dimensions disagree"))
+    size(covariance) == (d, d) || throw(DimensionMismatch(
+        "fixed-state covariance has the wrong dimension"))
+    spec = _rget(subsampling, :residual_envelope)
+    full_model = _build_sticky_target(build_omrf_full_model(spec, names, d),
+        model_prior, slab_prior, can_stick_vec, names)
+    PDMPSamplers.set_active_set!(full_model, free_vec)
+    g_full = zeros(d)
+    PDMPSamplers.compute_gradient_for_reflection!(full_model.grad, x, g_full)
+    harmonic = occursin("Boomerang", flow_type)
+    precision = harmonic ? inv(Symmetric(covariance)) : zeros(0, 0)
+    correction = harmonic ? precision * (x - mean) : zeros(d)
+    harmonic && (g_full .-= correction)
+
+    function rate_and_jump(g)
+        @inbounds for i in eachindex(g)
+            free_vec[i] || (g[i] = 0.0)
+        end
+        signed = dot(v, g); rate = max(0.0, signed)
+        iszero(rate) && return 0.0, 0.0
+        Cg = covariance * g
+        denominator = dot(g, Cg)
+        denominator > 0 || return rate, 0.0
+        coefficient = -2signed / denominator
+        jump = 0.0
+        @inbounds for i in eachindex(g)
+            if free_vec[i]
+                delta = coefficient * Cg[i]
+                jump += delta^2 / max(covariance[i, i], eps(Float64))
+            end
+        end
+        return rate, jump
+    end
+    full_gradient = copy(g_full)
+    full_rate, full_jump = rate_and_jump(full_gradient)
+
+    built = _build_stan_subsampling_model(first(prepared.contexts), names,
+        subsampling, _as_float_vector(anchor), slab_prior, can_stick_vec;
+        anchor_capacity=0)
+    model = first(built)
+    PDMPSamplers.set_active_set!(model, free_vec)
+    cv = model.grad
+    deterministic = zeros(d)
+    PDMPSamplers.deterministic_gradient!(deterministic, cv, x)
+    harmonic && (deterministic .-= correction)
+    M = PDMPSamplers.n_observations(cv.envelope)
+    rng = Xoshiro(Int(seed)); scratch = Dict{Int,Int}()
+    residual = zeros(d); gradient = zeros(d); gradient_mean = zeros(d)
+    batches = Int.(batches_raw)
+    rates = zeros(length(batches)); rate_se = zeros(length(batches))
+    jump_intensities = zeros(length(batches)); jump_se = zeros(length(batches))
+    gradient_errors = zeros(length(batches))
+    for (bi, m) in pairs(batches)
+        1 <= m <= M || throw(ArgumentError("batch size lies outside 1:M"))
+        subset = Vector{Int}(undef, m)
+        n_draws = m == M ? 1 : Int(draws)
+        rate_mean = rate_m2 = jump_mean = jump_m2 = 0.0
+        fill!(gradient_mean, 0.0)
+        for draw in 1:n_draws
+            if m == M
+                @inbounds for j in 1:M; subset[j] = j; end
+            else
+                PDMPSamplers._draw_uniform_without_replacement!(rng, subset,
+                    M, scratch)
+            end
+            fill!(residual, 0.0)
+            cv.residual_oracle(residual, x, subset, cv.anchor)
+            @. gradient = deterministic + (M / m) * residual
+            @. gradient_mean += (gradient - gradient_mean) / draw
+            rate, jump = rate_and_jump(gradient)
+            jump_intensity = rate * jump
+            delta = rate - rate_mean; rate_mean += delta / draw
+            rate_m2 += delta * (rate - rate_mean)
+            delta_jump = jump_intensity - jump_mean
+            jump_mean += delta_jump / draw
+            jump_m2 += delta_jump * (jump_intensity - jump_mean)
+        end
+        rates[bi] = rate_mean; jump_intensities[bi] = jump_mean
+        if n_draws > 1
+            rate_se[bi] = sqrt(rate_m2 / (n_draws - 1) / n_draws)
+            jump_se[bi] = sqrt(jump_m2 / (n_draws - 1) / n_draws)
+        end
+        gradient_errors[bi] = maximum(abs.(gradient_mean .- g_full))
+    end
+    return (batch=batches, draws=fill(Int(draws), length(batches)),
+        factor_population=fill(M, length(batches)), intensity=rates,
+        intensity_mcse=rate_se, canonical_jump_intensity=jump_intensities,
+        canonical_jump_intensity_mcse=jump_se,
+        averaged_gradient_max_abs_error=gradient_errors,
+        full_intensity=fill(full_rate, length(batches)),
+        full_canonical_jump_intensity=fill(full_rate * full_jump,
+            length(batches)))
 end
 
 function r_stan_subsampling_diagnostics(lib_path::String, full_data::String,
@@ -11263,6 +12427,8 @@ end
 function r_pdmp_stan_subsampling(prepared, subsampling, x0, flow_type::String,
         algorithm_type::String, flow_mean, flow_cov;
         theta0=nothing,
+        free0=nothing,
+        stored_velocity0=nothing,
         c0::Float64=1e-2, grid_n::Int=30, grid_t_max::Float64=2.0,
         use_fd_hvp::Bool=true,
         curvature_backend::String="finite_difference",
@@ -11276,6 +12442,7 @@ function r_pdmp_stan_subsampling(prepared, subsampling, x0, flow_type::String,
         lazy_max_rejections::Int=0,
         t0::Float64=0.0, T::Float64=10000.0, t_warmup::Float64=0.0,
         warmup_adaptation_interval::Union{Nothing,Float64}=nothing,
+        boomerang_variance_floor_fraction::Float64=0.0,
         sticky::Bool=false, can_stick=nothing, model_prior=nothing,
         parameter_prior=nothing, slab_prior=nothing,
         show_progress::Bool=true, n_chains::Int=1, threaded::Bool=false,
@@ -11286,6 +12453,8 @@ function r_pdmp_stan_subsampling(prepared, subsampling, x0, flow_type::String,
         n_anchor_updates::Int=0,
         use_anchor_bank::Bool=false,
         anchor_bank_capacity::Int=8,
+        anchor_selection_policy::String="adaptive",
+        position_anchor_bank_spec=nothing,
         main_anchor_refresh_distance::Float64=Inf,
         node_source_check_distance::Float64=0.0,
         require_no_main_full_data::Bool=false,
@@ -11297,7 +12466,9 @@ function r_pdmp_stan_subsampling(prepared, subsampling, x0, flow_type::String,
         support_boundary_max_refresh_attempts::Int=20,
         support_boundary_refresh_probe_time::Float64=1e-4,
         support_boundary_min_safe_time::Float64=1e-12,
-        diagnostic_window_width::Float64=0.0)
+        diagnostic_window_width::Float64=0.0,
+        streaming_trace_directory::Union{Nothing,String}=nothing,
+        streaming_trace_buffer_events::Int=4096)
     algorithm_type in ("GridThinningStrategy", "ThinningStrategy") ||
         throw(ArgumentError("subsampling custom-Stan sampling requires GridThinningStrategy or ThinningStrategy"))
     warmup_mode in ("subsampled", "full") || throw(ArgumentError(
@@ -11316,6 +12487,34 @@ function r_pdmp_stan_subsampling(prepared, subsampling, x0, flow_type::String,
         "n_anchor_updates must be nonnegative"))
     anchor_bank_capacity >= 1 || throw(ArgumentError(
         "anchor_bank_capacity must be positive"))
+    anchor_selection_policy in ("adaptive", "position", "node_position") ||
+        throw(ArgumentError(
+            "anchor_selection_policy must be \"adaptive\", \"position\", or \"node_position\""))
+    anchor_selection_policy in ("position", "node_position") && !use_anchor_bank &&
+        throw(ArgumentError(
+            "position-based anchor selection requires use_anchor_bank=true"))
+    anchor_selection_policy == "position" &&
+        !(flow_type in ("BouncyParticle", "PreconditionedBPS",
+            "ZigZag", "PreconditionedZigZag", "Boomerang",
+            "AdaptiveBoomerang")) &&
+        throw(ArgumentError(
+            "position anchor selection requires linear Zig-Zag/BPS or harmonic Boomerang dynamics"))
+    anchor_selection_policy == "node_position" &&
+        !(flow_type in ("BouncyParticle", "PreconditionedBPS")) &&
+        throw(ArgumentError(
+            "node-position anchor selection is available only for linear BPS flows"))
+    !isnothing(position_anchor_bank_spec) &&
+        !(anchor_selection_policy in ("position", "node_position")) && throw(ArgumentError(
+            "a position anchor bank specification requires position selection"))
+    !isnothing(position_anchor_bank_spec) && t_warmup > 0 &&
+        throw(ArgumentError(
+            "restored position anchor banks require zero warmup"))
+    if anchor_selection_policy == "node_position"
+        envelope_spec = _rget(subsampling, :residual_envelope)
+        String(_rget(envelope_spec, :bound_type)) ==
+            "cell_marked_node_box_first_order" || throw(ArgumentError(
+            "node_position requires the cell-marked first-order node-box certificate"))
+    end
     (isinf(main_anchor_refresh_distance) ||
      isfinite(main_anchor_refresh_distance) && main_anchor_refresh_distance > 0) ||
         throw(ArgumentError(
@@ -11330,6 +12529,9 @@ function r_pdmp_stan_subsampling(prepared, subsampling, x0, flow_type::String,
     length(contexts) == n_chains || throw(DimensionMismatch(
         "prepared subsampling context count must equal n_chains"))
     unc_names = prepared.unc_names
+    isfinite(boomerang_variance_floor_fraction) &&
+        boomerang_variance_floor_fraction >= 0 || throw(ArgumentError(
+            "boomerang_variance_floor_fraction must be finite and nonnegative"))
     for ctx in contexts
         built = _build_stan_subsampling_model(ctx, unc_names,
             subsampling, anchor, slab_prior, can_stick_vec; anchor_capacity,
@@ -11341,6 +12543,15 @@ function r_pdmp_stan_subsampling(prepared, subsampling, x0, flow_type::String,
             adapter.last_update = t0
             manager.main_refresh_distance = main_anchor_refresh_distance
             manager.node_source_check_distance = node_source_check_distance
+            manager.selection_policy = Symbol(anchor_selection_policy)
+            if !isnothing(position_anchor_bank_spec)
+                chain_spec = _haskey(position_anchor_bank_spec, :version) ?
+                    position_anchor_bank_spec :
+                    position_anchor_bank_spec[length(position_anchor_bank_spec) == 1 ?
+                        1 : length(anchor_managers) + 1]
+                _restore_omrf_position_bank!(manager, model.grad, chain_spec,
+                    x0_vec)
+            end
             if diagnostic_window_width > 0
                 manager.window_diagnostics = OMRFWindowDiagnostics(
                     diagnostic_window_width)
@@ -11365,6 +12576,9 @@ function r_pdmp_stan_subsampling(prepared, subsampling, x0, flow_type::String,
     d = first(models).d
     flow = build_flow(flow_type, _to_precision(_as_flow_cov(flow_cov, d), d),
         _as_flow_mean(flow_mean, d); adaptive_scheme, refresh_rate)
+    boom_options = PDMPSamplers.BoomerangAdaptationOptions(
+        initial_variance_floor_fraction=boomerang_variance_floor_fraction)
+    boom_floor_mask = _boomerang_logscale_floor_mask(unc_names, d)
     alg0 = build_algorithm(algorithm_type; c0, d, grid_n, grid_t_max,
         use_fd_hvp, curvature_backend,
         post_warmup_simplify, grid_bound, grid_curvature_bound,
@@ -11442,14 +12656,23 @@ function r_pdmp_stan_subsampling(prepared, subsampling, x0, flow_type::String,
         adapter = PDMPSamplers.default_warmup_adapter(
             flow, adaptation_grad, t_warmup, t0;
             warmup_adaptation_interval,
-            can_stick=sticky ? can_stick_vec : nothing)
+            can_stick=sticky ? can_stick_vec : nothing,
+            boomerang_options=boom_options,
+            boomerang_variance_floor_mask=boom_floor_mask)
         pdmp_sample(initial, flow, models, alg, t0, T, t_warmup;
             progress=show_progress, threaded, seed,
             adapter,
             warmup_models, warmup_algorithm=warmup_alg,
             warmup_stop=build_warmup_stop(t_warmup),
             support_boundary_options=sbopts,
-            statistic_counter=PDMPSamplers.DevelStatisticCounter)
+            statistic_counter=PDMPSamplers.DevelStatisticCounter,
+            initial_free=isnothing(free0) ? nothing : _as_bool_vector(free0),
+            initial_stored_velocity=isnothing(stored_velocity0) ? nothing :
+                _as_float_vector(stored_velocity0),
+            trace_storage=isnothing(streaming_trace_directory) ? nothing :
+                PDMPSamplers.StreamingTraceStorage(
+                    streaming_trace_directory;
+                    buffer_events=streaming_trace_buffer_events))
     else
         run_chain = function(i)
             seed_i = isnothing(seed) ? nothing : seed + i - 1
@@ -11458,7 +12681,9 @@ function r_pdmp_stan_subsampling(prepared, subsampling, x0, flow_type::String,
             dynamics_adapter = PDMPSamplers.default_warmup_adapter(
                 flow_i, adaptation_grad, t_warmup, t0;
                 warmup_adaptation_interval,
-                can_stick=sticky ? can_stick_vec : nothing)
+                can_stick=sticky ? can_stick_vec : nothing,
+                boomerang_options=boom_options,
+                boomerang_variance_floor_mask=boom_floor_mask)
             adapter_i = dynamics_adapter isa PDMPSamplers.NoAdaptation ?
                 anchor_adapters[i] : PDMPSamplers.SequenceAdapter(
                     (dynamics_adapter, anchor_adapters[i]))
@@ -11469,15 +12694,26 @@ function r_pdmp_stan_subsampling(prepared, subsampling, x0, flow_type::String,
                     [warmup_models[i]], warmup_algorithm=warmup_alg,
                 warmup_stop=build_warmup_stop(t_warmup),
                 support_boundary_options=sbopts,
-                statistic_counter=PDMPSamplers.DevelStatisticCounter)
-            return chain.traces[1], chain.stats[1]
+                statistic_counter=PDMPSamplers.DevelStatisticCounter,
+                initial_free=isnothing(free0) ? nothing : _as_bool_vector(free0),
+                initial_stored_velocity=isnothing(stored_velocity0) ? nothing :
+                    _as_float_vector(stored_velocity0),
+                trace_storage=isnothing(streaming_trace_directory) ? nothing :
+                    PDMPSamplers.StreamingTraceStorage(joinpath(
+                        streaming_trace_directory,
+                        "chain_" * lpad(string(i), 4, '0'));
+                        buffer_events=streaming_trace_buffer_events))
+            return chain.traces[1], chain.stats[1], chain.initial_states[1],
+                chain.retained_initial_states[1], chain.terminal_states[1]
         end
         chain_results = if threaded && n_chains > 1
             fetch.([Threads.@spawn run_chain(i) for i in 1:n_chains])
         else
             [run_chain(i) for i in 1:n_chains]
         end
-        PDMPChains(first.(chain_results), last.(chain_results))
+        PDMPChains(getindex.(chain_results, 1), getindex.(chain_results, 2),
+            getindex.(chain_results, 3), getindex.(chain_results, 4),
+            getindex.(chain_results, 5))
     end
     if diagnostic_window_width > 0
         for (manager, trace, stats) in zip(
@@ -11616,6 +12852,12 @@ function r_pdmp_stan_subsampling(prepared, subsampling, x0, flow_type::String,
              model.grad.envelope.component_scales! isa
                 OMRFCellMarkedNodeBoxFirstOrderScales) ?
             model.grad.envelope.component_scales!.factor_point_seconds : 0.0,
+        "categorical_residual_cap" =>
+            (model.grad.envelope isa PDMPSamplers.GroupedResidualEnvelope &&
+             model.grad.envelope.component_scales! isa
+                OMRFCellMarkedNodeBoxFirstOrderScales) ?
+            model.grad.envelope.component_scales!.base.
+                categorical_residual_cap : false,
         "cell_marked_cell_cache_hits" =>
             (model.grad.envelope isa PDMPSamplers.GroupedResidualEnvelope &&
              model.grad.envelope.component_scales! isa
@@ -11626,6 +12868,34 @@ function r_pdmp_stan_subsampling(prepared, subsampling, x0, flow_type::String,
              model.grad.envelope.component_scales! isa
                 OMRFCellMarkedNodeBoxFirstOrderScales) ?
             model.grad.envelope.component_scales!.cell_cache_misses : 0,
+        "cell_marked_point_displacement_gt_four" =>
+            (model.grad.envelope isa PDMPSamplers.GroupedResidualEnvelope &&
+             model.grad.envelope.component_scales! isa
+                OMRFCellMarkedNodeBoxFirstOrderScales) ?
+            model.grad.envelope.component_scales!.
+                point_displacement_gt_four : 0,
+        "cell_marked_point_old_bound_sum" =>
+            (model.grad.envelope isa PDMPSamplers.GroupedResidualEnvelope &&
+             model.grad.envelope.component_scales! isa
+                OMRFCellMarkedNodeBoxFirstOrderScales) ?
+            model.grad.envelope.component_scales!.point_old_bound_sum : 0.0,
+        "cell_marked_point_new_bound_sum" =>
+            (model.grad.envelope isa PDMPSamplers.GroupedResidualEnvelope &&
+             model.grad.envelope.component_scales! isa
+                OMRFCellMarkedNodeBoxFirstOrderScales) ?
+            model.grad.envelope.component_scales!.point_new_bound_sum : 0.0,
+        "categorical_point_evaluations" =>
+            ctx.counts.categorical_point_evaluations,
+        "categorical_point_displacement_gt_four" =>
+            ctx.counts.categorical_point_displacement_gt_four,
+        "categorical_point_old_bound_sum" =>
+            ctx.counts.categorical_point_old_bound_sum,
+        "categorical_point_new_bound_sum" =>
+            ctx.counts.categorical_point_new_bound_sum,
+        "categorical_cell_cache_hits" =>
+            ctx.counts.categorical_cell_cache_hits,
+        "categorical_cell_cache_misses" =>
+            ctx.counts.categorical_cell_cache_misses,
         "compact_static_seconds" => ctx.counts.compact_static_seconds,
         "compact_aggregate_point_seconds" =>
             ctx.counts.compact_aggregate_point_seconds,
@@ -11822,6 +13092,26 @@ function r_pdmp_stan_subsampling(prepared, subsampling, x0, flow_type::String,
         "anchor_max_main_distance" => manager === nothing ? 0.0 :
             manager.max_main_distance,
         "anchor_bank_entries" => manager === nothing ? 0 : length(manager.entries),
+        "anchor_bank_requested_capacity" => manager === nothing ? 0 :
+            manager.capacity,
+        "anchor_bank_order" => manager === nothing ? Int[] :
+            collect(eachindex(manager.entries)),
+        "anchor_selection_policy" => manager === nothing ? "none" :
+            String(manager.selection_policy),
+        "anchor_selection_boundaries" => manager === nothing ? 0 :
+            manager.selection_boundaries,
+        "node_position_policy_version" => manager === nothing ? 0 :
+            manager.node_position_policy_version,
+        "node_position_sources" => manager === nothing ||
+            manager.oracle.node_position_cv === nothing ? Int[] :
+            copy(manager.oracle.node_position_cv.sources),
+        "node_position_metric_variances" => manager === nothing ||
+            manager.oracle.node_position_cv === nothing ? Float64[] :
+            copy(manager.oracle.node_position_cv.metric_variances),
+        "anchor_pending_boundary" => manager === nothing ? 0 :
+            manager.pending_boundary_idx,
+        "anchor_distance_scales" => manager === nothing ? Float64[] :
+            copy(manager.distance_scales),
         "active_anchor" => manager === nothing ? Float64[] : copy(
             manager.entries[manager.active_idx].state.anchor),
         "anchor_positions" => manager === nothing ? zeros(0, 0) :

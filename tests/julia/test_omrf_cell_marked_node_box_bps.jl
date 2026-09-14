@@ -9,8 +9,14 @@ using .PDMPSamplersRBridge
     PDMPSamplers.subsampling_residual_subset_bound(fixture.oracle,
         fixture.state, fixture.gradient, fixture.flow, fixture.D, fixture.M,
         fixture.subset, fixture.scale)
+@inline function _bps_integrated_rejection_path!(fixture)
+    PDMPSamplers.next_event_time(fixture.rng, fixture.model, fixture.flow,
+        fixture.alg, fixture.state, fixture.cache, fixture.stats,
+        0.2, false, :horizon_hit)
+    return nothing
+end
 
-function _bps_node_box_spec(X, seen)
+function _bps_node_box_spec(X, seen; categorical_residual_cap=false)
     N, P = size(X)
     membership = zeros(Int, P, N)
     nodes = Int[]
@@ -32,7 +38,7 @@ function _bps_node_box_spec(X, seen)
         membership[node, :] .= offset .+ local_membership
         offset += maximum(local_membership)
     end
-    Dict{String,Any}(
+    spec = Dict{String,Any}(
         "type"=>"omrf", "backend"=>"analytic", "X"=>X, "seen"=>seen,
         "thresholds"=>"thresholds_0", "interactions"=>"interactions_0",
         "bound_type"=>"cell_marked_node_box_first_order",
@@ -45,9 +51,27 @@ function _bps_node_box_spec(X, seen)
         "node_box_membership"=>membership, "node_box_nodes"=>nodes,
         "node_box_minima"=>reduce(vcat, permutedims.(minima)),
         "node_box_maxima"=>reduce(vcat, permutedims.(maxima)))
+    categorical_residual_cap &&
+        (spec["categorical_residual_cap"] = true)
+    return spec
 end
 
 @testset "OMRF cell-marked node-box linear BPS" begin
+    categorical_bound =
+        PDMPSamplersRBridge._omrf_categorical_residual_bound
+    @test categorical_bound(2.0, 3.0, true) == nextfloat(1.5)
+    @test categorical_bound(8.0, 3.0, true) == nextfloat(3.0)
+    @test categorical_bound(8.0, 3.0, true) <=
+        categorical_bound(8.0, 3.0, false)
+    @test categorical_bound(0.0, 3.0, true) == 0.0
+    @test categorical_bound(3.0, 0.0, true) == 0.0
+    # Adding a common reference-category shift cannot change either range.
+    a = [-1.0, 0.0, 2.0]; b = [-3.0, 1.0, 4.0]
+    shifted_a = a .+ 17.0; shifted_b = b .- 9.0
+    @test categorical_bound(maximum(a)-minimum(a),
+        maximum(b)-minimum(b), true) ==
+        categorical_bound(maximum(shifted_a)-minimum(shifted_a),
+            maximum(shifted_b)-minimum(shifted_b), true)
     root = normpath(joinpath(@__DIR__, "..", ".."))
     lib = PDMPSamplersRBridge._compile_model_with_header(
         joinpath(root, "inst", "stan", "omrf", "omrf.stan"),
@@ -228,8 +252,44 @@ end
     @test maximum_point_cell_violation <= 0.0
     @test maximum_interior_violation <= 2e-8
 
+    # The capped construction encloses points for mixed node references and
+    # frozen coordinates, and never exceeds the corresponding legacy roof.
+    scales = envelope.component_scales!
+    frozen_state = deepcopy(state)
+    frozen_index = oracle.residual_context.interaction_indices[1]
+    frozen_state.free[frozen_index] = false
+    frozen_state.ξ.θ[frozen_index] = 0.0
+    scales.base.categorical_residual_cap = false
+    scales.n_cached_cells = 0
+    PDMPSamplers.component_cell_scales!(envelope.cell_scales,
+        envelope, frozen_state, flow, 0.0, 0.4)
+    legacy_cell = copy(envelope.cell_scales)
+    scales.base.categorical_residual_cap = true
+    scales.n_cached_cells = 0
+    PDMPSamplers.component_cell_scales!(envelope.cell_scales,
+        envelope, frozen_state, flow, 0.0, 0.4)
+    @test all(envelope.cell_scales .<= legacy_cell .+ 1e-12)
+    for factor in 1:(N * P), t in (0.0, 0.2, 0.4)
+        PDMPSamplers.screening_residual_bound(
+            envelope, frozen_state, flow, t)
+        point = PDMPSamplersRBridge._omrf_cell_marked_factor_point_bound(
+            scales, factor)
+        component = envelope.groups[1, factor]
+        candidate = move_forward_time(frozen_state, t, flow)
+        fill!(selected, 0.0)
+        oracle(selected, candidate.ξ.x, [factor], oracle.anchor)
+        exact = PDMPSamplersRBridge._omrf_exact_selected_residual_abs_rate(
+            candidate, selected, flow,
+            oracle.residual_context.touched_positions)
+        @test exact <= point * (1 + 2e-7) + 2e-8
+        @test point <= envelope.scales[component] * (1 + 64eps(Float64))
+    end
+    scales.base.categorical_residual_cap = false
+    scales.n_cached_cells = 0
+
     # Enumerated and Monte Carlo component/factor balance, including unequal
     # component sizes and zero component mass.
+    envelope.component_scales!.base.categorical_residual_cap = true
     envelope.component_scales!.n_cached_cells = 0
     PDMPSamplers.component_cell_scales!(envelope.cell_scales,
         envelope, state, flow, 0.0, 0.4)
@@ -285,6 +345,7 @@ end
             exact_mark / selected_roof
     end
     @test recovered_rate ≈ marked_rate atol=2e-12 rtol=2e-12
+    envelope.component_scales!.base.categorical_residual_cap = false
 
     # Sticky diagonal-preconditioned BPS reflection reverses the active
     # directional rate, preserves metric kinetic energy, and leaves frozen
@@ -329,6 +390,31 @@ end
     @test @allocated(_bps_cell_marked_selected_bound!(selected_fixture)) == 0
     @test @allocated(PDMPSamplers.reflect!(rng, reflection_state,
         gradient, flow, cache)) == 0
+
+    # Integrated wrapper regression: use the real statistics-wrapped CV and a
+    # StickyPDMPState.  After all branches are prepared, the rejection-heavy
+    # event search must not allocate per proposal.
+    event_strategy = PDMPSamplers.Sticky(
+        PDMPSamplers.GridThinningStrategy(N=8, N_min=8, t_max=0.2,
+            lazy=false, bound_violation=:throw), fill(Inf, 9))
+    event_rng = Xoshiro(48039)
+    event_state, event_model, event_alg, event_cache, event_stats =
+        PDMPSamplers.initialize_state(event_rng, flow,
+            PDMPSamplers.PDMPModel(9, cv), event_strategy, 0.0, state.ξ;
+            statistic_counter=PDMPSamplers.DevelStatisticCounter,
+            initial_free=state.free, initial_stored_velocity=zeros(9))
+    integrated = (; rng=event_rng, model=event_model, flow,
+        alg=event_alg.inner_alg_state, state=event_state,
+        cache=event_cache, stats=event_stats)
+    for _ in 1:5
+        _bps_integrated_rejection_path!(integrated)
+    end
+    before_candidates = PDMPSamplers._get_counter_clock_candidates(event_stats)
+    GC.gc()
+    integrated_bytes = @allocated _bps_integrated_rejection_path!(integrated)
+    after_candidates = PDMPSamplers._get_counter_clock_candidates(event_stats)
+    @test after_candidates > before_candidates
+    @test integrated_bytes == 0
     println("bps_cell_marked_exact_point_max_violation=",
         maximum_exact_point_violation)
     println("bps_cell_marked_point_cell_max_violation=",

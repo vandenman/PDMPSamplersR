@@ -78,8 +78,8 @@ stan_subsampling <- function(n_observations, subsample_size,
     cli::cli_abort("Argument {.arg n_observations} must be an integer of at least 2.")
   }
   if (!rlang::is_integerish(subsample_size, n = 1L, finite = TRUE) ||
-      subsample_size < 1L || subsample_size >= n_observations) {
-    cli::cli_abort("Argument {.arg subsample_size} must satisfy 1 <= m < N.")
+      subsample_size < 1L || subsample_size > n_observations) {
+    cli::cli_abort("Argument {.arg subsample_size} must satisfy 1 <= m <= N.")
   }
   n_observations <- as.integer(n_observations)
   subsample_size <- as.integer(subsample_size)
@@ -414,6 +414,7 @@ omrf_residual_envelope <- function(X, seen, thresholds, interactions,
                                    direct_cv_cell_scope = c("cell", "event_horizon"),
                                    prior_backend = c("stan", "analytic"),
                                    exact_selected_refinement = FALSE,
+                                   categorical_residual_cap = FALSE,
                                    signed_bps = FALSE,
                                    signed_harmonic = FALSE,
                                    geometry = c("norm_local", "norm_local_hcv_compact",
@@ -461,6 +462,12 @@ omrf_residual_envelope <- function(X, seen, thresholds, interactions,
       is.na(exact_selected_refinement)) {
     cli::cli_abort(
       "Argument {.arg exact_selected_refinement} must be TRUE or FALSE.")
+  }
+  if (!is.logical(categorical_residual_cap) ||
+      length(categorical_residual_cap) != 1L ||
+      is.na(categorical_residual_cap)) {
+    cli::cli_abort(
+      "Argument {.arg categorical_residual_cap} must be TRUE or FALSE.")
   }
   if (!is.logical(signed_bps) || length(signed_bps) != 1L ||
       is.na(signed_bps)) {
@@ -719,6 +726,11 @@ omrf_residual_envelope <- function(X, seen, thresholds, interactions,
     envelope$zigzag_sign_aware <- isTRUE(zigzag_sign_aware)
     envelope$exact_selected_refinement <-
       isTRUE(exact_selected_refinement)
+    # Preserve the exact legacy immutable-envelope identity when the
+    # research-only cap is disabled, so existing frozen banks remain valid.
+    if (isTRUE(categorical_residual_cap)) {
+      envelope$categorical_residual_cap <- TRUE
+    }
     envelope$signed_bps <- isTRUE(signed_bps)
     envelope$signed_harmonic <- isTRUE(signed_harmonic)
     envelope$direct_cv_cell_scope <- direct_cv_cell_scope

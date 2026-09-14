@@ -19,15 +19,38 @@ export build_model_prior_odds, build_slab_provider, wrap_dependent_sticky
 export r_discretize, r_mean, r_var, r_std, r_cov, r_cor, r_quantile, r_median, r_cdf, r_ess, r_summary_all
 export r_inclusion_probs, extract_stats
 export r_chain_times, r_chain_positions, r_chain_velocities, r_chain_free_masks, r_chain_is_boomerang, r_chain_is_mutable_boomerang, r_chain_mu, r_chain_flow_cov
+export r_chain_terminal_time, r_chain_terminal_position,
+    r_chain_terminal_physical_velocity, r_chain_terminal_stored_velocity,
+    r_chain_terminal_free_mask, r_chain_terminal_flow_spec
+export r_chain_initial_time, r_chain_initial_position,
+    r_chain_initial_physical_velocity, r_chain_initial_stored_velocity,
+    r_chain_initial_free_mask, r_chain_initial_flow_spec
+export r_chain_retained_initial_time, r_chain_retained_initial_position,
+    r_chain_retained_initial_physical_velocity,
+    r_chain_retained_initial_stored_velocity,
+    r_chain_retained_initial_free_mask, r_chain_retained_initial_flow_spec
 export r_resolve_flow_spec, r_chain_flow_spec
 export r_from_skeleton
 export r_chain_is_factorized
+export r_chain_is_streaming, r_chain_streaming_chunk_paths,
+    r_chain_streaming_chunk_events, r_chain_streaming_chunk_bytes,
+    r_chain_streaming_directory, r_chain_streaming_chunk_count,
+    r_chain_streaming_output_bytes, r_chain_streaming_flow_cov,
+    r_chain_streaming_physical_events,
+    r_chain_streaming_computational_boundaries,
+    r_chain_streaming_buffer_maximum,
+    r_chain_streaming_reflection_jump_summary
 export r_chain_sparse_initial_time, r_chain_sparse_initial_position, r_chain_sparse_initial_velocity
 export r_chain_sparse_event_indices, r_chain_sparse_event_times, r_chain_sparse_event_positions, r_chain_sparse_event_velocities
+export r_chain_sparse_initial_free_mask, r_chain_sparse_event_free_values
 export r_from_sparse_skeleton
+export r_from_streaming_skeleton
+export r_streaming_scientific_reduction, r_streaming_replay_validation,
+    r_streaming_dense_test_reference
+export r_chain_has_live_state_provenance
 export r_pdmp_stan, r_pdmp_custom
 export r_stan_subsampling_diagnostics, prepare_stan_subsampling,
-    r_pdmp_stan_subsampling
+    r_pdmp_stan_subsampling, r_omrf_minibatch_fixed_state
 export write_cmdstan_csv, r_constrain_and_write_csv
 export r_pdmp_brms_subsampling, r_pdmp_stan_for_brms
 export r_get_param_unc_names
@@ -43,7 +66,8 @@ const _WORKER_STATE_ROOTS = (
     :_stan_model, :_pdmp_model, :_prepared_stan_subsampling, :_subsampling,
     :_full_gradient_spec, :_path_to_stan_model, :_path_to_stan_data,
     :_path_to_prior_stan_data_full, :_n_chains, :_curvature_backend,
-    :flow, :algorithm, :x0, :theta0, :flow_cov, :flow_mean, :c0, :grid_n, :grid_t_max,
+    :flow, :algorithm, :x0, :theta0, :free0, :stored_velocity0,
+    :flow_cov, :flow_mean, :c0, :grid_n, :grid_t_max,
     :grid_bound, :grid_curvature_bound, :linear_area_threshold,
     :linear_min_area_gain, :post_warmup_simplify,
     :t0, :T, :t_warmup, :f, :hessian_f, :hessian, :sticky, :can_stick, :model_prior,
@@ -54,6 +78,7 @@ const _WORKER_STATE_ROOTS = (
     :subsampling_node_source_check_distance,
     :subsampling_require_no_main_full_data, :subsampling_diagnostic_window,
     :warmup_adaptation_interval, :subsampling_diagnostic_window,
+    :boomerang_variance_floor_fraction,
     :support_boundary_mode, :support_boundary_max_bisection_steps,
     :support_boundary_time_rtol, :support_boundary_time_atol,
     :support_boundary_clip_fraction, :support_boundary_max_refresh_attempts,
@@ -71,6 +96,13 @@ function r_cleanup_worker_state()
     end
     GC.gc(true)
     return nothing
+end
+
+function _boomerang_logscale_floor_mask(unc_names, d::Integer)
+    names = String.(unc_names)
+    length(names) == d || throw(DimensionMismatch(
+        "parameter-name count $(length(names)) does not match dimension $d"))
+    return PDMPSamplers.boomerang_logscale_variance_floor_mask(names)
 end
 
 _subsampling_collection_values(values::Union{AbstractVector,Tuple}) = values
@@ -945,6 +977,100 @@ function r_chain_is_factorized(chains::PDMPChains; chain::Int)
     chains.traces[chain] isa PDMPSamplers.FactorizedTrace
 end
 
+function r_chain_is_streaming(chains::PDMPChains; chain::Int)
+    chains.traces[chain] isa PDMPSamplers.StreamingPDMPTrace
+end
+
+function r_chain_streaming_chunk_paths(chains::PDMPChains; chain::Int)
+    trace = chains.traces[chain]
+    trace isa PDMPSamplers.StreamingPDMPTrace || throw(ArgumentError(
+        "requested a streaming manifest from a non-streaming trace"))
+    return String[chunk.path for chunk in trace.chunks]
+end
+
+r_chain_streaming_directory(chains::PDMPChains; chain::Int) =
+    String(chains.traces[chain].directory)
+r_chain_streaming_chunk_count(chains::PDMPChains; chain::Int) =
+    Float64(length(chains.traces[chain].chunks))
+r_chain_streaming_output_bytes(chains::PDMPChains; chain::Int) =
+    Float64(chains.traces[chain].chunks.total_bytes)
+function r_chain_streaming_flow_cov(chains::PDMPChains; chain::Int)
+    covariance = _resolved_flow_covariance(chains.traces[chain].flow)
+    diagonal = diag(covariance)
+    if all(i == j || iszero(covariance[i, j])
+            for i in axes(covariance, 1), j in axes(covariance, 2))
+        return Vector{Float64}(diagonal)
+    end
+    return Matrix{Float64}(covariance)
+end
+
+function r_chain_streaming_chunk_events(chains::PDMPChains; chain::Int)
+    trace = chains.traces[chain]
+    return Int32[chunk.n_events for chunk in trace.chunks]
+end
+
+function r_chain_streaming_chunk_bytes(chains::PDMPChains; chain::Int)
+    trace = chains.traces[chain]
+    return Float64[chunk.bytes for chunk in trace.chunks]
+end
+
+r_chain_streaming_physical_events(chains::PDMPChains; chain::Int) =
+    Float64(chains.traces[chain].physical_events)
+r_chain_streaming_computational_boundaries(chains::PDMPChains; chain::Int) =
+    Float64(chains.traces[chain].computational_boundaries)
+r_chain_streaming_buffer_maximum(chains::PDMPChains; chain::Int) =
+    Float64(chains.traces[chain].buffer_maximum)
+
+function r_chain_streaming_reflection_jump_summary(chains::PDMPChains;
+        chain::Int)
+    trace = chains.traces[chain]
+    trace isa PDMPSamplers.StreamingPDMPTrace || throw(ArgumentError(
+        "reflection-jump summary requires a streaming trace"))
+    covariance = _resolved_flow_covariance(trace.flow)
+    inverse_scale = 1.0 ./ sqrt.(diag(covariance))
+    cursor = PDMPSamplers._stream_cursor(trace)
+    count = 0
+    total = 0.0
+    maximum = 0.0
+    for metadata in trace.chunks
+        chunk = PDMPSamplers._load_streaming_chunk(metadata)
+        @inbounds for event in eachindex(chunk.times)
+            kind = chunk.kinds[event]
+            jump = 0.0
+            if kind == PDMPSamplers._STREAM_EVENT_REFLECT_FULL
+                after = view(chunk.full_effective_velocities, :,
+                    Int(chunk.full_slots[event]))
+                for i in eachindex(cursor.velocity)
+                    if cursor.free[i]
+                        delta = (after[i] - cursor.velocity[i]) *
+                            inverse_scale[i]
+                        jump += delta * delta
+                    end
+                end
+            elseif kind == PDMPSamplers._STREAM_EVENT_REFLECT_COORD
+                i = Int(chunk.coordinates[event])
+                delta = (chunk.velocities[event] - cursor.velocity[i]) *
+                    inverse_scale[i]
+                jump = delta * delta
+            end
+            if kind == PDMPSamplers._STREAM_EVENT_REFLECT_FULL ||
+                    kind == PDMPSamplers._STREAM_EVENT_REFLECT_COORD
+                count += 1
+                total += jump
+                maximum = max(maximum, jump)
+            end
+            PDMPSamplers._stream_apply_event!(cursor, chunk, event)
+        end
+    end
+    return Float64[count, total, iszero(count) ? NaN : total / count,
+        maximum]
+end
+
+r_chain_has_live_state_provenance(chains::PDMPChains; chain::Int=1) =
+    length(chains.initial_states) >= chain &&
+    length(chains.retained_initial_states) >= chain &&
+    length(chains.terminal_states) >= chain
+
 function r_chain_sparse_initial_time(chains::PDMPChains; chain::Int)
     Float64(chains.traces[chain].initial_state.time)
 end
@@ -955,6 +1081,11 @@ end
 
 function r_chain_sparse_initial_velocity(chains::PDMPChains; chain::Int)
     Vector{Float64}(chains.traces[chain].initial_state.velocity)
+end
+
+function r_chain_sparse_initial_free_mask(chains::PDMPChains; chain::Int)
+    point = chains.traces[chain].initial_state
+    return .!(iszero.(point.position) .& iszero.(point.velocity))
 end
 
 function r_chain_sparse_event_indices(chains::PDMPChains; chain::Int)
@@ -971,6 +1102,12 @@ end
 
 function r_chain_sparse_event_velocities(chains::PDMPChains; chain::Int)
     Float64[e.velocity for e in chains.traces[chain].events]
+end
+
+
+function r_chain_sparse_event_free_values(chains::PDMPChains; chain::Int)
+    trace = chains.traces[chain]
+    return [!(iszero(event.position) && iszero(event.velocity)) for event in trace.events]
 end
 
 function r_from_sparse_skeleton(
@@ -1000,6 +1137,306 @@ function r_from_sparse_skeleton(
         push!(traces, _r_factorized_trace(events, flow, initial_state))
     end
     PDMPChains(traces, PDMPSamplers.StatisticCounter[])
+end
+
+function r_from_streaming_skeleton(directory_list::AbstractVector,
+        chunk_count_list::AbstractVector,
+        physical_events_list::AbstractVector,
+        computational_boundaries_list::AbstractVector,
+        buffer_maximum_list::AbstractVector,
+        initial_times_list::AbstractVector,
+        initial_positions_list::AbstractVector,
+        initial_velocities_list::AbstractVector,
+        initial_stored_velocities_list::AbstractVector,
+        initial_free_masks_list::AbstractVector,
+        terminal_times_list::AbstractVector,
+        terminal_positions_list::AbstractVector,
+        terminal_velocities_list::AbstractVector,
+        terminal_stored_velocities_list::AbstractVector,
+        terminal_free_masks_list::AbstractVector,
+        is_boomerang_list::AbstractVector, mu_list::AbstractVector,
+        flow_cov_list::AbstractVector)
+    n = length(initial_times_list)
+    traces = PDMPSamplers.StreamingPDMPTrace[]
+    initial_states = Any[]
+    terminal_states = Any[]
+    sizehint!(traces, n); sizehint!(initial_states, n)
+    sizehint!(terminal_states, n)
+    for i in 1:n
+        position0 = Vector{Float64}(initial_positions_list[i])
+        d = length(position0)
+        raw_covariance = flow_cov_list[i]
+        covariance = raw_covariance isa AbstractVector ?
+            Matrix(Diagonal(Vector{Float64}(raw_covariance))) :
+            Matrix{Float64}(raw_covariance)
+        precision = inv(Symmetric(covariance))
+        mu = Vector{Float64}(mu_list[i])
+        flow = Bool(is_boomerang_list[i]) ? Boomerang(precision, mu) :
+            ZigZag(I(d), zeros(d))
+        initial = PDMPSamplers.PDMPTerminalState(
+            Float64(initial_times_list[i]), position0,
+            Vector{Float64}(initial_velocities_list[i]),
+            Vector{Float64}(initial_stored_velocities_list[i]),
+            BitVector(initial_free_masks_list[i]), flow)
+        terminal = PDMPSamplers.PDMPTerminalState(
+            Float64(terminal_times_list[i]),
+            Vector{Float64}(terminal_positions_list[i]),
+            Vector{Float64}(terminal_velocities_list[i]),
+            Vector{Float64}(terminal_stored_velocities_list[i]),
+            BitVector(terminal_free_masks_list[i]), flow)
+        directory = String(directory_list[i])
+        chunk_count = Int(chunk_count_list[i])
+        trace = PDMPSamplers._restore_streaming_trace(directory, chunk_count,
+            flow, initial, terminal;
+            physical_events=Int(physical_events_list[i]),
+            computational_boundaries=Int(computational_boundaries_list[i]),
+            buffer_maximum=Int(buffer_maximum_list[i]))
+        push!(traces, trace); push!(initial_states, initial)
+        push!(terminal_states, terminal)
+    end
+    return PDMPChains(traces, PDMPSamplers.StatisticCounter[], initial_states,
+        copy(initial_states), terminal_states)
+end
+
+@inline function _r_stream_integrate_piece!(first, second, occupancy,
+        model_first, model_second, bin::Int, coordinates, edge_local,
+        x, velocity, free, elapsed::Float64, flow)
+    elapsed <= 0 && return nothing
+    base = PDMPSamplers._underlying_flow(flow)
+    is_boomerang = base isa PDMPSamplers.AnyBoomerang
+    model_size = 0
+    @inbounds for ii in eachindex(coordinates)
+        j = coordinates[ii]
+        x0 = x[j]
+        if edge_local[ii] && free[j]
+            occupancy[ii, bin] += elapsed
+            model_size += 1
+        end
+        if !free[j]
+            first[ii, bin] += x0 * elapsed
+            second[ii, bin] += x0 * x0 * elapsed
+        elseif is_boomerang
+            s, c = sincos(elapsed)
+            a = x0 - base.μ[j]
+            v = velocity[j]
+            first[ii, bin] += base.μ[j] * elapsed + a * s + v * (1 - c)
+            second[ii, bin] +=
+                a * a * (elapsed / 2 + sin(2elapsed) / 4) +
+                v * v * (elapsed / 2 - sin(2elapsed) / 4) +
+                base.μ[j]^2 * elapsed + a * v * s^2 +
+                2a * base.μ[j] * s + 2v * base.μ[j] * (1 - c)
+        else
+            v = velocity[j]
+            first[ii, bin] += x0 * elapsed + 0.5v * elapsed^2
+            second[ii, bin] += x0^2 * elapsed + x0 * v * elapsed^2 +
+                v^2 * elapsed^3 / 3
+        end
+    end
+    model_first[bin] += model_size * elapsed
+    model_second[bin] += model_size^2 * elapsed
+    return nothing
+end
+
+function _r_stream_state_at!(out_x, out_velocity, out_free, column, x, velocity, free,
+        elapsed, flow, coordinates)
+    scratch_x = copy(x)
+    scratch_velocity = copy(velocity)
+    PDMPSamplers._stream_move!(scratch_x, scratch_velocity, free, elapsed, flow)
+    @inbounds for ii in eachindex(coordinates)
+        j = coordinates[ii]
+        out_x[ii, column] = scratch_x[j]
+        out_velocity[ii, column] = free[j] ? scratch_velocity[j] : 0.0
+        out_free[ii, column] = free[j]
+    end
+    return nothing
+end
+
+"""One bounded chunk scan for the exact OMRF analysis contract.
+
+`edges` and `grid_times` are relative to the retained segment origin.  No
+dense event skeleton or concatenated event-time vector is constructed.
+"""
+function r_streaming_scientific_reduction(chains::PDMPChains,
+        coordinates_raw::AbstractVector, edge_mask_raw::AbstractVector,
+        edges_raw::AbstractVector, grid_times_raw;
+        chain::Int=1)
+    trace = chains.traces[chain]
+    trace isa PDMPSamplers.StreamingPDMPTrace || throw(ArgumentError(
+        "scientific streaming reduction requires a streaming trace"))
+    trace.finalized || PDMPSamplers._flush_streaming_trace!(trace)
+    coordinates = Int.(coordinates_raw)
+    edge_mask = Bool.(edge_mask_raw)
+    edge_local = edge_mask[coordinates]
+    edges = Float64.(edges_raw)
+    grid_times = grid_times_raw isa AbstractVector ?
+        Float64.(grid_times_raw) : [Float64(grid_times_raw)]
+    issorted(edges) && length(edges) >= 2 && all(diff(edges) .> 0) ||
+        throw(ArgumentError("analysis edges must be strictly increasing"))
+    issorted(grid_times) || throw(ArgumentError("analysis grid must be sorted"))
+    initial = trace.initial_state
+    terminal = trace.terminal_state
+    trace_duration = terminal.t - initial.t
+    tol = max(128eps(max(abs(trace_duration), 1.0)),
+        1e-9 * max(abs(trace_duration), 1.0))
+    abs(edges[1]) <= tol && abs(edges[end] - trace_duration) <= tol ||
+        throw(ArgumentError("analysis edges must span the complete segment"))
+    # The task manifest owns the intended physical duration. A sampler can
+    # reach the same horizon with a few ulps of accumulated clock error.
+    duration = edges[end]
+    all(t -> -tol <= t <= duration + tol, grid_times) ||
+        throw(ArgumentError("analysis grid lies outside the segment"))
+    q = length(coordinates); nb = length(edges) - 1
+    first = zeros(q, nb); second = zeros(q, nb); occupancy = zeros(q, nb)
+    transitions = zeros(Int, q, nb); activations = zeros(Int, q, nb)
+    deactivations = zeros(Int, q, nb)
+    model_first = zeros(nb); model_second = zeros(nb)
+    grid_value = Matrix{Float64}(undef, q, length(grid_times))
+    grid_velocity = Matrix{Float64}(undef, q, length(grid_times))
+    grid_free = Matrix{Bool}(undef, q, length(grid_times))
+    cursor = PDMPSamplers._stream_cursor(trace)
+    absolute_time = initial.t
+    local_time = 0.0
+    bin = 1
+    grid_index = 1
+
+    # Integrate one physical segment while splitting only at requested
+    # analysis boundaries. Grid points strictly before its outgoing event use
+    # the incoming physical state; a point on an event uses the outgoing state.
+    function advance_to!(target_local)
+        while local_time < target_local - tol
+            stop = min(target_local, edges[bin + 1])
+            elapsed = stop - local_time
+            _r_stream_integrate_piece!(first, second, occupancy, model_first,
+                model_second, bin, coordinates, edge_local, cursor.x,
+                cursor.velocity, cursor.free, elapsed, trace.flow)
+            PDMPSamplers._stream_move!(cursor.x, cursor.velocity, cursor.free,
+                elapsed, trace.flow)
+            local_time = stop
+            if bin < nb && local_time >= edges[bin + 1] - tol
+                bin += 1
+            end
+        end
+        absolute_time = initial.t + local_time
+        return nothing
+    end
+
+    for metadata in trace.chunks
+        chunk = PDMPSamplers._load_streaming_chunk(metadata)
+        @inbounds for event in eachindex(chunk.times)
+            event_local = chunk.times[event] - initial.t
+            if event_local > duration && event_local <= duration + tol
+                event_local = duration
+            elseif event_local > duration + tol
+                throw(ArgumentError("streaming event lies beyond analysis horizon"))
+            end
+            while grid_index <= length(grid_times) &&
+                    grid_times[grid_index] < event_local - tol
+                target = grid_times[grid_index]
+                _r_stream_state_at!(grid_value, grid_velocity, grid_free, grid_index,
+                    cursor.x, cursor.velocity, cursor.free,
+                    target - local_time, trace.flow, coordinates)
+                grid_index += 1
+            end
+            advance_to!(event_local)
+            kind = chunk.kinds[event]
+            changed_coordinate = kind in (PDMPSamplers._STREAM_EVENT_FREEZE,
+                PDMPSamplers._STREAM_EVENT_RELEASE) ?
+                Int(chunk.coordinates[event]) : 0
+            before_free = changed_coordinate == 0 ? false :
+                cursor.free[changed_coordinate]
+            PDMPSamplers._stream_apply_event!(cursor, chunk, event)
+            transition_bin = clamp(searchsortedfirst(edges, event_local) - 1,
+                1, nb)
+            if changed_coordinate != 0 && before_free != cursor.free[changed_coordinate]
+                for ii in eachindex(coordinates)
+                    j = coordinates[ii]
+                    if edge_local[ii] && j == changed_coordinate
+                    transitions[ii, transition_bin] += 1
+                    cursor.free[j] ? (activations[ii, transition_bin] += 1) :
+                        (deactivations[ii, transition_bin] += 1)
+                    end
+                end
+            end
+            while grid_index <= length(grid_times) &&
+                    abs(grid_times[grid_index] - event_local) <= tol
+                for ii in eachindex(coordinates)
+                    j = coordinates[ii]
+                    grid_value[ii, grid_index] = cursor.x[j]
+                    grid_velocity[ii, grid_index] = cursor.free[j] ?
+                        cursor.velocity[j] : 0.0
+                    grid_free[ii, grid_index] = cursor.free[j]
+                end
+                grid_index += 1
+            end
+        end
+    end
+    while grid_index <= length(grid_times)
+        target = grid_times[grid_index]
+        _r_stream_state_at!(grid_value, grid_velocity, grid_free, grid_index, cursor.x,
+            cursor.velocity, cursor.free, target - local_time, trace.flow,
+            coordinates)
+        grid_index += 1
+    end
+    advance_to!(duration)
+    replay_position = copy(cursor.x)
+    replay_velocity = copy(cursor.velocity)
+    replay_stored = copy(cursor.stored_velocity)
+    replay_free = copy(cursor.free)
+    return (edges=edges, first=first, second=second, occupancy=occupancy,
+        transitions=transitions, activations=activations,
+        deactivations=deactivations, model_first=model_first,
+        model_second=model_second, grid_times=grid_times,
+        grid_value=grid_value, grid_velocity=grid_velocity,
+        grid_free=grid_free,
+        replay_position=replay_position, replay_velocity=replay_velocity,
+        replay_stored_velocity=replay_stored, replay_free=replay_free,
+        terminal_position=copy(terminal.position),
+        terminal_velocity=copy(terminal.physical_velocity),
+        terminal_stored_velocity=copy(terminal.stored_frozen_velocity),
+        terminal_free=copy(terminal.free), chunks=length(trace.chunks),
+        physical_events=trace.physical_events,
+        output_bytes=Float64(trace.chunks.total_bytes))
+end
+
+function r_streaming_replay_validation(chains::PDMPChains; chain::Int=1)
+    trace = chains.traces[chain]
+    trace isa PDMPSamplers.StreamingPDMPTrace || throw(ArgumentError(
+        "streaming replay validation requires a streaming trace"))
+    d = length(trace.initial_state.position)
+    z = r_streaming_scientific_reduction(chains, collect(1:d), falses(d),
+        [0.0, trace.terminal_state.t - trace.initial_state.t], Float64[];
+        chain=chain)
+    return (position_max_abs=maximum(abs.(z.replay_position .-
+            z.terminal_position)),
+        velocity_max_abs=maximum(abs.(z.replay_velocity .-
+            z.terminal_velocity)),
+        stored_velocity_max_abs=maximum(abs.(z.replay_stored_velocity .-
+            z.terminal_stored_velocity)), mask_equal=z.replay_free == z.terminal_free)
+end
+
+# Deliberately test-only: production streaming analysis uses the bounded
+# reduction above. This short-fixture materialization supplies an independent
+# dense contract for regression comparisons.
+function r_streaming_dense_test_reference(chains::PDMPChains; chain::Int=1)
+    trace = chains.traces[chain]
+    trace isa PDMPSamplers.StreamingPDMPTrace || throw(ArgumentError(
+        "dense streaming test reference requires a streaming trace"))
+    times = Float64[]; positions = Vector{Float64}[]
+    velocities = Vector{Float64}[]; masks = BitVector[]
+    iteration = iterate(trace)
+    while iteration !== nothing
+        push!(times, iteration[2][1])
+        push!(positions, copy(iteration[2][2]))
+        push!(velocities, copy(iteration[2][3]))
+        push!(masks, copy(iteration[2][4].free))
+        iteration = iterate(trace, iteration[2])
+    end
+    return (times=times, positions=reduce(hcat, positions),
+        velocities=reduce(hcat, velocities), free_masks=reduce(hcat, masks),
+        is_boomerang=PDMPSamplers._underlying_flow(trace.flow) isa AnyBoomerang,
+        is_mutable=PDMPSamplers._underlying_flow(trace.flow) isa MutableBoomerang,
+        mu=_resolved_flow_mean(trace.flow),
+        flow_cov=_resolved_flow_covariance(trace.flow))
 end
 
 function _r_factorized_trace(events, flow, initial_state)
@@ -1047,6 +1484,51 @@ end
 function r_chain_flow_cov(chains::PDMPChains; chain::Int)
     Matrix{Float64}(_resolved_flow_covariance(chains.traces[chain].flow))
 end
+
+_terminal(chains::PDMPChains, chain::Int) =
+    PDMPSamplers.terminal_state(chains, chain)
+r_chain_terminal_time(chains::PDMPChains; chain::Int) =
+    Float64(_terminal(chains, chain).t)
+r_chain_terminal_position(chains::PDMPChains; chain::Int) =
+    Vector{Float64}(_terminal(chains, chain).position)
+r_chain_terminal_physical_velocity(chains::PDMPChains; chain::Int) =
+    Vector{Float64}(_terminal(chains, chain).physical_velocity)
+r_chain_terminal_stored_velocity(chains::PDMPChains; chain::Int) =
+    Vector{Float64}(_terminal(chains, chain).stored_frozen_velocity)
+r_chain_terminal_free_mask(chains::PDMPChains; chain::Int) =
+    BitVector(_terminal(chains, chain).free)
+r_chain_terminal_flow_spec(chains::PDMPChains; chain::Int) =
+    _flow_spec(_terminal(chains, chain).flow)
+
+_installed_initial(chains::PDMPChains, chain::Int) =
+    PDMPSamplers.initial_state(chains, chain)
+r_chain_initial_time(chains::PDMPChains; chain::Int) =
+    Float64(_installed_initial(chains, chain).t)
+r_chain_initial_position(chains::PDMPChains; chain::Int) =
+    Vector{Float64}(_installed_initial(chains, chain).position)
+r_chain_initial_physical_velocity(chains::PDMPChains; chain::Int) =
+    Vector{Float64}(_installed_initial(chains, chain).physical_velocity)
+r_chain_initial_stored_velocity(chains::PDMPChains; chain::Int) =
+    Vector{Float64}(_installed_initial(chains, chain).stored_frozen_velocity)
+r_chain_initial_free_mask(chains::PDMPChains; chain::Int) =
+    BitVector(_installed_initial(chains, chain).free)
+r_chain_initial_flow_spec(chains::PDMPChains; chain::Int) =
+    _flow_spec(_installed_initial(chains, chain).flow)
+
+_retained_initial(chains::PDMPChains, chain::Int) =
+    PDMPSamplers.retained_initial_state(chains, chain)
+r_chain_retained_initial_time(chains::PDMPChains; chain::Int) =
+    Float64(_retained_initial(chains, chain).t)
+r_chain_retained_initial_position(chains::PDMPChains; chain::Int) =
+    Vector{Float64}(_retained_initial(chains, chain).position)
+r_chain_retained_initial_physical_velocity(chains::PDMPChains; chain::Int) =
+    Vector{Float64}(_retained_initial(chains, chain).physical_velocity)
+r_chain_retained_initial_stored_velocity(chains::PDMPChains; chain::Int) =
+    Vector{Float64}(_retained_initial(chains, chain).stored_frozen_velocity)
+r_chain_retained_initial_free_mask(chains::PDMPChains; chain::Int) =
+    BitVector(_retained_initial(chains, chain).free)
+r_chain_retained_initial_flow_spec(chains::PDMPChains; chain::Int) =
+    _flow_spec(_retained_initial(chains, chain).flow)
 
 r_chain_flow_spec(chains::PDMPChains; chain::Int) =
     _flow_spec(chains.traces[chain].flow)
@@ -1421,6 +1903,8 @@ function r_pdmp_stan(
         flow_mean,
         flow_cov;
         theta0 = nothing,
+        free0 = nothing,
+        stored_velocity0 = nothing,
         c0::Float64 = 1e-2,
         grid_n::Int = 30,
         grid_t_max::Float64 = 2.0,
@@ -1438,6 +1922,7 @@ function r_pdmp_stan(
         T::Float64 = 10000.0,
         t_warmup::Float64 = 0.0,
         warmup_adaptation_interval::Union{Nothing,Float64} = nothing,
+        boomerang_variance_floor_fraction::Float64 = 0.0,
         sticky::Bool = false,
         can_stick = nothing,
         model_prior = nothing,
@@ -1457,7 +1942,9 @@ function r_pdmp_stan(
         support_boundary_clip_fraction::Float64 = 1 - 1e-10,
         support_boundary_max_refresh_attempts::Int = 20,
         support_boundary_refresh_probe_time::Float64 = 1e-4,
-        support_boundary_min_safe_time::Float64 = 1e-12
+        support_boundary_min_safe_time::Float64 = 1e-12,
+        streaming_trace_directory::Union{Nothing,String}=nothing,
+        streaming_trace_buffer_events::Int=4096
     )
 
     d = model.d
@@ -1472,6 +1959,12 @@ function r_pdmp_stan(
 
     prec = _to_precision(flow_cov_mat, d)
     flow = build_flow(flow_type, prec, flow_mean_vec; adaptive_scheme, refresh_rate)
+    isfinite(boomerang_variance_floor_fraction) &&
+        boomerang_variance_floor_fraction >= 0 || throw(ArgumentError(
+            "boomerang_variance_floor_fraction must be finite and nonnegative"))
+    boom_options = PDMPSamplers.BoomerangAdaptationOptions(
+        initial_variance_floor_fraction=boomerang_variance_floor_fraction)
+    boom_floor_mask = _boomerang_logscale_floor_mask(unc_names_vec, d)
     initial_refresh_rate = try Float64(PDMPSamplers.refresh_rate(flow)) catch; NaN end
     alg0 = build_algorithm(algorithm_type; c0, d, grid_n, grid_t_max, use_fd_hvp, curvature_backend,
         post_warmup_simplify, grid_bound, grid_curvature_bound,
@@ -1511,14 +2004,23 @@ function r_pdmp_stan(
     adapter = PDMPSamplers.default_warmup_adapter(
         flow, sampling_model.grad, t_warmup, t0;
         warmup_adaptation_interval,
-        can_stick=sticky ? can_stick_vec : nothing)
+        can_stick=sticky ? can_stick_vec : nothing,
+        boomerang_options=boom_options,
+        boomerang_variance_floor_mask=boom_floor_mask)
     chains = pdmp_sample(initial, flow, sampling_model, alg, t0, T, t_warmup;
                          progress = show_progress, n_chains = n_chains, threaded = threaded,
                          seed = seed,
                          adapter = adapter,
                          warmup_stop = build_warmup_stop(t_warmup),
                          support_boundary_options = sbopts,
-                         statistic_counter = PDMPSamplers.DevelStatisticCounter)
+                         statistic_counter = PDMPSamplers.DevelStatisticCounter,
+                         initial_free=isnothing(free0) ? nothing : _as_bool_vector(free0),
+                         initial_stored_velocity=isnothing(stored_velocity0) ? nothing :
+                            _as_float_vector(stored_velocity0),
+                         trace_storage=isnothing(streaming_trace_directory) ?
+                            nothing : PDMPSamplers.StreamingTraceStorage(
+                                streaming_trace_directory;
+                                buffer_events=streaming_trace_buffer_events))
     return _pack_result(chains; requested_flow=flow_type,
         adaptive_scheme, initial_refresh_rate,
         warmup_adaptation_interval, t_warmup)
@@ -1562,7 +2064,9 @@ function r_pdmp_custom(
         support_boundary_clip_fraction::Float64 = 1 - 1e-10,
         support_boundary_max_refresh_attempts::Int = 20,
         support_boundary_refresh_probe_time::Float64 = 1e-4,
-        support_boundary_min_safe_time::Float64 = 1e-12
+        support_boundary_min_safe_time::Float64 = 1e-12,
+        streaming_trace_directory::Union{Nothing,String}=nothing,
+        streaming_trace_buffer_events::Int=4096
     )
 
     x0_vec = _as_float_vector(x0)
@@ -1624,7 +2128,11 @@ function r_pdmp_custom(
     chains = pdmp_sample(x0_vec, flow, model, alg, t0, T, t_warmup;
                          progress = show_progress, n_chains = n_chains, threaded = threaded,
                          seed = seed,
-                         support_boundary_options = sbopts)
+                         support_boundary_options = sbopts,
+                         trace_storage=isnothing(streaming_trace_directory) ?
+                            nothing : PDMPSamplers.StreamingTraceStorage(
+                                streaming_trace_directory;
+                                buffer_events=streaming_trace_buffer_events))
     return _pack_result(chains; requested_flow=flow_type,
         adaptive_scheme, initial_refresh_rate,
         warmup_adaptation_interval=nothing, t_warmup)

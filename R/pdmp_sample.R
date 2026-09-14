@@ -51,7 +51,8 @@ validate_pdmp_params <- function(d, flow, algorithm, T, t0 = 0.0, t_warmup = 0.0
                                 unc_names = NULL,
                                 lazy_low_tightness_threshold = 0.1,
                                 lazy_max_low_tightness_rejections = 3L,
-                                lazy_max_rejections = 0L) {
+                                lazy_max_rejections = 0L,
+                                allow_zero_adaptive_warmup = FALSE) {
 
   # Validate basic parameters
   d <- cast_integer(d, n = 1)
@@ -76,7 +77,7 @@ validate_pdmp_params <- function(d, flow, algorithm, T, t0 = 0.0, t_warmup = 0.0
   if (flow == "AdaptiveBoomerang") {
     if (!algorithm %in% grid_like_algorithms)
       cli::cli_abort("{.val AdaptiveBoomerang} requires a grid-like algorithm.")
-    if (t_warmup == 0) {
+    if (t_warmup == 0 && !isTRUE(allow_zero_adaptive_warmup)) {
       t_warmup <- (T - t0) / 5
       cli::cli_inform("Setting {.arg t_warmup} to {t_warmup} (20% of sampling time) for {.val AdaptiveBoomerang}.")
     }
@@ -86,7 +87,7 @@ validate_pdmp_params <- function(d, flow, algorithm, T, t0 = 0.0, t_warmup = 0.0
   if (flow %in% c("PreconditionedZigZag", "PreconditionedBPS")) {
     if (!algorithm %in% grid_like_algorithms)
       cli::cli_abort("{.val {flow}} requires a grid-like algorithm.")
-    if (t_warmup == 0) {
+    if (t_warmup == 0 && !isTRUE(allow_zero_adaptive_warmup)) {
       t_warmup <- (T - t0) / 5
       cli::cli_inform("Setting {.arg t_warmup} to {t_warmup} (20% of sampling time) for {.val {flow}}.")
     }
@@ -626,6 +627,9 @@ pdmp_sample <- function(f, d,
                         adaptive_scheme = c("diagonal", "fullrank"),
                         refresh_rate = 1.0,
                         materialize = TRUE,
+                        trace_storage = c("dense", "streaming"),
+                        streaming_trace_directory = NULL,
+                        streaming_trace_buffer_events = 4096L,
                         support_boundary = support_boundary_control()) {
 
   # Validate function argument (fail fast before Julia setup)
@@ -637,6 +641,26 @@ pdmp_sample <- function(f, d,
   }
 
   # Use common validation function
+  trace_storage <- match.arg(trace_storage)
+  if (identical(trace_storage, "streaming")) {
+    if (is.null(streaming_trace_directory) ||
+        !is.character(streaming_trace_directory) ||
+        length(streaming_trace_directory) != 1L ||
+        is.na(streaming_trace_directory) ||
+        !nzchar(streaming_trace_directory)) {
+      cli::cli_abort(paste0(
+        "Argument {.arg streaming_trace_directory} must be one nonempty ",
+        "path when {.arg trace_storage = \"streaming\"}."))
+    }
+    if (!rlang::is_integerish(streaming_trace_buffer_events, n = 1L,
+                              finite = TRUE) ||
+        streaming_trace_buffer_events < 1L) {
+      cli::cli_abort(paste0(
+        "Argument {.arg streaming_trace_buffer_events} must be a positive ",
+        "integer."))
+    }
+  }
+  streaming_trace_buffer_events <- as.integer(streaming_trace_buffer_events)
   params <- validate_pdmp_params(d, flow, algorithm, T, t0, t_warmup, flow_mean, flow_cov,
                                 c0, x0, theta0, show_progress,
                                 sticky, can_stick, model_prior, parameter_prior, slab_prior,
@@ -699,7 +723,11 @@ pdmp_sample <- function(f, d,
   JuliaCall::julia_assign("support_boundary_max_refresh_attempts", support_boundary$max_refresh_attempts)
   JuliaCall::julia_assign("support_boundary_refresh_probe_time", support_boundary$refresh_probe_time)
   JuliaCall::julia_assign("support_boundary_min_safe_time", support_boundary$min_safe_time)
-
+  JuliaCall::julia_assign("streaming_trace_directory",
+    if (identical(trace_storage, "streaming"))
+      normalizePath(streaming_trace_directory, mustWork = FALSE) else NULL)
+  JuliaCall::julia_assign("streaming_trace_buffer_events",
+                          streaming_trace_buffer_events)
   result <- .pdmpsamplers_julia_eval("PDMPSamplersRBridge.r_pdmp_custom(
     grad!, d, x0, flow, algorithm, flow_mean, flow_cov;
     c0 = c0, grid_n = grid_n, grid_t_max = grid_t_max,
@@ -723,7 +751,9 @@ pdmp_sample <- function(f, d,
     support_boundary_clip_fraction = support_boundary_clip_fraction,
     support_boundary_max_refresh_attempts = support_boundary_max_refresh_attempts,
     support_boundary_refresh_probe_time = support_boundary_refresh_probe_time,
-    support_boundary_min_safe_time = support_boundary_min_safe_time
+    support_boundary_min_safe_time = support_boundary_min_safe_time,
+    streaming_trace_directory = streaming_trace_directory,
+    streaming_trace_buffer_events = streaming_trace_buffer_events
   );")
   if (is.environment(result)) result <- as.list(result)
   result <- new_pdmp_result(
@@ -787,6 +817,18 @@ pdmp_sample <- function(f, d,
 #'   zero scheduled updates because it prepares a terminal anchor.
 #' @param subsampling_anchor_bank_capacity Maximum prepared OMRF anchors kept
 #'   per chain.
+#' @param subsampling_anchor_selection_policy Research anchor-bank policy.
+#'   `"adaptive"` preserves the existing event-history/envelope policy;
+#'   `"position"` selects one frozen finite bank source by weighted position;
+#'   research-only `"node_position"` selects a first-order source separately
+#'   for every node using the frozen weighted-logit Gram rule. Global
+#'   `"position"` supports linear Zig--Zag/BPS and harmonic Boomerang flows;
+#'   `"node_position"` remains available only for linear BPS flows.
+#' @param subsampling_position_anchor_bank_spec Optional version-1 mathematical
+#'   position-bank specification saved on a previous result. Restoration
+#'   rebuilds prepared provider quantities from its ordered positions and
+#'   frozen distance scales; it requires zero warmup and matching dataset,
+#'   parameter-order, and envelope/grouping identities.
 #' @param subsampling_main_anchor_refresh_distance Positive Euclidean distance
 #'   from the nearest prepared anchor that triggers a new exact OMRF anchor
 #'   during main sampling. The default `Inf` disables main-phase preparation.
@@ -803,6 +845,11 @@ pdmp_sample <- function(f, d,
 #'   adaptation attempts during warmup. `NULL` uses ten equally spaced warmup
 #'   windows (`t_warmup / 10`); zero attempts adaptation at every event. The
 #'   same interval is used by full-gradient and subsampling runs.
+#' @param boomerang_variance_floor_fraction Nonnegative opt-in research
+#'   safeguard for adaptive diagonal Boomerang flows. At every adaptation
+#'   update, named `global_scale` and `node_scale.*` coordinates retain at
+#'   least this fraction of their preadaptation variance. Zero (the default)
+#'   disables the safeguard.
 #' @param flow_specification Role of an explicitly supplied `flow_mean` or
 #'   `flow_cov`. `"initial"` permits legitimate warmup adaptation and records
 #'   every chain's retained flow. `"frozen"` requires every retained chain to
@@ -823,6 +870,8 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
                         subsampling_anchor_updates = 0L,
                         subsampling_use_anchor_bank = FALSE,
                         subsampling_anchor_bank_capacity = 8L,
+                        subsampling_anchor_selection_policy = c("adaptive", "position", "node_position"),
+                        subsampling_position_anchor_bank_spec = NULL,
                         subsampling_main_anchor_refresh_distance = Inf,
                         subsampling_node_source_check_distance = 0,
                         subsampling_require_no_main_full_data = FALSE,
@@ -833,9 +882,11 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
                                       "RootsPoissonStrategy"),
                         T = 50000, t0 = 0.0, t_warmup = 0.0,
                         warmup_adaptation_interval = NULL,
+                        boomerang_variance_floor_fraction = 0,
                         flow_mean = NULL, flow_cov = NULL, c0 = 1e-2,
                         flow_specification = c("auto", "initial", "frozen"),
-                        x0 = NULL, theta0 = NULL,
+                        x0 = NULL, theta0 = NULL, free0 = NULL,
+                        stored_velocity0 = NULL,
                         sticky = FALSE, can_stick = NULL, model_prior = NULL, parameter_prior = NULL,
                         slab_prior = NULL,
                         grid_n = 30, grid_t_max = 2.0,
@@ -854,11 +905,34 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
                         adaptive_scheme = c("diagonal", "fullrank"),
                         refresh_rate = 1.0,
                         materialize = TRUE,
+                        trace_storage = c("dense", "streaming"),
+                        streaming_trace_directory = NULL,
+                        streaming_trace_buffer_events = 4096L,
                         support_boundary = support_boundary_control()) {
 
   # Validate file paths on R side before setting up Julia
   validate_type(path_to_stanmodel, type = "character", n = 1)
   flow <- match.arg(flow)
+  trace_storage <- match.arg(trace_storage)
+  if (identical(trace_storage, "streaming")) {
+    if (is.null(streaming_trace_directory) ||
+        !is.character(streaming_trace_directory) ||
+        length(streaming_trace_directory) != 1L ||
+        is.na(streaming_trace_directory) ||
+        !nzchar(streaming_trace_directory)) {
+      cli::cli_abort(paste0(
+        "Argument {.arg streaming_trace_directory} must be one nonempty ",
+        "path when {.arg trace_storage = \"streaming\"}."))
+    }
+    if (!rlang::is_integerish(streaming_trace_buffer_events, n = 1L,
+                              finite = TRUE) ||
+        streaming_trace_buffer_events < 1L) {
+      cli::cli_abort(paste0(
+        "Argument {.arg streaming_trace_buffer_events} must be a positive ",
+        "integer."))
+    }
+  }
+  streaming_trace_buffer_events <- as.integer(streaming_trace_buffer_events)
   algorithm <- match.arg(algorithm)
   adaptive_scheme <- match.arg(adaptive_scheme)
   flow_specification <- match.arg(flow_specification)
@@ -878,6 +952,16 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
     }
     warmup_adaptation_interval <- as.numeric(warmup_adaptation_interval)
   }
+  if (!is.numeric(boomerang_variance_floor_fraction) ||
+      length(boomerang_variance_floor_fraction) != 1L ||
+      !is.finite(boomerang_variance_floor_fraction) ||
+      boomerang_variance_floor_fraction < 0) {
+    cli::cli_abort(paste0(
+      "Argument {.arg boomerang_variance_floor_fraction} must be a finite ",
+      "nonnegative number."))
+  }
+  boomerang_variance_floor_fraction <-
+    as.numeric(boomerang_variance_floor_fraction)
   if (!rlang::is_integerish(n_chains, n = 1L, finite = TRUE) || n_chains < 1L) {
     cli::cli_abort("Argument {.arg n_chains} must be a positive integer.")
   }
@@ -932,6 +1016,38 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
   }
   subsampling_anchor_updates <- as.integer(subsampling_anchor_updates)
   subsampling_anchor_bank_capacity <- as.integer(subsampling_anchor_bank_capacity)
+  subsampling_anchor_selection_policy <- match.arg(
+    subsampling_anchor_selection_policy)
+  if (subsampling_anchor_selection_policy %in% c("position", "node_position") &&
+      !isTRUE(subsampling_use_anchor_bank)) {
+    cli::cli_abort(paste0(
+      "Argument {.arg subsampling_anchor_selection_policy = \"position\"} ",
+      "requires {.arg subsampling_use_anchor_bank = TRUE}."))
+  }
+  resolved_flow <- match.arg(flow)
+  if (identical(subsampling_anchor_selection_policy, "position") &&
+      !resolved_flow %in% c("ZigZag", "PreconditionedZigZag",
+        "BouncyParticle", "PreconditionedBPS", "Boomerang",
+        "AdaptiveBoomerang")) {
+    cli::cli_abort(paste0(
+      "Argument {.arg subsampling_anchor_selection_policy = \"position\"} ",
+      "requires linear Zig--Zag/BPS or harmonic Boomerang dynamics."))
+  }
+  if (identical(subsampling_anchor_selection_policy, "node_position") &&
+      !resolved_flow %in% c("BouncyParticle", "PreconditionedBPS")) {
+    cli::cli_abort(paste0(
+      "Argument {.arg subsampling_anchor_selection_policy = \"node_position\"} ",
+      "is available only for linear BPS flows."))
+  }
+  if (!is.null(subsampling_position_anchor_bank_spec) &&
+      !(subsampling_anchor_selection_policy %in% c("position", "node_position"))) {
+    cli::cli_abort(paste0(
+      "Argument {.arg subsampling_position_anchor_bank_spec} requires ",
+      "{.arg subsampling_anchor_selection_policy = \"position\"}."))
+  }
+  if (!is.null(subsampling_position_anchor_bank_spec) && t_warmup > 0) {
+    cli::cli_abort("A restored position anchor bank requires {.arg t_warmup = 0}.")
+  }
   if (!is.numeric(subsampling_main_anchor_refresh_distance) ||
       length(subsampling_main_anchor_refresh_distance) != 1L ||
       is.na(subsampling_main_anchor_refresh_distance) ||
@@ -970,7 +1086,8 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
       "TRUE or FALSE."))
   }
   if (isTRUE(subsampling_use_anchor_bank) && subsampling_anchor_updates == 0L &&
-      subsampling_warmup != "full") {
+      subsampling_warmup != "full" &&
+      is.null(subsampling_position_anchor_bank_spec)) {
     cli::cli_abort(paste0(
       "Argument {.arg subsampling_use_anchor_bank = TRUE} requires positive ",
       "{.arg subsampling_anchor_updates}, unless {.arg subsampling_warmup = \"full\"} ",
@@ -1232,7 +1349,22 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
                                  unc_names = unc_names,
                                  lazy_low_tightness_threshold = lazy_low_tightness_threshold,
                                  lazy_max_low_tightness_rejections = lazy_max_low_tightness_rejections,
-                                 lazy_max_rejections = lazy_max_rejections)
+                                 lazy_max_rejections = lazy_max_rejections,
+                                 allow_zero_adaptive_warmup =
+                                   !is.null(subsampling_position_anchor_bank_spec))
+  if (!is.null(free0)) {
+    if (!isTRUE(sticky) || length(free0) != d || anyNA(free0))
+      cli::cli_abort("{.arg free0} must be a complete logical sticky-state mask of length {d}.")
+    free0 <- as.logical(free0)
+  }
+  if (!is.null(stored_velocity0)) {
+    if (!isTRUE(sticky) || length(stored_velocity0) != d ||
+        any(!is.finite(stored_velocity0)))
+      cli::cli_abort("{.arg stored_velocity0} must be a finite sticky-state vector of length {d}.")
+    stored_velocity0 <- as.numeric(stored_velocity0)
+  }
+  if (xor(is.null(free0), is.null(stored_velocity0)))
+    cli::cli_abort("{.arg free0} and {.arg stored_velocity0} must be supplied together for continuation.")
 
   if (!is.null(subsampling) && isTRUE(params$threaded) && params$n_chains > 1L) {
     cli::cli_warn(c(
@@ -1258,6 +1390,62 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
     value <- as.matrix(value)
     flow_hash(list(dimensions = as.integer(dim(value)),
                    values = signif(as.numeric(value), 12L)))
+  }
+  dataset_identity_hash <- function(value) {
+    if (is.character(value) && length(value) == 1L && file.exists(value)) {
+      size <- file.info(value)$size
+      con <- file(value, open = "rb")
+      on.exit(close(con), add = TRUE)
+      return(flow_hash(readBin(con, what = "raw", n = size)))
+    }
+    flow_hash(value)
+  }
+  if (!is.null(subsampling_position_anchor_bank_spec)) {
+    specs_to_check <- if (!is.null(subsampling_position_anchor_bank_spec$version))
+      list(subsampling_position_anchor_bank_spec) else
+      subsampling_position_anchor_bank_spec
+    dataset_hash <- dataset_identity_hash(standata)
+    # The categorical residual cap changes only retained thinning roofs; it
+    # does not change bank positions, grouping, metric, or preparation.  Keep
+    # it outside the mathematical bank identity so a frozen bank can be used
+    # in the declared before/after certificate intervention.
+    bank_envelope_spec <- subsampling$residual_envelope
+    bank_envelope_spec$categorical_residual_cap <- NULL
+    envelope_hash <- flow_hash(bank_envelope_spec)
+    for (spec in specs_to_check) {
+      if (!identical(as.integer(spec$version), 1L) ||
+          !identical(spec$selection_policy, subsampling_anchor_selection_policy) ||
+          !identical(spec$tie_policy, "lowest_index_outgoing")) {
+        cli::cli_abort("Unsupported position anchor bank specification.")
+      }
+      if (identical(spec$selection_policy, "node_position") &&
+          (!identical(as.integer(spec$policy_version), 1L) ||
+           is.null(spec$physical_velocity_variances) ||
+           is.null(spec$node_support_order))) {
+        cli::cli_abort("Incomplete node-position mathematical bank specification.")
+      }
+      if (!identical(spec$dataset_identity$hash, dataset_hash) ||
+          !identical(spec$envelope_identity$hash, envelope_hash) ||
+          !identical(as.character(spec$parameter_order), as.character(unc_names))) {
+        cli::cli_abort(paste0(
+          "The restored position anchor bank does not match the dataset, ",
+          "parameter order, or immutable envelope/grouping specification."))
+      }
+      if (!is.null(spec$frozen_flow)) {
+        same_bank_mean <- isTRUE(all.equal(
+          as.numeric(spec$frozen_flow$mean), as.numeric(params$flow_mean),
+          tolerance = 1e-12, check.attributes = FALSE))
+        same_bank_covariance <- isTRUE(all.equal(
+          as.matrix(spec$frozen_flow$covariance),
+          as.matrix(params$flow_cov), tolerance = 1e-12,
+          check.attributes = FALSE))
+        if (!same_bank_mean || !same_bank_covariance) {
+          cli::cli_abort(paste0(
+            "The restored position anchor bank was prepared under a ",
+            "different frozen flow mean or covariance."))
+        }
+      }
+    }
   }
   requested_flow_provenance <- NULL
   if (verify_flow_specification) {
@@ -1297,10 +1485,16 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
   for (nm in names(params))
     JuliaCall::julia_assign(nm, params[[nm]])
   JuliaCall::julia_assign("_unc_names", unc_names)
+  JuliaCall::julia_assign("free0", free0)
+  JuliaCall::julia_assign("stored_velocity0", stored_velocity0)
   JuliaCall::julia_assign("subsampling_anchor_updates", subsampling_anchor_updates)
   JuliaCall::julia_assign("subsampling_warmup", subsampling_warmup)
   JuliaCall::julia_assign("subsampling_use_anchor_bank", subsampling_use_anchor_bank)
   JuliaCall::julia_assign("subsampling_anchor_bank_capacity", subsampling_anchor_bank_capacity)
+  JuliaCall::julia_assign("subsampling_anchor_selection_policy",
+                          subsampling_anchor_selection_policy)
+  JuliaCall::julia_assign("subsampling_position_anchor_bank_spec",
+                          subsampling_position_anchor_bank_spec)
   JuliaCall::julia_assign("subsampling_main_anchor_refresh_distance",
                           subsampling_main_anchor_refresh_distance)
   JuliaCall::julia_assign("subsampling_node_source_check_distance",
@@ -1311,6 +1505,8 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
                           subsampling_diagnostic_window)
   JuliaCall::julia_assign("warmup_adaptation_interval",
                           warmup_adaptation_interval)
+  JuliaCall::julia_assign("boomerang_variance_floor_fraction",
+                          boomerang_variance_floor_fraction)
   JuliaCall::julia_assign("refresh_rate", as.numeric(refresh_rate))
   JuliaCall::julia_assign("support_boundary_mode", support_boundary$mode)
   JuliaCall::julia_assign("support_boundary_max_bisection_steps", support_boundary$max_bisection_steps)
@@ -1320,11 +1516,17 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
   JuliaCall::julia_assign("support_boundary_max_refresh_attempts", support_boundary$max_refresh_attempts)
   JuliaCall::julia_assign("support_boundary_refresh_probe_time", support_boundary$refresh_probe_time)
   JuliaCall::julia_assign("support_boundary_min_safe_time", support_boundary$min_safe_time)
+  JuliaCall::julia_assign("streaming_trace_directory",
+    if (identical(trace_storage, "streaming"))
+      normalizePath(streaming_trace_directory, mustWork = FALSE) else NULL)
+  JuliaCall::julia_assign("streaming_trace_buffer_events",
+                          streaming_trace_buffer_events)
 
   if (is.null(subsampling)) {
     result <- .pdmpsamplers_julia_eval("PDMPSamplersRBridge.r_pdmp_stan(
       _pdmp_model, x0, flow, algorithm, flow_mean, flow_cov;
       theta0 = theta0,
+      free0 = free0, stored_velocity0 = stored_velocity0,
       c0 = c0, grid_n = grid_n, grid_t_max = grid_t_max,
       use_fd_hvp = _curvature_backend == \"finite_difference\",
       curvature_backend = _curvature_backend,
@@ -1338,6 +1540,7 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
       lazy_max_rejections = lazy_max_rejections,
       t0 = t0, T = T, t_warmup = t_warmup,
       warmup_adaptation_interval = warmup_adaptation_interval,
+      boomerang_variance_floor_fraction = boomerang_variance_floor_fraction,
       sticky = sticky, can_stick = can_stick,
       model_prior = model_prior, parameter_prior = parameter_prior,
       slab_prior = slab_prior,
@@ -1353,13 +1556,16 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
       support_boundary_clip_fraction = support_boundary_clip_fraction,
       support_boundary_max_refresh_attempts = support_boundary_max_refresh_attempts,
       support_boundary_refresh_probe_time = support_boundary_refresh_probe_time,
-      support_boundary_min_safe_time = support_boundary_min_safe_time
+      support_boundary_min_safe_time = support_boundary_min_safe_time,
+      streaming_trace_directory = streaming_trace_directory,
+      streaming_trace_buffer_events = streaming_trace_buffer_events
     );")
   } else {
     result <- .pdmpsamplers_julia_eval("PDMPSamplersRBridge.r_pdmp_stan_subsampling(
       _prepared_stan_subsampling, _subsampling, x0, flow, algorithm,
       flow_mean, flow_cov;
       theta0 = theta0,
+      free0 = free0, stored_velocity0 = stored_velocity0,
       c0 = c0, grid_n = grid_n, grid_t_max = grid_t_max,
       use_fd_hvp = _curvature_backend == \"finite_difference\",
       curvature_backend = _curvature_backend,
@@ -1373,6 +1579,7 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
       lazy_max_rejections = lazy_max_rejections,
       t0 = t0, T = T, t_warmup = t_warmup,
       warmup_adaptation_interval = warmup_adaptation_interval,
+      boomerang_variance_floor_fraction = boomerang_variance_floor_fraction,
       sticky = sticky, can_stick = can_stick,
       model_prior = model_prior, parameter_prior = parameter_prior,
       slab_prior = slab_prior,
@@ -1384,6 +1591,8 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
       n_anchor_updates = subsampling_anchor_updates,
       use_anchor_bank = subsampling_use_anchor_bank,
       anchor_bank_capacity = subsampling_anchor_bank_capacity,
+      anchor_selection_policy = subsampling_anchor_selection_policy,
+      position_anchor_bank_spec = subsampling_position_anchor_bank_spec,
       main_anchor_refresh_distance = subsampling_main_anchor_refresh_distance,
       node_source_check_distance = subsampling_node_source_check_distance,
       require_no_main_full_data = subsampling_require_no_main_full_data,
@@ -1395,7 +1604,9 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
       support_boundary_clip_fraction = support_boundary_clip_fraction,
       support_boundary_max_refresh_attempts = support_boundary_max_refresh_attempts,
       support_boundary_refresh_probe_time = support_boundary_refresh_probe_time,
-      support_boundary_min_safe_time = support_boundary_min_safe_time
+      support_boundary_min_safe_time = support_boundary_min_safe_time,
+      streaming_trace_directory = streaming_trace_directory,
+      streaming_trace_buffer_events = streaming_trace_buffer_events
     );")
   }
   backend_provenance <- if (!is.null(full_gradient)) {
@@ -1475,5 +1686,65 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
     attr(result, "omrf_candidate_records") <- candidate_records
   }
   if (materialize) result <- .materialize(result)
+  if (!is.null(subsampling) &&
+      subsampling_anchor_selection_policy %in% c("position", "node_position")) {
+    dataset_hash <- dataset_identity_hash(standata)
+    bank_envelope_spec <- subsampling$residual_envelope
+    bank_envelope_spec$categorical_residual_cap <- NULL
+    envelope_hash <- flow_hash(bank_envelope_spec)
+    node_support_order <- function(envelope, parameter_order) {
+      seen <- as.integer(envelope$seen)
+      P <- length(seen)
+      thresholds <- grep(paste0("^", envelope$thresholds, "\\."),
+        parameter_order)
+      interactions <- grep(paste0("^", envelope$interactions, "\\."),
+        parameter_order)
+      starts <- cumsum(c(1L, head(seen - 1L, -1L)))
+      incident <- vector("list", P)
+      edge <- 0L
+      if (P > 1L) for (left in seq_len(P - 1L))
+        for (right in (left + 1L):P) {
+          edge <- edge + 1L
+          incident[[left]] <- c(incident[[left]], interactions[[edge]])
+          incident[[right]] <- c(incident[[right]], interactions[[edge]])
+        }
+      lapply(seq_len(P), function(node) c(
+        thresholds[seq.int(starts[[node]], length.out = seen[[node]] - 1L)],
+        incident[[node]]))
+    }
+    bank_specs <- lapply(seq_len(params$n_chains), function(chain) {
+      counters <- subsampling_context_counters[[chain]]
+      endpoint <- if (!is.null(result$terminal_states))
+        result$terminal_states[[chain]] else NULL
+      spec <- list(
+        version = 1L,
+        ordered_anchor_positions = unname(as.matrix(counters$anchor_positions)),
+        distance_scales = as.numeric(counters$anchor_distance_scales),
+        selection_policy = "position",
+        tie_policy = "lowest_index_outgoing",
+        requested_capacity = as.integer(counters$anchor_bank_requested_capacity),
+        parameter_order = as.character(unc_names),
+        dataset_identity = list(hash = dataset_hash),
+        envelope_identity = list(hash = envelope_hash),
+        immutable_envelope_grouping_spec = subsampling$residual_envelope,
+        physical_endpoint = endpoint,
+        frozen_flow = if (is.null(endpoint)) NULL else endpoint$flow
+      )
+      if (identical(subsampling_anchor_selection_policy, "node_position")) {
+        spec$selection_policy <- "node_position"
+        spec$physical_velocity_variances <-
+          as.numeric(counters$node_position_metric_variances)
+        spec$node_support_order <- node_support_order(
+          subsampling$residual_envelope, unc_names)
+        spec$selected_sources <-
+          as.integer(counters$node_position_sources)
+        spec$policy_version <-
+          as.integer(counters$node_position_policy_version)
+      }
+      spec
+    })
+    attr(result, "position_anchor_bank_spec") <- if (length(bank_specs) == 1L)
+      bank_specs[[1L]] else bank_specs
+  }
   result
 }

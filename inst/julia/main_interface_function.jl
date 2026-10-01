@@ -772,6 +772,21 @@ function _flow_provenance(chains::PDMPChains, requested_flow::String,
     )
 end
 
+# Streaming storage for the bridge. Online retained-phase summaries are opt-in
+# through the environment, so research runners need no new arguments:
+# PDMPSAMPLERS_ONLINE_BATCHES (0 = off), PDMPSAMPLERS_ONLINE_GRID_SPACING
+# (physical time; NaN = no snapshots) and PDMPSAMPLERS_STREAM_EVENTS ("0" =
+# write no retained-phase event chunks). `T` is the absolute end time.
+function _bridge_trace_storage(directory, buffer_events, T)
+    batches = parse(Int, get(ENV, "PDMPSAMPLERS_ONLINE_BATCHES", "0"))
+    return PDMPSamplers.StreamingTraceStorage(directory; buffer_events,
+        write_events=get(ENV, "PDMPSAMPLERS_STREAM_EVENTS", "1") != "0",
+        online_batches=batches,
+        online_end_time=batches > 0 ? Float64(T) : NaN,
+        online_grid_spacing=parse(Float64,
+            get(ENV, "PDMPSAMPLERS_ONLINE_GRID_SPACING", "NaN")))
+end
+
 function _pack_result(chains::PDMPChains; requested_flow::String="",
         adaptive_scheme::String="none", initial_refresh_rate::Float64=NaN,
         warmup_adaptation_interval::Union{Nothing,Float64}=nothing,
@@ -1947,6 +1962,7 @@ function r_pdmp_stan(
         streaming_trace_buffer_events::Int=4096
     )
 
+    bridge_profile_start_ns = time_ns()
     d = model.d
     x0_vec = _as_float_vector(x0)
     flow_mean_vec = _as_flow_mean(flow_mean, d)
@@ -2007,6 +2023,7 @@ function r_pdmp_stan(
         can_stick=sticky ? can_stick_vec : nothing,
         boomerang_options=boom_options,
         boomerang_variance_floor_mask=boom_floor_mask)
+    bridge_profile_before_sample_ns = time_ns()
     chains = pdmp_sample(initial, flow, sampling_model, alg, t0, T, t_warmup;
                          progress = show_progress, n_chains = n_chains, threaded = threaded,
                          seed = seed,
@@ -2018,12 +2035,22 @@ function r_pdmp_stan(
                          initial_stored_velocity=isnothing(stored_velocity0) ? nothing :
                             _as_float_vector(stored_velocity0),
                          trace_storage=isnothing(streaming_trace_directory) ?
-                            nothing : PDMPSamplers.StreamingTraceStorage(
-                                streaming_trace_directory;
-                                buffer_events=streaming_trace_buffer_events))
-    return _pack_result(chains; requested_flow=flow_type,
+                            nothing : _bridge_trace_storage(streaming_trace_directory,
+                                streaming_trace_buffer_events, T))
+    bridge_profile_after_sample_ns = time_ns()
+    packed = _pack_result(chains; requested_flow=flow_type,
         adaptive_scheme, initial_refresh_rate,
         warmup_adaptation_interval, t_warmup)
+    if get(ENV, "OMRF_PROFILE_EXCLUSIVE", "") == "1"
+        packed["bridge_profile"] = Dict(
+            "julia_construction_seconds" =>
+                (bridge_profile_before_sample_ns - bridge_profile_start_ns) / 1e9,
+            "julia_sample_seconds" =>
+                (bridge_profile_after_sample_ns - bridge_profile_before_sample_ns) / 1e9,
+            "julia_pack_and_counters_seconds" =>
+                (time_ns() - bridge_profile_after_sample_ns) / 1e9)
+    end
+    return packed
 end
 
 function r_pdmp_custom(
@@ -2130,9 +2157,8 @@ function r_pdmp_custom(
                          seed = seed,
                          support_boundary_options = sbopts,
                          trace_storage=isnothing(streaming_trace_directory) ?
-                            nothing : PDMPSamplers.StreamingTraceStorage(
-                                streaming_trace_directory;
-                                buffer_events=streaming_trace_buffer_events))
+                            nothing : _bridge_trace_storage(streaming_trace_directory,
+                                streaming_trace_buffer_events, T))
     return _pack_result(chains; requested_flow=flow_type,
         adaptive_scheme, initial_refresh_rate,
         warmup_adaptation_interval=nothing, t_warmup)

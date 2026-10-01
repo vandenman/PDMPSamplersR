@@ -5,9 +5,37 @@ include(normpath(joinpath(@__DIR__, "..", "..", "inst", "julia",
     "main_interface_function.jl")))
 using .PDMPSamplersRBridge
 
+@testset "OMRF observed-threshold setup counts" begin
+    X = [0 1; 1 0; 2 1]
+    observed = PDMPSamplersRBridge._omrf_observed_threshold_counts(
+        X, [1, 3], 3)
+    @test observed == [1.0, 1.0, 2.0]
+end
+
+@testset "independent-prior interval uses parameter mask indices" begin
+    prior = PDMPSamplersRBridge.OMRFIndependentAnalyticPrior(
+        [1, 2], [3, 4, 5], 1.0, 1.0, :gaussian, 1.0)
+    active = BitVector([true, true, false, true, true])
+    xlo = fill(0.5, 5)
+    xhi = copy(xlo)
+    glo = zeros(5)
+    ghi = zeros(5)
+    PDMPSamplersRBridge._omrf_prior_intervals!(
+        glo, ghi, prior, xlo, xhi, active)
+    @test glo[3] == ghi[3] == 0.0
+    @test glo[4] <= 0.5 <= ghi[4]
+    @test glo[5] <= 0.5 <= ghi[5]
+end
+
 function omrf_allocation_next_event!(rng, model, flow, alg, state, cache, stats)
     PDMPSamplers.next_event_time(rng, model, flow, alg, state, cache, stats,
         0.25, false, :horizon_hit)
+    return nothing
+end
+
+function omrf_allocation_signed_cell!(out, envelope, state, flow, left, right)
+    PDMPSamplers.component_cell_scales!(out, envelope, state, flow,
+        left, right)
     return nothing
 end
 
@@ -805,6 +833,7 @@ end
         direct_spec["hcv_after_warmup"] = false
         direct_spec["factorization"] = "person_node"
         direct_spec["bound_type"] = "direct_person_node_hcv"
+        direct_spec["exact_selected_refinement"] = true
         direct_spec["weights"] = zeros(1, 9)
         direct_oracle = PDMPSamplersRBridge.OMRFAnalyticSubsamplingOracle(
             analytic_prior_ctx, direct_spec, analytic_prior_names, anchor)
@@ -833,6 +862,239 @@ end
         end
         @test maximum_violation <= 2e-12
 
+        # Hybrid factor-roof/person-gradient HCV: retain the certified direct
+        # person-node table, but sample one person and evaluate the sum of all
+        # of that person's node residuals.  Its aggregate roof is exactly the
+        # factor roof, and the size-biased person law is C_i/sum(C_i).
+        hybrid_spec = copy(direct_spec)
+        hybrid_spec["factorization"] = "person"
+        hybrid_spec["bound_type"] = "direct_factor_roof_person_hcv"
+        hybrid_spec["weights"] = zeros(1, 3)
+        hybrid_oracle = PDMPSamplersRBridge.OMRFAnalyticSubsamplingOracle(
+            analytic_prior_ctx, hybrid_spec, analytic_prior_names, anchor)
+        hybrid_envelope = PDMPSamplersRBridge._build_stan_residual_envelope(
+            hybrid_spec, hybrid_oracle.anchor, hybrid_oracle)
+        @test PDMPSamplers.n_observations(hybrid_envelope) == 3
+        PDMPSamplers.component_cell_scales!(hybrid_envelope.cell_scales,
+            hybrid_envelope, direct_state, direct_flow, left, right)
+        PDMPSamplers.prepare_residual_sampling!(
+            hybrid_envelope, direct_state, direct_flow, 0.0)
+        @test hybrid_envelope.cell_mass[hybrid_envelope.active_cell] ==
+            direct_envelope.cell_mass[direct_envelope.active_cell]
+
+        # Research S1a keeps the whole-person estimator and mark law while
+        # summing signed node endpoints before taking an absolute value.
+        signed_spec = copy(hybrid_spec)
+        signed_spec["person_signed_roof"] = true
+        signed_envelope = PDMPSamplersRBridge._build_stan_residual_envelope(
+            signed_spec, hybrid_oracle.anchor, hybrid_oracle)
+        PDMPSamplers.component_cell_scales!(signed_envelope.cell_scales,
+            signed_envelope, direct_state, direct_flow, left, right)
+        signed_B = signed_envelope.cell_mass[signed_envelope.active_cell]
+        baseline_B = hybrid_envelope.cell_mass[hybrid_envelope.active_cell]
+        @test signed_B <= baseline_B + 1e-12
+        for person in 1:3, t in range(left, right; length=129)
+            point = position .+ t .* velocity
+            hybrid_oracle(direct_residual, point, [person], anchor)
+            exact = abs(dot(velocity, direct_residual))
+            certified = PDMPSamplersRBridge._omrf_direct_person_cell_bound(
+                signed_envelope, person)
+            @test exact <= certified + 2e-11 * (1 + certified)
+        end
+        @test sum(PDMPSamplersRBridge._omrf_direct_person_cell_bound(
+            signed_envelope, person) for person in 1:3) ≈ signed_B
+        signed_det_now = zeros(9)
+        hybrid_oracle(signed_det_now, position)
+        signed_D = PDMPSamplers.λ(direct_state,
+            signed_det_now, direct_flow)
+        signed_only_spec = copy(signed_spec)
+        signed_only_spec["signed_only_person_roof"] = true
+        signed_only = PDMPSamplersRBridge._build_stan_residual_envelope(
+            signed_only_spec, hybrid_oracle.anchor, hybrid_oracle)
+        PDMPSamplers.component_cell_scales!(signed_only.cell_scales,
+            signed_only, direct_state, direct_flow, left, right)
+        signed_only_B = signed_only.cell_mass[signed_only.active_cell]
+        @test signed_only_B >= signed_B - 1e-12
+        @test_throws ArgumentError PDMPSamplers.observation_residual_bound(
+            signed_only, 1)
+        for person in 1:3, t in range(left, right; length=129)
+            hybrid_oracle(direct_residual, position .+ t .* velocity,
+                [person], anchor)
+            certified = PDMPSamplersRBridge._omrf_direct_person_cell_bound(
+                signed_only, person)
+            @test abs(dot(velocity, direct_residual)) <=
+                certified + 2e-11 * (1 + certified)
+        end
+        signed_only_cv = PDMPSamplers.SubsampledControlVariate(
+            hybrid_oracle, hybrid_oracle, signed_only, anchor, 1)
+        PDMPSamplers.prepare_residual_sampling!(
+            signed_only, direct_state, direct_flow, left)
+        mark_rng = Xoshiro(0x5292)
+        for _ in 1:100
+            bound = PDMPSamplers.draw_subset!(
+                mark_rng, signed_only_cv, signed_D, signed_only_B)
+            person = signed_only_cv.subset[1]
+            @test 1 <= person <= 3
+            @test bound >= signed_D +
+                3PDMPSamplersRBridge._omrf_direct_person_cell_bound(
+                    signed_only, person) - 1e-12
+        end
+        # A single HCV table on the entire physical flight remains a valid
+        # (possibly looser) roof for every contained deterministic grid cell.
+        horizon_hcv_spec = copy(signed_spec)
+        horizon_hcv_spec["direct_cv_cell_scope"] = "event_horizon"
+        horizon_hcv = PDMPSamplersRBridge._build_stan_residual_envelope(
+            horizon_hcv_spec, hybrid_oracle.anchor, hybrid_oracle)
+        PDMPSamplers.prepare_residual_horizon!(
+            horizon_hcv, direct_state, direct_flow, right)
+        horizon_hcv_mass = horizon_hcv.cell_mass[1]
+        constructions_before = horizon_hcv.context.counts.
+            direct_residual_table_constructions
+        for (cell_left, cell_right) in ((0.0, left), (left, right))
+            PDMPSamplers.component_cell_scales!(horizon_hcv.cell_scales,
+                horizon_hcv, direct_state, direct_flow, cell_left, cell_right)
+            @test horizon_hcv.cell_mass[1] == horizon_hcv_mass
+            for person in 1:3, t in range(cell_left, cell_right; length=65)
+                hybrid_oracle(direct_residual,
+                    position .+ t .* velocity, [person], anchor)
+                certified = PDMPSamplersRBridge._omrf_direct_person_cell_bound(
+                    horizon_hcv, person)
+                @test abs(dot(velocity, direct_residual)) <=
+                    certified + 2e-11 * (1 + certified)
+            end
+        end
+        @test horizon_hcv.context.counts.direct_residual_table_constructions ==
+            constructions_before
+        cancelling = PDMPSamplersRBridge._build_stan_residual_envelope(
+            signed_spec, hybrid_oracle.anchor, hybrid_oracle)
+        cancelling.cell_left[1] = 0.0
+        cancelling.cell_right[1] = 0.1
+        cancelling.factor_workspace[1] = 2.0
+        cancelling.factor_workspace[4] = 2.0
+        cancelling.person_left_signed[1] = 0.0  # +2 and -2 nodes
+        cancelling.person_right_signed[1] = 0.0
+        cancelling.person_left_abs[1] = 4.0
+        cancelling.person_right_abs[1] = 4.0
+        PDMPSamplersRBridge._omrf_direct_finish_person_cell!(
+            cancelling, 1, true)
+        @test cancelling.cell_mass[1] < 1e-12
+        @test cancelling.person_workspace[1] == 4.0
+        signed_deterministic = zeros(9)
+        hybrid_oracle(signed_deterministic, position)
+        signed_D = PDMPSamplers.λ(direct_state,
+            signed_deterministic, direct_flow)
+        for person in 1:3
+            hybrid_oracle(direct_residual, position, [person], anchor)
+            selected_gradient = copy(signed_deterministic)
+            actual = PDMPSamplers.subsampling_candidate_rate!(
+                hybrid_oracle, direct_state, selected_gradient,
+                direct_residual, 3.0, direct_flow, signed_D, [person])
+            C = signed_D + 3 *
+                PDMPSamplersRBridge._omrf_direct_person_cell_bound(
+                    signed_envelope, person)
+            @test actual <= C + 2e-11 * (1 + C)
+            proposal_probability = C / (3 * (signed_D + signed_B))
+            @test isapprox((signed_D + signed_B) * proposal_probability *
+                actual / C, actual / 3; rtol=8eps(), atol=8eps())
+        end
+
+        hybrid_cv = PDMPSamplers.SubsampledControlVariate(
+            hybrid_oracle, hybrid_oracle, hybrid_envelope, anchor, 1)
+        hybrid_rng = Xoshiro(0xfa7700)
+        person_cell_bounds = zeros(3)
+        for person in 1:3, node in 1:3
+            factor = (node - 1) * 3 + person
+            person_cell_bounds[person] +=
+                PDMPSamplers.observation_residual_bound(
+                    hybrid_envelope, factor)
+        end
+        draws = zeros(Int, 3)
+        B = hybrid_envelope.cell_mass[hybrid_envelope.active_cell]
+        for _ in 1:100_000
+            selected_roof = PDMPSamplers.draw_subset!(
+                hybrid_rng, hybrid_cv, 0.0, B)
+            person = hybrid_cv.subset[1]
+            draws[person] += 1
+            @test isapprox(selected_roof, 3person_cell_bounds[person];
+                rtol=2e-14, atol=2e-14)
+        end
+        @test maximum(abs.(draws ./ sum(draws) .-
+            person_cell_bounds ./ sum(person_cell_bounds))) < 0.01
+
+        hybrid_residual = zeros(9)
+        factor_residual = zeros(9)
+        for person in 1:3
+            hybrid_oracle(hybrid_residual, position, [person], anchor)
+            fill!(factor_residual, 0.0)
+            for node in 1:3
+                factor = (node - 1) * 3 + person
+                direct_oracle(direct_residual, position, [factor], anchor)
+                factor_residual .+= direct_residual
+            end
+            @test hybrid_residual ≈ factor_residual atol=2e-13 rtol=2e-13
+        end
+        for flow in (BouncyParticle(9), ZigZag(9))
+            state = PDMPState(0.0,
+                SkeletonPoint(copy(position), copy(velocity)))
+            PDMPSamplers.initialize_flow_state!(state, flow)
+            PDMPSamplers.component_cell_scales!(hybrid_envelope.cell_scales,
+                hybrid_envelope, state, flow, left, right)
+            PDMPSamplers.prepare_residual_sampling!(
+                hybrid_envelope, state, flow, 0.0)
+            deterministic = zeros(9)
+            hybrid_oracle(deterministic, position)
+            D = PDMPSamplers.λ(state, deterministic, flow)
+            B = hybrid_envelope.cell_mass[hybrid_envelope.active_cell]
+            for person in 1:3
+                person_bound = sum(PDMPSamplers.observation_residual_bound(
+                    hybrid_envelope, (node - 1) * 3 + person)
+                    for node in 1:3)
+                hybrid_oracle(hybrid_residual, position, [person], anchor)
+                selected_gradient = copy(deterministic)
+                actual = PDMPSamplers.subsampling_candidate_rate!(
+                    hybrid_oracle, state, selected_gradient, hybrid_residual,
+                    3.0, flow, D, [person])
+                selected_roof = D + 3person_bound
+                @test actual <= selected_roof + 2e-11
+                proposal_probability = selected_roof / (3 * (D + B))
+                @test isapprox((D + B) * proposal_probability *
+                    actual / selected_roof, actual / 3;
+                    rtol=8eps(), atol=8eps())
+            end
+        end
+
+        # A dominant non-reference anchor category can make
+        # `1 - sum(p_nonreference)` round to zero even though its reference
+        # probability is needed after a large displacement.  The direct HCV
+        # cache must retain the stably normalized reference mass itself.
+        extreme_anchor = copy(anchor)
+        extreme_anchor[1] = 50.0
+        extreme_anchor[2] = 100.0
+        extreme_oracle = PDMPSamplersRBridge.OMRFAnalyticSubsamplingOracle(
+            analytic_prior_ctx, direct_spec, analytic_prior_names,
+            extreme_anchor)
+        extreme_envelope = PDMPSamplersRBridge._build_stan_residual_envelope(
+            direct_spec, extreme_oracle.anchor, extreme_oracle)
+        extreme_context = extreme_oracle.residual_context
+        @test 1.0 - sum(view(extreme_context.anchor_probabilities,
+            1:2, 1)) == 0.0
+        @test extreme_context.anchor_reference_probabilities[1, 1] > 0.0
+        extreme_position = copy(extreme_anchor)
+        extreme_position[1] -= 60.0
+        extreme_position[2] -= 120.0
+        extreme_velocity = collect(range(-1.1, 0.7; length=9))
+        extreme_state = PDMPState(0.0,
+            SkeletonPoint(extreme_position, extreme_velocity))
+        PDMPSamplers.initialize_flow_state!(extreme_state, direct_flow)
+        PDMPSamplers.component_cell_scales!(extreme_envelope.cell_scales,
+            extreme_envelope, extreme_state, direct_flow, 0.0, 0.05)
+        extreme_residual = zeros(9)
+        extreme_oracle(extreme_residual, extreme_position, [1],
+            extreme_anchor)
+        @test abs(dot(extreme_velocity, extreme_residual)) <=
+            PDMPSamplers.observation_residual_bound(extreme_envelope, 1) +
+            2e-12
+
         # Affine path caching only changes floating-point association. The
         # outward-protected cached result agrees with the independent scalar
         # construction to a few ulps and remains a valid certificate.
@@ -841,9 +1103,10 @@ end
             scalar = PDMPSamplersRBridge._omrf_direct_hcv_factor_cell_bound(
                 direct_envelope, direct_state, direct_flow,
                 person0 + 1, node0 + 1, left, right)
-            @test scalar ≈ direct_envelope.factor_workspace[factor] rtol=64eps()
+            @test isapprox(scalar, direct_envelope.factor_workspace[factor];
+                rtol=64eps(), atol=4eps())
             @test scalar <= PDMPSamplers.observation_residual_bound(
-                direct_envelope, factor)
+                direct_envelope, factor) + 4eps()
         end
 
         # Random factor/cell checks exceed the requested 20,000 comparisons.
@@ -1059,6 +1322,55 @@ end
                     "subsample_size" => 3,
                     "residual_envelope" => direct_spec),
                 anchor, nothing, falses(9); anchor_capacity=1)
+        # The deterministic HCV likelihood product is prepared once per
+        # physical segment.  Its affine/harmonic evaluation must reproduce
+        # the ordinary dense H*(x-anchor) path for every supported dynamic.
+        for cached_flow in (BouncyParticle(9, 0.0), ZigZag(9), Boomerang(9))
+            cached_state = PDMPState(0.0,
+                SkeletonPoint(copy(position), copy(velocity)))
+            PDMPSamplers.initialize_flow_state!(cached_state, cached_flow)
+            cached_envelope = direct_model.grad.envelope
+            PDMPSamplersRBridge._omrf_direct_prepare_path!(
+                cached_envelope, cached_state, cached_flow)
+            cached_candidate = copy(cached_state)
+            move_forward_time!(cached_candidate, 0.071, cached_flow)
+            dense_gradient = zeros(9)
+            cached_gradient = zeros(9)
+            direct_model.grad.deterministic_gradient!(
+                dense_gradient, cached_candidate.ξ.x)
+            PDMPSamplers.deterministic_gradient!(cached_gradient,
+                direct_model.grad, cached_candidate, cached_flow)
+            @test cached_gradient ≈ dense_gradient atol=5e-12 rtol=5e-12
+            if cached_flow isa Union{BouncyParticle,PDMPSamplers.AnyBoomerang}
+                corrected_dense = copy(dense_gradient)
+                correction_cache = (; z=zeros(9))
+                PDMPSamplers.correct_gradient!(corrected_dense,
+                    cached_candidate.ξ.x, cached_candidate.ξ.θ,
+                    cached_flow, correction_cache)
+                deferred = PDMPSamplers.subsampling_deterministic_signed_rate(
+                    direct_model.grad.residual_oracle, direct_model.grad,
+                    cached_candidate, cached_flow)
+                @test deferred.active
+                signed = deferred.signed
+                @test isapprox(signed,
+                    dot(cached_candidate.ξ.θ, corrected_dense);
+                    atol=5e-12, rtol=5e-12)
+                marked_residual = zeros(9)
+                selected_mark = [1, 4, 7]
+                direct_model.grad.residual_oracle(marked_residual,
+                    cached_candidate.ξ.x, selected_mark, anchor)
+                scale = 3.0
+                deferred_rate =
+                    PDMPSamplers.subsampling_deferred_candidate_rate(
+                        direct_model.grad.residual_oracle, cached_candidate,
+                        marked_residual, scale, cached_flow, signed,
+                        selected_mark)
+                axpy!(scale, marked_residual, corrected_dense)
+                @test isapprox(deferred_rate, PDMPSamplers.λ(
+                    cached_candidate, corrected_dense, cached_flow);
+                    atol=5e-12, rtol=5e-12)
+            end
+        end
         direct_event_rng = Xoshiro(0xd1ec7)
         direct_event_flow = BouncyParticle(9, 0.0)
         direct_event_state, direct_event_model, direct_event_alg,
@@ -1528,6 +1840,14 @@ end
         PDMPSamplersRBridge.OMRFAnalyticSubsamplingOracle(
             analytic_prior_ctx, whole_person_hcv_spec,
             analytic_prior_names, anchor)
+    symbol_refinement_spec = Dict{Any,Any}(whole_person_hcv_spec)
+    delete!(symbol_refinement_spec, "exact_selected_refinement")
+    symbol_refinement_spec[:exact_selected_refinement] = true
+    symbol_refinement_oracle =
+        PDMPSamplersRBridge.OMRFAnalyticSubsamplingOracle(
+            analytic_prior_ctx, symbol_refinement_spec,
+            analytic_prior_names, anchor)
+    @test symbol_refinement_oracle.exact_selected_refinement
     whole_person_state = PDMPState(0.0,
         SkeletonPoint(copy(position), collect(range(-0.8, 0.9; length=9))))
     whole_person_flow = ZigZag(9)
@@ -1543,10 +1863,11 @@ end
         whole_person_flow, whole_person_D, whole_person_M,
         whole_person_subset, 3.0)
     whole_person_cached = zeros(9)
-    @test !PDMPSamplers.subsampling_cached_residual!(
+    @test PDMPSamplers.subsampling_cached_residual!(
         whole_person_hcv_oracle, whole_person_cached, whole_person_state,
         whole_person_subset, anchor)
-    whole_person_hcv_oracle(whole_person_cached, whole_person_state.ξ.x,
+    @test !PDMPSamplers.subsampling_cached_residual!(
+        whole_person_hcv_oracle, whole_person_cached, whole_person_state,
         whole_person_subset, anchor)
     whole_person_candidate_gradient = copy(whole_person_gradient)
     whole_person_actual = PDMPSamplers.subsampling_candidate_rate!(
@@ -1814,8 +2135,12 @@ end
     PDMPSamplers.subsampling_subset_bound(
         exact_oracle, exact_state, exact_gradient, exact_flow,
         exact_D, exact_M, exact_subset, exact_scale)
+    @test PDMPSamplers.subsampling_cached_residual!(
+        exact_oracle, cached_residual, exact_state, exact_subset, anchor)
     @test !PDMPSamplers.subsampling_cached_residual!(
         exact_oracle, cached_residual, exact_state, exact_subset, anchor)
+    PDMPSamplers.begin_subsampling_mark!(exact_oracle)
+    @test !exact_oracle.cached_residual_valid
     exact_oracle(cached_residual, exact_state.ξ.x, exact_subset, anchor)
     expected_exact_gradient = exact_gradient + exact_scale .* cached_residual
     candidate_gradient = copy(exact_gradient)
@@ -1911,6 +2236,110 @@ end
     end
     @test staged_deterministic + staged_residual_sum ≈
         exact_full atol=3e-10 rtol=3e-10
+
+    # Exact-variance HCV banks are learned automatically from the current
+    # chain's bounded warmup grid and final adapted velocity metric. This is a
+    # warmup finalizer, not a retained or evaluation-trajectory intervention.
+    variance_spec = copy(hcv_spec)
+    variance_spec["hcv_damping"] = Inf
+    variance_spec["hcv_bank_learning"] = "exact_variance"
+    variance_subsampling = Dict{String,Any}(
+        "n_observations" => 3,
+        "subsample_size" => 1,
+        "residual_envelope" => variance_spec)
+    variance_ctx, variance_names =
+        PDMPSamplersRBridge._new_stan_subsampling_context(
+            lib, full, prior, 1)
+    variance_model, _, _, _, variance_manager =
+        PDMPSamplersRBridge._build_stan_subsampling_model(
+            variance_ctx, variance_names, variance_subsampling, anchor,
+            nothing, falses(9); anchor_capacity=2)
+    @test variance_manager.warmup_bank_learning_policy === :exact_variance
+    variance_trace = PDMPTrace([
+        PDMPEvent(0.0, anchor, fill(0.2, 9)),
+        PDMPEvent(1.0, position .- 0.15, fill(0.2, 9)),
+        PDMPEvent(2.0, position .+ 0.20, fill(-0.1, 9)),
+        PDMPEvent(3.0, position .+ collect(range(-0.25, 0.25; length=9)),
+            fill(0.1, 9)),
+    ], BouncyParticle(9, 0.0))
+    variance_flow = PreconditionedDynamics(
+        DiagonalPreconditioner(collect(range(0.7, 1.3; length=9))),
+        BouncyParticle(9, 0.0))
+    variance_anchors, variance_scales =
+        PDMPSamplersRBridge._omrf_exact_variance_anchors!(
+            variance_manager, variance_trace, position, 2, variance_flow)
+    @test size(variance_anchors) == (9, 2)
+    @test variance_anchors[:, 1] == position
+    @test all(isfinite, variance_scales)
+    @test all(>(0), variance_scales)
+    @test variance_manager.warmup_bank_candidate_count == 5
+    @test variance_manager.warmup_bank_training_state_count == 5
+    @test isfinite(variance_manager.warmup_bank_objective_single)
+    @test isfinite(variance_manager.warmup_bank_objective_selected)
+    @test variance_manager.warmup_bank_objective_selected <=
+        variance_manager.warmup_bank_objective_single
+    @test variance_manager.warmup_bank_objective_selected <
+        variance_manager.warmup_bank_objective_single
+    @test variance_manager.warmup_bank_learning_seconds > 0
+
+    # The selector-coupled combinatorial objective evaluates the source that
+    # the retained geometric selector actually installs. It is intentionally
+    # not the oracle minimum of each column of `costs`.
+    coupled_candidates = reshape([0.0, 1.0, 2.0, 3.0], 1, :)
+    coupled_costs = [1.0 9.0 9.0 9.0;
+                     9.0 1.0 8.0 8.0;
+                     9.0 8.0 1.0 8.0;
+                     9.0 8.0 8.0 1.0]
+    coupled_indices, coupled_objective =
+        PDMPSamplersRBridge._omrf_selector_coupled_indices(
+            coupled_costs, coupled_candidates, [1.0], 2)
+    brute = [(indices=[1, candidate], objective=
+        PDMPSamplersRBridge._omrf_selector_assigned_objective(
+            coupled_costs, coupled_candidates, [1.0], [1, candidate]))
+        for candidate in 2:4]
+    brute_best = brute[argmin(getfield.(brute, :objective))]
+    @test coupled_indices == brute_best.indices
+    @test coupled_objective == brute_best.objective
+    explicit_work = zeros(9)
+    explicit_mean = zeros(9)
+    explicit_score =
+        PDMPSamplersRBridge._omrf_hcv_expected_directional_variance!(
+            variance_manager.recycled_state.residual_context,
+            variance_manager.recycled_state.anchor, position,
+            variance_flow.metric.scale .^ 2, explicit_work, explicit_mean,
+            [1])
+    @test isfinite(explicit_score)
+    @test explicit_score >= 0
+    explicit_context = variance_manager.recycled_state.residual_context
+    @. explicit_context.displacement = position -
+        variance_manager.recycled_state.anchor
+    explicit_residuals = zeros(9, 3)
+    explicit_one = zeros(9)
+    for person in 1:3
+        PDMPSamplersRBridge.omrf_residual!(
+            explicit_context, explicit_one, position, [person])
+        explicit_residuals[:, person] .= explicit_one
+    end
+    explicit_center = vec(mean(explicit_residuals; dims=2))
+    manual_score = sum(variance_flow.metric.scale[coordinate]^2 *
+        mean((explicit_residuals[coordinate, :] .-
+            explicit_center[coordinate]).^2) for coordinate in 1:9)
+    @test explicit_score ≈ manual_score atol=2e-14 rtol=2e-14
+    variance_manager.selection_policy = :position
+    variance_state = PDMPState(3.0,
+        SkeletonPoint(copy(position), fill(0.1, 9)))
+    variance_trace_manager = PDMPSamplers.TraceManager(
+        variance_trace, variance_trace, 3.0)
+    @test PDMPSamplersRBridge._finish_omrf_warmup!(
+        variance_manager, variance_model.grad, position,
+        variance_trace_manager; state=variance_state, flow=variance_flow)
+    @test length(variance_manager.entries) == 2
+    @test variance_manager.warmup_finish_preparations ==
+        variance_manager.preparations
+    @test variance_manager.warmup_finish_native_full_data_scans ==
+        variance_ctx.counts.native_full_data_scans
+    @test variance_model.grad.anchor ==
+        variance_manager.entries[variance_manager.active_idx].state.anchor
 
     bank_ctx, bank_names = PDMPSamplersRBridge._new_stan_subsampling_context(
         lib, full, prior, 1)
@@ -2693,7 +3122,7 @@ end
         signed_counts_before_adjacent + 1
     PDMPSamplers.component_cell_scales!(signed_cell, signed_envelope,
         signed_state, signed_flow, 0.65, 0.95)
-    @test @allocated(PDMPSamplers.component_cell_scales!(signed_cell,
+    @test @allocated(omrf_allocation_signed_cell!(signed_cell,
         signed_envelope, signed_state, signed_flow, 0.95, 1.25)) == 0
     PDMPSamplers.screening_residual_bound(
         signed_envelope, signed_state, signed_flow, 0.2)

@@ -25,6 +25,31 @@ test_that("public OMRF diagnostics verify explicit persons and single N/m scalin
     hcv_warmup = "first_order"
   )
   expect_true(staged_hcv_envelope$hcv_after_warmup)
+  expect_identical(hcv_envelope$hcv_bank_learning, "geometric")
+  variance_bank_envelope <- omrf_residual_envelope(
+    X, full$seen, "thresholds_0", "interactions_0",
+    use_hcv = TRUE, hcv_damping = Inf, hcv_warmup = "hcv",
+    hcv_bank_learning = "exact_variance", factorization = "person",
+    geometry = "direct_factor_roof_person_hcv"
+  )
+  expect_identical(variance_bank_envelope$hcv_bank_learning,
+                   "exact_variance")
+  coupled_bank_envelope <- omrf_residual_envelope(
+    X, full$seen, "thresholds_0", "interactions_0",
+    use_hcv = TRUE, hcv_damping = Inf, hcv_warmup = "hcv",
+    hcv_bank_learning = "selector_coupled_variance", factorization = "person",
+    geometry = "direct_factor_roof_person_hcv"
+  )
+  expect_identical(coupled_bank_envelope$hcv_bank_learning,
+                   "selector_coupled_variance")
+  expect_error(
+    omrf_residual_envelope(
+      X, full$seen, "thresholds_0", "interactions_0",
+      use_hcv = TRUE, hcv_damping = Inf, hcv_warmup = "first_order",
+      hcv_bank_learning = "exact_variance", factorization = "person",
+      geometry = "norm_local"
+    ), "active undamped\\s+HCV throughout warmup"
+  )
   expect_equal(dim(hcv_envelope$hcv_remainder_weights), c(3L, 3L))
   expect_true(all(hcv_envelope$hcv_remainder_weights >= 0))
   factor_envelope <- omrf_residual_envelope(
@@ -135,6 +160,24 @@ test_that("public OMRF diagnostics verify explicit persons and single N/m scalin
                    "direct_person_node_hcv")
   expect_true(direct_hcv_envelope$use_hcv)
   expect_null(direct_hcv_envelope$norm_weights)
+  hybrid_hcv_envelope <- omrf_residual_envelope(
+    X, full$seen, "thresholds_0", "interactions_0",
+    backend = "analytic", use_hcv = TRUE, hcv_damping = Inf,
+    factorization = "person", factor_sampling = "size_biased",
+    prior_backend = "analytic",
+    geometry = "direct_factor_roof_person_hcv")
+  expect_identical(hybrid_hcv_envelope$bound_type,
+                   "direct_factor_roof_person_hcv")
+  expect_identical(hybrid_hcv_envelope$factorization, "person")
+  expect_true(hybrid_hcv_envelope$use_hcv)
+  expect_false(hybrid_hcv_envelope$hcv_after_warmup)
+  expect_error(omrf_residual_envelope(
+    X, full$seen, "thresholds_0", "interactions_0",
+    backend = "analytic", use_hcv = TRUE, hcv_damping = Inf,
+    factorization = "person_node", factor_sampling = "size_biased",
+    prior_backend = "analytic",
+    geometry = "direct_factor_roof_person_hcv"),
+    "person factorization")
   grouped_hcv_envelope <- omrf_residual_envelope(
     X, full$seen, "thresholds_0", "interactions_0",
     use_hcv = TRUE, hcv_damping = Inf, geometry = "grouped_box",

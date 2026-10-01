@@ -267,6 +267,15 @@ stan_subsampling <- function(n_observations, subsample_size,
 #' @param hcv_warmup HCV policy during warmup. `"hcv"` preserves the existing
 #'   behavior. Experimental `"first_order"` uses the certified first-order
 #'   residual bound during warmup and activates HCV at the main-phase boundary.
+#' @param hcv_bank_learning Research-only frozen-bank learning policy.
+#'   `"geometric"` retains standardized position coverage. `"exact_variance"`
+#'   uses time-uniform states from each chain's own full-gradient warmup and
+#'   greedily minimizes the exact finite-population HCV residual variance under
+#'   the final adapted velocity metric. All learning and preparation are
+#'   charged to that chain's warmup; the bank is frozen before retained sampling.
+#'   `"selector_coupled_variance"` is a research-only variant which minimizes
+#'   that same variance after assigning every warmup state with the actual
+#'   standardized-position selector used during retained sampling.
 #' @param factorization Experimental likelihood contribution layout. `"person"`
 #'   retains one contribution per person. `"person_node"` exposes each
 #'   person-node conditional as a separate sparse contribution.
@@ -305,6 +314,22 @@ stan_subsampling <- function(n_observations, subsample_size,
 #'   but exposes a coarser root frontier to GridThinning. At an accepted point
 #'   proposal it descends the certified support tree by exact thinning, so
 #'   child and leaf certificates are evaluated only along the sampled branch.
+#' @param person_signed_roof Research-only linear BPS certificate policy for
+#'   `geometry = "direct_factor_roof_person_hcv"`. Signed node residual
+#'   endpoints are summed within each person before taking an absolute bound;
+#'   the old factor-summed certificate remains a valid fallback. The estimator
+#'   and retained target are unchanged. Other flows keep the existing roof.
+#' @param signed_only_person_roof Research-only linear BPS policy which builds
+#'   the certified signed whole-person endpoint roof without also building
+#'   the factor-summed fallback table. It preserves the estimator and uses
+#'   pointwise factor refinement for the selected person.
+#' @param joint_signed_group_size Research-only linear BPS joint signed
+#'   marked roof. Use `4` for fixed seeded groups of four, `16` for the
+#'   opt-in N=500, P=15, K=4 weighted ragged-group research route, or `0`
+#'   to keep the ordinary scheduler. Requires `signed_only_person_roof = TRUE`.
+#' @param shared_current_categorical Opt-in JS4/JS16 evaluator that reuses
+#'   current categorical moments for exact active-neighbour patterns. Supports
+#'   the independent-prior linear BPS research route only.
 #' @param box_root_groups Root boxes per node used by
 #'   `geometry = "lazy_node_grouped_box"`. This must not exceed `box_groups`.
 #' @param box_groups Maximum number of deterministic setup-time covariate
@@ -409,6 +434,8 @@ omrf_residual_envelope <- function(X, seen, thresholds, interactions,
                                    hcv_scope = c("global", "node"),
                                    zigzag_sign_aware = FALSE,
                                    hcv_warmup = c("hcv", "first_order"),
+                                   hcv_bank_learning = c("geometric", "exact_variance",
+                                                         "selector_coupled_variance"),
                                    factorization = c("person", "person_node"),
                                    factor_sampling = c("size_biased", "node_stratified"),
                                    direct_cv_cell_scope = c("cell", "event_horizon"),
@@ -417,10 +444,15 @@ omrf_residual_envelope <- function(X, seen, thresholds, interactions,
                                    categorical_residual_cap = FALSE,
                                    signed_bps = FALSE,
                                    signed_harmonic = FALSE,
+                                   person_signed_roof = FALSE,
+                                   signed_only_person_roof = FALSE,
+                                   joint_signed_group_size = 0L,
+                                   shared_current_categorical = FALSE,
                                    geometry = c("norm_local", "norm_local_hcv_compact",
                                                 "node_box_first_order",
                                                 "cell_marked_node_box_first_order",
                                                 "direct_person_node_hcv",
+                                                "direct_factor_roof_person_hcv",
                                                 "direct_person_node_cv",
                                                 "covariate_local",
                                                 "covariate_local_compact",
@@ -433,6 +465,7 @@ omrf_residual_envelope <- function(X, seen, thresholds, interactions,
   backend <- match.arg(backend)
   hcv_scope <- match.arg(hcv_scope)
   hcv_warmup <- match.arg(hcv_warmup)
+  hcv_bank_learning <- match.arg(hcv_bank_learning)
   factorization <- match.arg(factorization)
   factor_sampling <- match.arg(factor_sampling)
   direct_cv_cell_scope <- match.arg(direct_cv_cell_scope)
@@ -477,6 +510,56 @@ omrf_residual_envelope <- function(X, seen, thresholds, interactions,
       is.na(signed_harmonic)) {
     cli::cli_abort("Argument {.arg signed_harmonic} must be TRUE or FALSE.")
   }
+  if (!is.logical(person_signed_roof) || length(person_signed_roof) != 1L ||
+      is.na(person_signed_roof)) {
+    cli::cli_abort("Argument {.arg person_signed_roof} must be TRUE or FALSE.")
+  }
+  if (person_signed_roof && geometry != "direct_factor_roof_person_hcv") {
+    cli::cli_abort(paste0(
+      "Research {.arg person_signed_roof} requires ",
+      "{.arg geometry = \"direct_factor_roof_person_hcv\"}."))
+  }
+  if (!is.logical(signed_only_person_roof) ||
+      length(signed_only_person_roof) != 1L ||
+      is.na(signed_only_person_roof)) {
+    cli::cli_abort("Argument {.arg signed_only_person_roof} must be TRUE or FALSE.")
+  }
+  if (signed_only_person_roof &&
+      !(person_signed_roof && geometry == "direct_factor_roof_person_hcv" &&
+        direct_cv_cell_scope == "cell")) {
+    cli::cli_abort(paste0(
+      "Research {.arg signed_only_person_roof} requires signed whole-person ",
+      "HCV roofs and per-cell certificates."))
+  }
+  if (!rlang::is_integerish(joint_signed_group_size, n = 1L,
+                           finite = TRUE) ||
+      !joint_signed_group_size %in% c(0L, 4L, 16L, 32L, 64L)) {
+    cli::cli_abort("Research {.arg joint_signed_group_size} must be 0, 4, 16, 32, or 64.")
+  }
+  if (joint_signed_group_size == 4L &&
+      (!signed_only_person_roof || nrow(X) %% 4L != 0L)) {
+    cli::cli_abort(paste0("Research joint groups of four require a ",
+      "divisible signed-only person-HCV population."))
+  }
+  if (!is.logical(shared_current_categorical) ||
+      length(shared_current_categorical) != 1L ||
+      is.na(shared_current_categorical)) {
+    cli::cli_abort("Argument {.arg shared_current_categorical} must be TRUE or FALSE.")
+  }
+  if (shared_current_categorical &&
+      joint_signed_group_size == 0L) {
+    cli::cli_abort("Shared-current categorical evaluation requires joint groups.")
+  }
+  if (joint_signed_group_size >= 16L &&
+      !(shared_current_categorical && signed_only_person_roof &&
+        backend == "analytic" && isTRUE(use_hcv) &&
+        is.infinite(hcv_damping) && hcv_scope == "global" &&
+        geometry == "direct_factor_roof_person_hcv" &&
+        factorization == "person" && prior_backend == "analytic" &&
+        nrow(X) >= 2L * joint_signed_group_size && all(seen == 4L))) {
+    cli::cli_abort(paste0("Grouped joint signed bounds require N >= 2m, four categories per node, ",
+      "shared-current signed global undamped HCV with analytic prior."))
+  }
   if (isTRUE(signed_bps) &&
       (backend != "analytic" || factorization != "person_node" ||
        isTRUE(use_hcv) || geometry != "covariate_local_compact")) {
@@ -511,6 +594,16 @@ omrf_residual_envelope <- function(X, seen, thresholds, interactions,
       "analytic, undamped global HCV, person-node factorization, and ",
       "size-biased factor sampling, active from warmup."))
   }
+  if (geometry == "direct_factor_roof_person_hcv" &&
+      !(backend == "analytic" && isTRUE(use_hcv) &&
+        is.infinite(hcv_damping) && hcv_scope == "global" &&
+        hcv_warmup == "hcv" && factorization == "person" &&
+        factor_sampling == "size_biased")) {
+    cli::cli_abort(paste0(
+      "Research factor-roof person HCV geometry requires analytic, ",
+      "undamped global HCV, person factorization, size-biased person ",
+      "sampling, active from warmup."))
+  }
   if (geometry == "direct_person_node_cv" &&
       !(backend == "analytic" && !isTRUE(use_hcv) &&
         factorization == "person_node" &&
@@ -535,10 +628,11 @@ omrf_residual_envelope <- function(X, seen, thresholds, interactions,
       "{.arg box_groups = 2}."))
   }
   if (direct_cv_cell_scope == "event_horizon" &&
-      geometry != "direct_person_node_cv") {
+      !geometry %in% c("direct_person_node_cv",
+                       "direct_factor_roof_person_hcv")) {
     cli::cli_abort(paste0(
       "Research {.arg direct_cv_cell_scope = \"event_horizon\"} is only ",
-      "available for {.arg geometry = \"direct_person_node_cv\"}."))
+      "available for direct first-order or whole-person HCV geometry."))
   }
   if (!is.matrix(X) || !is.numeric(X) || any(!is.finite(X)) || any(X != floor(X))) {
     cli::cli_abort("Argument {.arg X} must be a finite integer-valued person-by-node matrix.")
@@ -573,9 +667,18 @@ omrf_residual_envelope <- function(X, seen, thresholds, interactions,
       is.na(hcv_damping) || hcv_damping <= 0) {
     cli::cli_abort("Argument {.arg hcv_damping} must be one positive number.")
   }
+  if (hcv_bank_learning %in% c("exact_variance",
+                               "selector_coupled_variance") &&
+      !(isTRUE(use_hcv) && is.infinite(hcv_damping) &&
+        identical(hcv_warmup, "hcv"))) {
+    cli::cli_abort(paste0(
+      "Research variance-based {.arg hcv_bank_learning} requires ",
+      "active undamped HCV throughout warmup."))
+  }
   if (is.infinite(hcv_damping) &&
       !(isTRUE(use_hcv) && geometry %in% c(
         "pattern_local", "norm_local_hcv_compact", "direct_person_node_hcv",
+        "direct_factor_roof_person_hcv",
         "grouped_box", "node_grouped_box",
         "cell_cached_node_grouped_box",
         "lazy_node_grouped_box"))) {
@@ -614,6 +717,8 @@ omrf_residual_envelope <- function(X, seen, thresholds, interactions,
   # routes intentionally continue through the complete preparation path.
   compact_hcv <- identical(geometry, "norm_local_hcv_compact")
   direct_hcv <- identical(geometry, "direct_person_node_hcv")
+  factor_roof_person_hcv <- identical(
+    geometry, "direct_factor_roof_person_hcv")
   direct_cv <- identical(geometry, "direct_person_node_cv")
   if (backend == "analytic" &&
       ((!isTRUE(use_hcv) && geometry %in% c(
@@ -621,7 +726,8 @@ omrf_residual_envelope <- function(X, seen, thresholds, interactions,
         "cell_marked_node_box_first_order",
         "covariate_local",
         "covariate_local_compact")) ||
-       (isTRUE(use_hcv) && (compact_hcv || direct_hcv)))) {
+       (isTRUE(use_hcv) &&
+          (compact_hcv || direct_hcv || factor_roof_person_hcv)))) {
     neighbour_norms <- NULL
     if (geometry %in% c("norm_local", "norm_local_hcv_compact",
                         "covariate_local", "covariate_local_compact")) {
@@ -690,6 +796,8 @@ omrf_residual_envelope <- function(X, seen, thresholds, interactions,
       geometry
     } else if (direct_hcv) {
       "direct_person_node_hcv"
+    } else if (factor_roof_person_hcv) {
+      "direct_factor_roof_person_hcv"
     } else if (direct_cv) {
       "direct_person_node_cv"
     } else if (compact_hcv) {
@@ -701,6 +809,13 @@ omrf_residual_envelope <- function(X, seen, thresholds, interactions,
     } else {
       "node_local_norm_low_rank"
     }
+    envelope$person_signed_roof <- person_signed_roof
+    if (signed_only_person_roof)
+      envelope$signed_only_person_roof <- TRUE
+    if (joint_signed_group_size > 0L)
+      envelope$joint_signed_group_size <- as.integer(joint_signed_group_size)
+    if (shared_current_categorical)
+      envelope$shared_current_categorical <- TRUE
     envelope$X <- X
     envelope$seen <- seen
     envelope$thresholds <- thresholds
@@ -718,11 +833,13 @@ omrf_residual_envelope <- function(X, seen, thresholds, interactions,
     envelope$covariate_component_blocks <- covariate_component_blocks
     envelope$covariate_compact <- identical(
       geometry, "covariate_local_compact")
-    envelope$use_hcv <- compact_hcv || direct_hcv
-    envelope$hcv_after_warmup <- (compact_hcv || direct_hcv) &&
+    envelope$use_hcv <- compact_hcv || direct_hcv || factor_roof_person_hcv
+    envelope$hcv_after_warmup <-
+      (compact_hcv || direct_hcv || factor_roof_person_hcv) &&
       identical(hcv_warmup, "first_order")
     envelope$hcv_damping <- as.numeric(hcv_damping)
     envelope$hcv_scope <- hcv_scope
+    envelope$hcv_bank_learning <- hcv_bank_learning
     envelope$zigzag_sign_aware <- isTRUE(zigzag_sign_aware)
     envelope$exact_selected_refinement <-
       isTRUE(exact_selected_refinement)
@@ -1086,6 +1203,7 @@ omrf_residual_envelope <- function(X, seen, thresholds, interactions,
     identical(hcv_warmup, "first_order")
   envelope$hcv_damping <- as.numeric(hcv_damping)
   envelope$hcv_scope <- hcv_scope
+  envelope$hcv_bank_learning <- hcv_bank_learning
   envelope$zigzag_sign_aware <- isTRUE(zigzag_sign_aware)
   envelope$exact_selected_refinement <-
     isTRUE(exact_selected_refinement)

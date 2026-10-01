@@ -34,6 +34,75 @@ with_seed <- function(code, seed = NULL) {
        chain = mean_agreement & covariance_agreement)
 }
 
+.position_bank_result_spec <- function(counters, supplied, endpoint,
+    selection_policy, unc_names, dataset_hash, envelope_hash, envelope,
+    node_support_order) {
+  counters <- if (is.list(counters)) counters else list()
+  if (!is.null(supplied)) {
+    # A supplied retained bank is immutable mathematical input. Counter
+    # payloads are diagnostic and may be unavailable after a long JuliaCall
+    # result conversion; they must not be the sole copy of restart state.
+    if (!is.null(counters$anchor_positions) && !identical(
+        unname(as.matrix(counters$anchor_positions)),
+        unname(as.matrix(supplied$ordered_anchor_positions))))
+      cli::cli_abort("The live position bank differs from the supplied frozen bank.")
+    if (!is.null(counters$anchor_distance_scales) && !identical(
+        as.numeric(counters$anchor_distance_scales),
+        as.numeric(supplied$distance_scales)))
+      cli::cli_abort("The live position-bank distance scales differ from the supplied frozen scales.")
+    if (!is.null(supplied$warmup_bank_learning_policy) &&
+        !is.null(counters$warmup_bank_learning_policy) &&
+        !identical(as.character(counters$warmup_bank_learning_policy),
+                   as.character(supplied$warmup_bank_learning_policy)))
+      cli::cli_abort("The live HCV bank-learning policy differs from the supplied frozen bank.")
+    spec <- supplied
+    spec$immutable_envelope_grouping_spec <- envelope
+  } else {
+    if (is.null(counters$anchor_positions) ||
+        is.null(counters$anchor_distance_scales))
+      cli::cli_abort(paste0(
+        "A newly prepared position bank was not returned by the live ",
+        "sampler counters."))
+    spec <- list(
+      version = 1L,
+      ordered_anchor_positions = unname(as.matrix(counters$anchor_positions)),
+      distance_scales = as.numeric(counters$anchor_distance_scales),
+      selection_policy = "position",
+      tie_policy = "lowest_index_outgoing",
+      requested_capacity = as.integer(counters$anchor_bank_requested_capacity),
+      parameter_order = as.character(unc_names),
+      dataset_identity = list(hash = dataset_hash),
+      envelope_identity = list(hash = envelope_hash),
+      immutable_envelope_grouping_spec = envelope)
+    spec$warmup_bank_learning_policy <- as.character(
+      counters$warmup_bank_learning_policy %||% "geometric")
+    spec$warmup_bank_candidate_count <- as.integer(
+      counters$warmup_bank_candidate_count %||% 0L)
+    spec$warmup_bank_training_state_count <- as.integer(
+      counters$warmup_bank_training_state_count %||% 0L)
+    spec$warmup_bank_objective_single <- as.numeric(
+      counters$warmup_bank_objective_single %||% NA_real_)
+    spec$warmup_bank_objective_selected <- as.numeric(
+      counters$warmup_bank_objective_selected %||% NA_real_)
+    spec$warmup_bank_learning_seconds <- as.numeric(
+      counters$warmup_bank_learning_seconds %||% 0)
+  }
+  spec$physical_endpoint <- endpoint
+  spec$frozen_flow <- if (is.null(endpoint)) NULL else endpoint$flow
+  if (identical(selection_policy, "node_position")) {
+    spec$selection_policy <- "node_position"
+    if (!is.null(counters$node_position_metric_variances))
+      spec$physical_velocity_variances <-
+        as.numeric(counters$node_position_metric_variances)
+    spec$node_support_order <- node_support_order(envelope, unc_names)
+    if (!is.null(counters$node_position_sources))
+      spec$selected_sources <- as.integer(counters$node_position_sources)
+    if (!is.null(counters$node_position_policy_version))
+      spec$policy_version <- as.integer(counters$node_position_policy_version)
+  }
+  spec
+}
+
 # Internal function to validate and prepare common PDMP parameters
 validate_pdmp_params <- function(d, flow, algorithm, T, t0 = 0.0, t_warmup = 0.0,
                                 flow_mean = NULL, flow_cov = NULL, c0 = 1e-2,
@@ -593,6 +662,9 @@ validate_support_boundary_control <- function(support_boundary) {
 #'   \code{readRDS()} work without any extra steps. Set to \code{FALSE} to skip
 #'   the extraction and keep only the live Julia reference.
 #'   This can save time and memory if you don't need to save the result or if you plan to call \code{materialize()} manually later.
+#' @param online_summaries \code{NULL} (default) or options from
+#'   \code{online_summary_options()}. Requires \code{trace_storage = "streaming"};
+#'   the summaries are read with \code{read_online_summaries()}.
 #' @param support_boundary A list created by \code{support_boundary_control()} that
 #'   controls support-boundary diagnostics and heuristic event/refresh recovery.
 #'
@@ -630,6 +702,7 @@ pdmp_sample <- function(f, d,
                         trace_storage = c("dense", "streaming"),
                         streaming_trace_directory = NULL,
                         streaming_trace_buffer_events = 4096L,
+                        online_summaries = NULL,
                         support_boundary = support_boundary_control()) {
 
   # Validate function argument (fail fast before Julia setup)
@@ -642,6 +715,8 @@ pdmp_sample <- function(f, d,
 
   # Use common validation function
   trace_storage <- match.arg(trace_storage)
+  restore_online_env <- .set_online_summary_env(online_summaries, trace_storage)
+  on.exit(restore_online_env(), add = TRUE)
   if (identical(trace_storage, "streaming")) {
     if (is.null(streaming_trace_directory) ||
         !is.character(streaming_trace_directory) ||
@@ -908,12 +983,28 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
                         trace_storage = c("dense", "streaming"),
                         streaming_trace_directory = NULL,
                         streaming_trace_buffer_events = 4096L,
+                        online_summaries = NULL,
                         support_boundary = support_boundary_control()) {
+
+  bridge_profile_enabled <- identical(
+    Sys.getenv("OMRF_PROFILE_EXCLUSIVE", "0"), "1")
+  bridge_profile_started <- proc.time()[["elapsed"]]
+  bridge_profile_last <- bridge_profile_started
+  bridge_profile <- list()
+  bridge_profile_mark <- function(name) {
+    if (!bridge_profile_enabled) return(invisible(NULL))
+    now <- proc.time()[["elapsed"]]
+    bridge_profile[[name]] <<- now - bridge_profile_last
+    bridge_profile_last <<- now
+    invisible(NULL)
+  }
 
   # Validate file paths on R side before setting up Julia
   validate_type(path_to_stanmodel, type = "character", n = 1)
   flow <- match.arg(flow)
   trace_storage <- match.arg(trace_storage)
+  restore_online_env <- .set_online_summary_env(online_summaries, trace_storage)
+  on.exit(restore_online_env(), add = TRUE)
   if (identical(trace_storage, "streaming")) {
     if (is.null(streaming_trace_directory) ||
         !is.character(streaming_trace_directory) ||
@@ -1181,6 +1272,7 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
       prior_standata_path <- prior_standata
     }
   }
+  bridge_profile_mark("stan_json_and_input_seconds")
   .validate_dependent_slab_early(
     slab_prior, sticky, flow, algorithm, model_prior, parameter_prior
   )
@@ -1230,6 +1322,7 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
   }
 
   check_for_julia_setup()
+  bridge_profile_mark("julia_setup_and_validation_seconds")
 
   # Normalize paths to absolute
   path_to_stanmodel <- normalizePath(path_to_stanmodel, mustWork = TRUE)
@@ -1256,6 +1349,7 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
   if (is.null(subsampling) && compile_control_enabled && !is.null(prior_standata_path) && grepl("\\.stan$", prior_stanmodel)) {
     prior_stanmodel <- .pdmpsamplers_julia_call("_compile_model", prior_stanmodel)
   }
+  bridge_profile_mark("stan_compile_seconds")
 
   JuliaCall::julia_assign("_path_to_stan_model", path_to_stanmodel)
   JuliaCall::julia_assign("_path_to_stan_data",  standata_path)
@@ -1276,15 +1370,13 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
       JuliaCall::julia_command("_pdmp_model = PDMPSamplersRBridge.build_omrf_full_model(_full_gradient_spec, BridgeStan.param_unc_names(_stan_model), Int(BridgeStan.param_unc_num(_stan_model)));")
     }
     d <- JuliaCall::julia_eval("_pdmp_model.d")
-    unc_names <- character(0)
-    if (!is.null(slab_prior) || is.character(can_stick) || !is.null(full_gradient)) {
-      unc_names <- JuliaCall::julia_eval("BridgeStan.param_unc_names(_stan_model)")
-    }
+    unc_names <- JuliaCall::julia_eval("BridgeStan.param_unc_names(_stan_model)")
   } else {
     JuliaCall::julia_command("_prepared_stan_subsampling = PDMPSamplersRBridge.prepare_stan_subsampling(_path_to_stan_model, _path_to_stan_data, _path_to_prior_stan_data_full, _subsampling, _n_chains);")
     d <- JuliaCall::julia_eval("_prepared_stan_subsampling.d")
     unc_names <- JuliaCall::julia_eval("_prepared_stan_subsampling.unc_names")
   }
+  bridge_profile_mark("julia_context_initialization_seconds")
   if (is.character(can_stick)) {
     stick_idx <- .resolve_unconstrained_spec(can_stick, unc_names, "can_stick")
     can_stick <- rep(FALSE, d)
@@ -1375,12 +1467,7 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
   }
 
   verify_flow_specification <- supplied_flow_specification
-  flow_hash <- function(value) {
-    path <- tempfile("pdmpsamplers-flow-")
-    on.exit(unlink(path, force = TRUE), add = TRUE)
-    writeBin(serialize(value, NULL, version = 3L), path)
-    unname(tools::md5sum(path))
-  }
+  flow_hash <- .pdmp_object_hash
   # Flow construction may make an algebraically neutral covariance ->
   # precision -> scale -> covariance round trip.  Hash the numerical
   # representation at the same precision used by the fail-closed comparison,
@@ -1391,15 +1478,7 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
     flow_hash(list(dimensions = as.integer(dim(value)),
                    values = signif(as.numeric(value), 12L)))
   }
-  dataset_identity_hash <- function(value) {
-    if (is.character(value) && length(value) == 1L && file.exists(value)) {
-      size <- file.info(value)$size
-      con <- file(value, open = "rb")
-      on.exit(close(con), add = TRUE)
-      return(flow_hash(readBin(con, what = "raw", n = size)))
-    }
-    flow_hash(value)
-  }
+  dataset_identity_hash <- .pdmp_dataset_hash
   if (!is.null(subsampling_position_anchor_bank_spec)) {
     specs_to_check <- if (!is.null(subsampling_position_anchor_bank_spec$version))
       list(subsampling_position_anchor_bank_spec) else
@@ -1424,12 +1503,24 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
            is.null(spec$node_support_order))) {
         cli::cli_abort("Incomplete node-position mathematical bank specification.")
       }
-      if (!identical(spec$dataset_identity$hash, dataset_hash) ||
-          !identical(spec$envelope_identity$hash, envelope_hash) ||
-          !identical(as.character(spec$parameter_order), as.character(unc_names))) {
+      dataset_ok <- identical(spec$dataset_identity$hash, dataset_hash)
+      envelope_ok <- identical(spec$envelope_identity$hash, envelope_hash)
+      parameter_order_ok <- identical(as.character(spec$parameter_order),
+                                      as.character(unc_names))
+      if (!dataset_ok || !envelope_ok || !parameter_order_ok) {
+        if (identical(Sys.getenv("OMRF_PROFILE_EXCLUSIVE", "0"), "1") &&
+            !envelope_ok) {
+          message("OMRF bank envelope diagnostic: expected=",
+                  spec$envelope_identity$hash, " actual=", envelope_hash,
+                  " comparison=", paste(all.equal(
+                    spec$immutable_envelope_grouping_spec,
+                    subsampling$residual_envelope), collapse = "; "))
+        }
         cli::cli_abort(paste0(
           "The restored position anchor bank does not match the dataset, ",
-          "parameter order, or immutable envelope/grouping specification."))
+          "parameter order, or immutable envelope/grouping specification ",
+          "(dataset=", dataset_ok, ", parameter_order=", parameter_order_ok,
+          ", envelope=", envelope_ok, ")."))
       }
       if (!is.null(spec$frozen_flow)) {
         same_bank_mean <- isTRUE(all.equal(
@@ -1522,6 +1613,7 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
   JuliaCall::julia_assign("streaming_trace_buffer_events",
                           streaming_trace_buffer_events)
 
+  bridge_profile_mark("argument_transfer_and_validation_seconds")
   if (is.null(subsampling)) {
     result <- .pdmpsamplers_julia_eval("PDMPSamplersRBridge.r_pdmp_stan(
       _pdmp_model, x0, flow, algorithm, flow_mean, flow_cov;
@@ -1609,6 +1701,11 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
       streaming_trace_buffer_events = streaming_trace_buffer_events
     );")
   }
+  bridge_profile_mark("sampling_pack_and_transfer_seconds")
+  bridge_internal_profile <- if (bridge_profile_enabled)
+    result$bridge_profile else NULL
+  if (is.environment(bridge_internal_profile))
+    bridge_internal_profile <- as.list(bridge_internal_profile)
   backend_provenance <- if (!is.null(full_gradient)) {
     gradient_type <- tryCatch(as.character(JuliaCall::julia_eval(
       "string(typeof(_pdmp_model.grad.f))")),
@@ -1712,39 +1809,31 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
         thresholds[seq.int(starts[[node]], length.out = seen[[node]] - 1L)],
         incident[[node]]))
     }
+    supplied_bank_specs <- if (is.null(subsampling_position_anchor_bank_spec))
+      NULL else if (!is.null(subsampling_position_anchor_bank_spec$version))
+        rep(list(subsampling_position_anchor_bank_spec), params$n_chains) else
+        subsampling_position_anchor_bank_spec
     bank_specs <- lapply(seq_len(params$n_chains), function(chain) {
-      counters <- subsampling_context_counters[[chain]]
+      counters <- if (length(subsampling_context_counters) >= chain &&
+          is.list(subsampling_context_counters[[chain]]))
+        subsampling_context_counters[[chain]] else list()
       endpoint <- if (!is.null(result$terminal_states))
         result$terminal_states[[chain]] else NULL
-      spec <- list(
-        version = 1L,
-        ordered_anchor_positions = unname(as.matrix(counters$anchor_positions)),
-        distance_scales = as.numeric(counters$anchor_distance_scales),
-        selection_policy = "position",
-        tie_policy = "lowest_index_outgoing",
-        requested_capacity = as.integer(counters$anchor_bank_requested_capacity),
-        parameter_order = as.character(unc_names),
-        dataset_identity = list(hash = dataset_hash),
-        envelope_identity = list(hash = envelope_hash),
-        immutable_envelope_grouping_spec = subsampling$residual_envelope,
-        physical_endpoint = endpoint,
-        frozen_flow = if (is.null(endpoint)) NULL else endpoint$flow
-      )
-      if (identical(subsampling_anchor_selection_policy, "node_position")) {
-        spec$selection_policy <- "node_position"
-        spec$physical_velocity_variances <-
-          as.numeric(counters$node_position_metric_variances)
-        spec$node_support_order <- node_support_order(
-          subsampling$residual_envelope, unc_names)
-        spec$selected_sources <-
-          as.integer(counters$node_position_sources)
-        spec$policy_version <-
-          as.integer(counters$node_position_policy_version)
-      }
-      spec
+      supplied <- if (is.null(supplied_bank_specs)) NULL else
+        supplied_bank_specs[[chain]]
+      .position_bank_result_spec(counters, supplied, endpoint,
+        subsampling_anchor_selection_policy, unc_names, dataset_hash,
+        envelope_hash, subsampling$residual_envelope, node_support_order)
     })
     attr(result, "position_anchor_bank_spec") <- if (length(bank_specs) == 1L)
       bank_specs[[1L]] else bank_specs
+  }
+  bridge_profile_mark("output_metadata_seconds")
+  if (bridge_profile_enabled) {
+    bridge_profile$julia_internal <- bridge_internal_profile
+    bridge_profile$total_seconds <- proc.time()[["elapsed"]] -
+      bridge_profile_started
+    attr(result, "bridge_phase_profile") <- bridge_profile
   }
   result
 }

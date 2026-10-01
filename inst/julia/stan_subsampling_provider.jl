@@ -124,6 +124,17 @@ mutable struct StanSubsamplingCallCounts
     categorical_point_new_bound_sum::Float64
     categorical_cell_cache_hits::Int
     categorical_cell_cache_misses::Int
+    shared_current_pattern_evaluations::Int
+    shared_current_cell_evaluations::Int
+    shared_current_rebuilt_nodes::Int
+    shared_current_rebuild_seconds::Float64
+    shared_current_dense_fallback_cells::Int
+    joint_cell_width_bins::Vector{Int}
+    direct_path_anchor_changes::Int
+    direct_path_mask_changes::Int
+    direct_path_flow_changes::Int
+    direct_path_state_changes::Int
+    direct_path_forced_rebuilds::Int
 end
 StanSubsamplingCallCounts() = StanSubsamplingCallCounts(
     # 4:24 are integer counters.
@@ -139,7 +150,9 @@ StanSubsamplingCallCounts() = StanSubsamplingCallCounts(
     0, 0, 0.0, 0, 0,
     0, 0, 0.0, 0, 0, 0, 0, 0, 0,
     0, 0.0, false, 0, 0, 0, 0,
-    0, 0, 0.0, 0.0, 0, 0)
+    0, 0, 0.0, 0.0, 0, 0,
+    0, 0, 0, 0.0, 0,
+    zeros(Int, 10), 0, 0, 0, 0, 0)
 
 mutable struct StanSubsamplingContext
     full::PDMPModel
@@ -281,6 +294,256 @@ function (oracle::StanSubsamplingOracle)(out, x, subset, anchor)
     return out
 end
 
+# ---------------------------------------------------------------------------
+# Reuse of products with the anchor likelihood Hessian H.
+#
+# Global HCV evaluates H * w for many vectors w that repeat or move along the
+# current flight.  `OMRFHMemo` returns the stored product when w is
+# bit-identical to its key (exact reuse, e.g. H * v for a fixed velocity).
+# `OMRFHAffine` keeps H * base and the products of up to two directions and
+# answers any displacement in that affine span in O(d); a linear flight needs
+# one direction and survives one velocity change, a harmonic flight needs two.
+# Entries are tied to the Hessian generation, which `_omrf_likelihood_hessian!`
+# advances.  `PDMPSAMPLERS_HCV_CACHE=0` disables reuse for comparison.
+# ---------------------------------------------------------------------------
+mutable struct OMRFHMemo
+    generation::Int
+    key::Vector{Float64}
+    product::Vector{Float64}
+    updates::Int
+    changed::Vector{Int}
+end
+OMRFHMemo(d::Int) = OMRFHMemo(-1, zeros(d), zeros(d), 0, sizehint!(Int[], d))
+
+mutable struct OMRFHAffine
+    generation::Int
+    base::Vector{Float64}
+    pbase::Vector{Float64}
+    u::Matrix{Float64}
+    pu::Matrix{Float64}
+    umax::Vector{Float64}
+    ndir::Int
+    r::Vector{Float64}
+end
+OMRFHAffine(d::Int) = OMRFHAffine(-1, zeros(d), zeros(d), zeros(d, 2),
+    zeros(d, 2), zeros(2), 0, zeros(d))
+
+mutable struct OMRFHCVProductCache
+    enabled::Bool
+    generation::Int
+    velocity::OMRFHMemo      # H * (free part of v)
+    state::OMRFHMemo         # H * (x - anchor)
+    offset::OMRFHMemo        # H * (x - mu) on Boomerang flights
+    reference::OMRFHMemo     # H * (mu - anchor) on Boomerang flights
+    path_offset::OMRFHMemo   # H * (x - anchor) at the start of linear paths
+    displacement::OMRFHAffine    # x - anchor along linear flights
+    harmonic::OMRFHAffine        # x - mu and v along a Boomerang orbit
+    direct::Int
+    reused::Int
+end
+OMRFHCVProductCache(d::Int) = OMRFHCVProductCache(
+    get(ENV, "PDMPSAMPLERS_HCV_CACHE", "1") != "0", 0,
+    OMRFHMemo(d), OMRFHMemo(d), OMRFHMemo(d), OMRFHMemo(d), OMRFHMemo(d),
+    OMRFHAffine(d), OMRFHAffine(d), 0, 0)
+
+_omrf_hcv_cache_invalidate!(cache::OMRFHCVProductCache) =
+    (cache.generation += 1; cache)
+
+# H * w from the memo: reused when w equals the key, updated column by column
+# when w differs in a few coordinates (a Zig-Zag flip, or a coordinate that
+# sticks or unsticks; H is symmetric so columns are rows), otherwise
+# recomputed.  A full product is forced after 64 updates to bound rounding
+# drift.
+function _omrf_hmemo(cache::OMRFHCVProductCache, memo::OMRFHMemo, H, w)
+    if cache.enabled && memo.generation == cache.generation
+        changed = memo.changed
+        empty!(changed)
+        limit = max(4, length(w) >> 4)
+         for j in eachindex(w)
+            if memo.key[j] != w[j]
+                push!(changed, j)
+                length(changed) > limit && break
+            end
+        end
+        if isempty(changed)
+            cache.reused += 1
+            return memo.product
+        end
+        if length(changed) <= limit && memo.updates < 64
+             for j in changed
+                step = w[j] - memo.key[j]
+                for i in axes(H, 1)
+                    memo.product[i] += step * H[i, j]
+                end
+                memo.key[j] = w[j]
+            end
+            memo.updates += 1
+            cache.reused += 1
+            return memo.product
+        end
+    end
+    mul!(memo.product, H, w)
+    copyto!(memo.key, w)
+    memo.generation = cache.enabled ? cache.generation : -1
+    memo.updates = 0
+    cache.direct += 1
+    return memo.product
+end
+
+# Index of the largest |u[i, column]|, without allocating.
+function _omrf_pivot(u, column)
+    best = -1.0
+    k = 1
+    @inbounds for i in axes(u, 1)
+        a = abs(u[i, column])
+        if a > best
+            best = a
+            k = i
+        end
+    end
+    return k
+end
+
+# H * (x - anchor) at the start of a linear path.  The previous path started at
+# x_prev and moved with the velocity v stored in `cache.velocity`, so
+# x - anchor = (x_prev - anchor) + tau * v and the product follows from
+# H v in O(d).  tau is solved at the largest |v| and the identity is checked
+# coordinatewise to a few ulps; otherwise, and after 64 updates, the product is
+# recomputed.  Call before the velocity memo is updated for the new path.
+function _omrf_path_offset!(out, cache::OMRFHCVProductCache, H, delta)
+    memo = cache.path_offset
+    velocity = cache.velocity
+    if cache.enabled && memo.generation == cache.generation &&
+            velocity.generation == cache.generation && memo.updates < 64
+        v = velocity.key
+        k = 1
+        best = -1.0
+        @inbounds for i in eachindex(v)
+            a = abs(v[i])
+            if a > best
+                best = a
+                k = i
+            end
+        end
+        if best > 0
+            tau = (delta[k] - memo.key[k]) / v[k]
+            scale = maximum(abs, delta) + maximum(abs, memo.key) + abs(tau) * best
+            tol = 32 * eps(Float64) * scale
+            ok = isfinite(tau)
+            @inbounds for i in eachindex(v)
+                ok || break
+                ok = abs(delta[i] - memo.key[i] - tau * v[i]) <= tol
+            end
+            if ok
+                @inbounds for i in eachindex(out)
+                    memo.product[i] += tau * velocity.product[i]
+                end
+                copyto!(memo.key, delta)
+                memo.updates += 1
+                copyto!(out, memo.product)
+                cache.reused += 1
+                return out
+            end
+        end
+    end
+    mul!(memo.product, H, delta)
+    copyto!(memo.key, delta)
+    memo.generation = cache.enabled ? cache.generation : -1
+    memo.updates = 0
+    copyto!(out, memo.product)
+    cache.direct += 1
+    return out
+end
+
+function _omrf_haffine_reset!(out, cache, A::OMRFHAffine, H, delta)
+    mul!(A.pbase, H, delta)
+    copyto!(A.base, delta)
+    A.generation = cache.generation
+    A.ndir = 0
+    copyto!(out, A.pbase)
+    cache.direct += 1
+    return out
+end
+
+# out = H * delta.  When delta - base lies in the span of the stored directions
+# (checked coordinatewise to a few ulps of the magnitudes involved) the
+# product is assembled from stored products in O(d); otherwise the new offset
+# becomes a stored direction, or the cache restarts at delta.
+function _omrf_haffine!(out, cache::OMRFHCVProductCache, H, delta,
+        A::OMRFHAffine=cache.displacement)
+    if !cache.enabled
+        mul!(out, H, delta)
+        cache.direct += 1
+        return out
+    end
+    A.generation == cache.generation ||
+        return _omrf_haffine_reset!(out, cache, A, H, delta)
+    r = A.r
+    @. r = delta - A.base
+    rmax = maximum(abs, r)
+    if iszero(rmax)
+        copyto!(out, A.pbase)
+        cache.reused += 1
+        return out
+    end
+    s = 0.0
+    t = 0.0
+    solved = false
+    if A.ndir == 1
+        k = _omrf_pivot(A.u, 1)
+        s = r[k] / A.u[k, 1]
+        solved = isfinite(s)
+    elseif A.ndir == 2
+        k1 = _omrf_pivot(A.u, 1)
+        ratio = A.u[k1, 2] / A.u[k1, 1]
+        best = 0.0
+        k2 = 0
+        @inbounds for i in axes(A.u, 1)
+            e = abs(A.u[i, 2] - ratio * A.u[i, 1])
+            if e > best
+                best = e
+                k2 = i
+            end
+        end
+        if k2 > 0
+            a11 = A.u[k1, 1]; a12 = A.u[k1, 2]
+            a21 = A.u[k2, 1]; a22 = A.u[k2, 2]
+            det = a11 * a22 - a12 * a21
+            s = (r[k1] * a22 - a12 * r[k2]) / det
+            t = (a11 * r[k2] - a21 * r[k1]) / det
+            solved = isfinite(s) && isfinite(t)
+        end
+    end
+    if solved
+        scale = maximum(abs, delta) + maximum(abs, A.base) +
+            abs(s) * A.umax[1] + abs(t) * A.umax[2]
+        tol = 32 * eps(Float64) * scale
+        ok = true
+        @inbounds for i in eachindex(r)
+            if abs(r[i] - s * A.u[i, 1] - t * A.u[i, 2]) > tol
+                ok = false
+                break
+            end
+        end
+        if ok
+            @inbounds for i in eachindex(out)
+                out[i] = A.pbase[i] + s * A.pu[i, 1] + t * A.pu[i, 2]
+            end
+            cache.reused += 1
+            return out
+        end
+    end
+    A.ndir < 2 || return _omrf_haffine_reset!(out, cache, A, H, delta)
+    A.ndir += 1
+    column = A.ndir
+    copyto!(view(A.u, :, column), r)
+    mul!(view(A.pu, :, column), H, r)
+    A.umax[column] = rmax
+    out .= A.pbase .+ view(A.pu, :, column)
+    cache.direct += 1
+    return out
+end
+
 """
 Workspace for the exact OMRF person-likelihood residual.
 
@@ -301,6 +564,7 @@ mutable struct OMRFResidualContext
     incident_edges::Vector{Vector{Int}}
     incident_neighbours::Vector{Vector{Int}}
     anchor_probabilities::Matrix{Float64}
+    anchor_reference_probabilities::Matrix{Float64}
     anchor_expected_scores::Matrix{Float64}
     expected_scores_workspace::Matrix{Float64}
     interaction_matrix::Matrix{Float64}
@@ -338,6 +602,7 @@ mutable struct OMRFResidualContext
     active_group_count_max::Int
     direct_person_node_hcv::Bool
     node_box_first_order::Bool
+    hcv_cache::OMRFHCVProductCache
 end
 
 # Compatibility constructor for Julia-only tests and small pilots that build
@@ -369,7 +634,8 @@ function OMRFResidualContext(X::Matrix{Int}, X_float::Matrix{Float64},
     context = OMRFResidualContext(X, X_float, seen, threshold_indices,
         interaction_indices, global_scale_index, node_scale_indices,
         threshold_starts, incident_edges, incident_neighbours,
-        anchor_probabilities, anchor_expected_scores, expected_scores_workspace,
+        anchor_probabilities, zeros(P, size(X, 1)),
+        anchor_expected_scores, expected_scores_workspace,
         interaction_matrix, linear_fields, score_crossproducts,
         observed_threshold_counts, observed_interaction_sums, probability_buffer,
         hcv_buffer, likelihood_hessian, use_hcv, hcv_active, hcv_damping,
@@ -378,7 +644,7 @@ function OMRFResidualContext(X::Matrix{Int}, X_float::Matrix{Float64},
         touched_mask, counts, active_pattern_compression, active_free,
         active_generation, false, zeros(d), active_rebuilds,
         active_rebuild_seconds, active_group_count_sum, active_group_count_min,
-        active_group_count_max, false, false)
+        active_group_count_max, false, false, OMRFHCVProductCache(d))
     context.node_supports = _omrf_node_supports(context)
     return context
 end
@@ -578,6 +844,7 @@ function _omrf_add_likelihood_gradient!(out, context::OMRFResidualContext, x;
                 max_eta = max(max_eta, eta)
             end
             denominator = exp(-max_eta)
+            reference_probability = denominator
             for u in 1:q
                 probability = exp(context.probability_buffer[u] - max_eta)
                 context.probability_buffer[u] = probability
@@ -593,7 +860,11 @@ function _omrf_add_likelihood_gradient!(out, context::OMRFResidualContext, x;
                 end
             end
             expected_scores[n, node] = expected
-            cache_anchor && (context.anchor_expected_scores[node, n] = expected)
+            if cache_anchor
+                context.anchor_expected_scores[node, n] = expected
+                context.anchor_reference_probabilities[node, n] =
+                    reference_probability / denominator
+            end
         end
         for u in 1:q
             out[context.threshold_indices[start + u - 1]] -=
@@ -636,8 +907,37 @@ end
         other_hi = other == 0 ? 0.0 : logit_hi[other]
         lo_term = exp(other_lo - target_hi)
         hi_term = exp(other_hi - target_lo)
-        isfinite(lo_term) && isfinite(hi_term) || throw(OverflowError(
-            "OMRF softmax interval overflow; subdivide the cell"))
+        # A very wide certified cell can make a logit difference larger than
+        # log(floatmax). The probability remains finite; only this direct
+        # denominator representation overflows. Use a shifted softmax for
+        # that rare case instead of aborting a valid trajectory.
+        if !isfinite(lo_term) || !isfinite(hi_term)
+            lower_differences = Float64[
+                _omrf_up((other_ == 0 ? 0.0 : logit_hi[other_]) - target_lo)
+                for other_ in 0:q if other_ != category]
+            upper_differences = Float64[
+                _omrf_down((other_ == 0 ? 0.0 : logit_lo[other_]) - target_hi)
+                for other_ in 0:q if other_ != category]
+            lower_max = max(0.0, maximum(lower_differences))
+            upper_max = max(0.0, maximum(upper_differences))
+            lower_num = _omrf_down(exp(-lower_max))
+            upper_num = _omrf_up(exp(-upper_max))
+            lower_scaled_den = _omrf_up(exp(-lower_max))
+            upper_scaled_den = _omrf_down(exp(-upper_max))
+            for difference in lower_differences
+                lower_scaled_den = _omrf_up(lower_scaled_den +
+                    _omrf_up(exp(_omrf_up(difference - lower_max))))
+            end
+            for difference in upper_differences
+                upper_scaled_den = _omrf_down(upper_scaled_den +
+                    _omrf_down(exp(_omrf_down(difference - upper_max))))
+            end
+            lower = lower_num <= 0.0 ? 0.0 :
+                _omrf_down(lower_num / lower_scaled_den)
+            upper = upper_num <= 0.0 ? nextfloat(0.0) :
+                _omrf_up(upper_num / upper_scaled_den)
+            return max(0.0, lower), min(1.0, upper)
+        end
         lower_den = _omrf_up(lower_den + hi_term)
         upper_den = _omrf_down(upper_den + lo_term)
     end
@@ -1022,8 +1322,13 @@ end
 # control variate.  Every primitive is rounded outwards by one representable
 # Float64 value.  This is deliberately restricted to the ordinary CV: an HCV
 # has an additional position-dependent deterministic likelihood term.
-@inline _omrf_down(x::Float64) = isfinite(x) ? prevfloat(x) : x
-@inline _omrf_up(x::Float64) = isfinite(x) ? nextfloat(x) : x
+# x -+ (|x| 2^-52 + 2^-1074) lies beyond prevfloat/nextfloat(x) for every finite
+# x, so this is a (marginally wider) outward rounding without the branches of
+# prevfloat/nextfloat.
+@inline _omrf_down(x::Float64) =
+    ifelse(isfinite(x), x - muladd(abs(x), 0x1p-52, 0x1p-1074), x)
+@inline _omrf_up(x::Float64) =
+    ifelse(isfinite(x), x + muladd(abs(x), 0x1p-52, 0x1p-1074), x)
 @inline _omrf_iadd(al, ah, bl, bh) =
     (_omrf_down(al + bl), _omrf_up(ah + bh))
 @inline _omrf_iscale(al, ah, c) = c >= 0 ?
@@ -1120,8 +1425,8 @@ function _omrf_prior_intervals!(glo, ghi, prior::OMRFIndependentAnalyticPrior,
     end
     s = prior.interaction_scale
     s2 = s * s
-    @inbounds for (edge, i) in pairs(prior.interaction_indices)
-        active !== nothing && !active[edge] && continue
+    @inbounds for i in prior.interaction_indices
+        active !== nothing && !active[i] && continue
         if prior.interaction_type === :gaussian
             glo[i] = _omrf_down(xlo[i] / s2)
             ghi[i] = _omrf_up(xhi[i] / s2)
@@ -1217,8 +1522,6 @@ end
 function _omrf_direct_deterministic_cell_bound(oracle, active, state, flow,
         left::Real, right::Real)
     context = oracle.residual_context
-    context.use_hcv && throw(ArgumentError(
-        "direct first-order deterministic certificate does not support HCV routes"))
     xlo, xhi = oracle.interval_xlo, oracle.interval_xhi
     vlo, vhi = oracle.interval_vlo, oracle.interval_vhi
     glo, ghi = oracle.interval_glo, oracle.interval_ghi
@@ -1227,12 +1530,223 @@ function _omrf_direct_deterministic_cell_bound(oracle, active, state, flow,
     prior = something(oracle.analytic_prior)
     _omrf_prior_intervals!(glo, ghi, prior, xlo, xhi, active)
     nodecv = oracle.node_position_cv
+    if context.hcv_active
+        context.hcv_nodewise && throw(ArgumentError(
+            "direct deterministic HCV certificate requires a global HCV"))
+        H = something(context.likelihood_hessian)
+        anchor = oracle.anchor
+        if _omrf_actual_flow(flow) isa BouncyParticle
+            # On a fixed linear sticky stratum the HCV likelihood term is
+            # affine and H is a likelihood Hessian, hence positive
+            # semidefinite.  Its signed BPS rate has derivative v'Hv >= 0 and
+            # is maximized at the right endpoint.  Evaluate it there exactly
+            # and combine it with the separately certified prior interval.
+            prior_upper, _ = _omrf_signed_interval_upper(
+                glo, ghi, vlo, vhi)
+            t = Float64(right)
+            @inbounds for j in eachindex(anchor)
+                context.displacement[j] = _omrf_is_free(state, j) ?
+                    muladd(t, state.ξ.θ[j], state.ξ.x[j]) - anchor[j] :
+                    state.ξ.x[j] - anchor[j]
+            end
+            # H is symmetric, so v_f' H d = (H v_f)' d; H v_f is fixed along
+            # the flight and is reused until the velocity or stratum changes.
+            @inbounds for j in eachindex(anchor)
+                context.hcv_product[j] = _omrf_is_free(state, j) ?
+                    state.ξ.θ[j] : 0.0
+            end
+            Hv = _omrf_hmemo(context.hcv_cache, context.hcv_cache.velocity,
+                H, context.hcv_product)
+            likelihood_rate = 0.0
+            likelihood_absolute = 0.0
+            @inbounds for i in eachindex(anchor)
+                term = Hv[i] * context.displacement[i]
+                if _omrf_is_free(state, i)
+                    anchor_term = state.ξ.θ[i] *
+                        (oracle.full_anchor[i] - oracle.prior_anchor[i])
+                    term += anchor_term
+                    likelihood_absolute += abs(anchor_term)
+                end
+                likelihood_rate += term
+                likelihood_absolute += abs(Hv[i] * context.displacement[i])
+            end
+            # Reassociating the product changes rounding; cover it.
+            likelihood_rate += 1e-10 * likelihood_absolute
+            result = max(0.0, likelihood_rate + prior_upper)
+            isfinite(result) || throw(OverflowError(
+                "OMRF HCV BPS deterministic rate is not finite"))
+            return nextfloat(result)
+        end
+        if _omrf_actual_flow(flow) isa ZigZag
+            # Each HCV likelihood-gradient coordinate is affine along the
+            # linear Zig-Zag stratum.  Preserve that shared-time dependence
+            # exactly instead of interval-multiplying H by independent
+            # coordinate boxes, which discards cancellations and badly
+            # inflates the sum of coordinatewise positive rates.
+            @inbounds for j in eachindex(anchor)
+                context.displacement[j] = state.ξ.x[j] - anchor[j]
+            end
+            copyto!(xlo, _omrf_hmemo(context.hcv_cache,
+                context.hcv_cache.state, H, context.displacement))
+            @inbounds for j in eachindex(anchor)
+                context.displacement[j] = _omrf_is_free(state, j) ?
+                    state.ξ.θ[j] : 0.0
+            end
+            copyto!(xhi, _omrf_hmemo(context.hcv_cache,
+                context.hcv_cache.velocity, H, context.displacement))
+            l = Float64(left)
+            r = Float64(right)
+            @inbounds for i in eachindex(anchor)
+                baseline = oracle.full_anchor[i] - oracle.prior_anchor[i]
+                gl = baseline + xlo[i] + l * xhi[i]
+                gr = baseline + xlo[i] + r * xhi[i]
+                glo[i] = _omrf_down(glo[i] + min(gl, gr))
+                ghi[i] = _omrf_up(ghi[i] + max(gl, gr))
+            end
+            return _omrf_interval_rate_bound(nothing, nothing,
+                glo, ghi, xlo, xhi, vlo, vhi, state, flow)
+        end
+        if _omrf_actual_flow(flow) isa PDMPSamplers.AnyBoomerang
+            actual = _omrf_actual_flow(flow)
+            actual.Γ isa Diagonal || throw(ArgumentError(
+                "direct HCV Boomerang certificate requires diagonal precision"))
+            prior_upper, _ = _omrf_signed_interval_upper(
+                glo, ghi, vlo, vhi)
+
+            # On the free stratum write d(t)=c+u*cos(t)+w*sin(t) and
+            # v(t)=-u*sin(t)+w*cos(t).  The HCV likelihood minus Gaussian
+            # reference gradient has coefficients g0, gc and gs.  Their
+            # scalar product is a degree-two trigonometric polynomial.  Bound
+            # its first and second harmonics separately using exact closed
+            # harmonic intervals; this is much tighter than multiplying
+            # coordinate boxes and needs only three dense HCV products.
+            u = xlo
+            w = xhi
+            g0 = glo
+            gc = ghi
+            gs = vlo
+            @inbounds for j in eachindex(anchor)
+                if _omrf_is_free(state, j)
+                    u[j] = state.ξ.x[j] - actual.μ[j]
+                    w[j] = state.ξ.θ[j]
+                    context.displacement[j] = actual.μ[j] - anchor[j]
+                else
+                    u[j] = 0.0
+                    w[j] = 0.0
+                    context.displacement[j] = state.ξ.x[j] - anchor[j]
+                end
+            end
+            cache = context.hcv_cache
+            Hd = _omrf_hmemo(cache, cache.reference, H, context.displacement)
+            @inbounds for i in eachindex(anchor)
+                g0[i] = oracle.full_anchor[i] - oracle.prior_anchor[i] + Hd[i]
+            end
+            Hu = _omrf_hmemo(cache, cache.offset, H, u)
+            @inbounds for i in eachindex(anchor)
+                gc[i] = Hu[i] - actual.Γ.diag[i] * u[i]
+            end
+            Hw = _omrf_hmemo(cache, cache.velocity, H, w)
+            @inbounds for i in eachindex(anchor)
+                gs[i] = Hw[i] - actual.Γ.diag[i] * w[i]
+            end
+            A1 = dot(w, g0)
+            B1 = -dot(u, g0)
+            ugs = dot(u, gs)
+            wgc = dot(w, gc)
+            C = (-ugs + wgc) / 2
+            A2 = (ugs + wgc) / 2
+            B2 = (-dot(u, gc) + dot(w, gs)) / 2
+            _, first_upper = _omrf_harmonic_cell_interval(
+                0.0, A1, B1, Float64(left), Float64(right))
+            _, second_upper = _omrf_harmonic_cell_interval(
+                0.0, A2, B2, 2Float64(left), 2Float64(right))
+            result = max(0.0, prior_upper + C + first_upper + second_upper)
+            isfinite(result) || throw(OverflowError(
+                "OMRF HCV Boomerang deterministic rate is not finite"))
+            return nextfloat(result)
+        end
+        # The deterministic HCV likelihood gradient is exactly
+        #   full(anchor) - prior(anchor) + H(anchor) * (x-anchor).
+        # Add an interval matrix-vector product to the exact analytic-prior
+        # intervals.  This is valid for linear, harmonic and sticky strata and
+        # retains each coordinate separately for Zig-Zag positive-part rates.
+        @inbounds for i in eachindex(glo, ghi)
+            lo = oracle.full_anchor[i] - oracle.prior_anchor[i]
+            hi = lo
+            for j in eachindex(anchor)
+                hij = H[i, j]
+                iszero(hij) && continue
+                dl = _omrf_down(xlo[j] - anchor[j])
+                dh = _omrf_up(xhi[j] - anchor[j])
+                tl, th = _omrf_iscale(dl, dh, hij)
+                lo = _omrf_down(lo + tl)
+                hi = _omrf_up(hi + th)
+            end
+            glo[i] = _omrf_down(glo[i] + lo)
+            ghi[i] = _omrf_up(ghi[i] + hi)
+        end
+        return _omrf_interval_rate_bound(nothing, nothing,
+            glo, ghi, xlo, xhi, vlo, vhi, state, flow)
+    end
     likelihood_baseline = nodecv === nothing ? oracle.full_anchor :
         nodecv.likelihood_baseline
     prior_baseline = nodecv === nothing ? oracle.prior_anchor : nothing
     return _omrf_interval_rate_bound(likelihood_baseline, prior_baseline,
         glo, ghi, xlo, xhi,
         vlo, vhi, state, flow)
+end
+
+"""Signed deterministic HCV/prior upper bound on a linear BPS cell.
+
+The likelihood HCV contribution is affine with nonnegative directional
+derivative `v'Hv`, so its maximum is at the right endpoint. The active-stratum
+analytic prior is enclosed coordinatewise on the whole cell. Frozen
+coordinates have zero physical velocity and their prior contribution is
+excluded through the parameter-indexed active mask.
+"""
+function _omrf_joint_signed_deterministic_upper(oracle, active, state, flow,
+        left::Float64, right::Float64)
+    _omrf_actual_flow(flow) isa BouncyParticle || throw(ArgumentError(
+        "joint signed deterministic bound supports linear BPS only"))
+    context = oracle.residual_context
+    context.hcv_active && !context.hcv_nodewise &&
+        isinf(context.hcv_damping) || throw(ArgumentError(
+        "joint signed bound requires the installed undamped global HCV"))
+    _omrf_fill_path_intervals!(oracle.interval_xlo, oracle.interval_xhi,
+        oracle.interval_vlo, oracle.interval_vhi, state, flow, left, right)
+    _omrf_prior_intervals!(oracle.interval_glo, oracle.interval_ghi,
+        something(oracle.analytic_prior), oracle.interval_xlo,
+        oracle.interval_xhi, active)
+    prior_upper, _ = _omrf_signed_interval_upper(oracle.interval_glo,
+        oracle.interval_ghi, oracle.interval_vlo, oracle.interval_vhi)
+    H = something(context.likelihood_hessian)
+    anchor = oracle.anchor
+    # H (x + right v_f - anchor) = H (x - anchor) + right H v_f.  Both
+    # products are fixed on the flight segment and reused across its cells.
+    cache = context.hcv_cache
+    @. context.displacement = state.ξ.x - anchor
+    Hd = _omrf_hmemo(cache, cache.state, H, context.displacement)
+    @inbounds for j in eachindex(anchor)
+        context.displacement[j] = _omrf_is_free(state, j) ? state.ξ.θ[j] : 0.0
+    end
+    Hv = _omrf_hmemo(cache, cache.velocity, H, context.displacement)
+    likelihood_rate = 0.0
+    likelihood_absolute = 0.0
+    @inbounds for i in eachindex(anchor)
+        active[i] || continue
+        baseline = oracle.full_anchor[i] - oracle.prior_anchor[i]
+        term = state.ξ.θ[i] * (baseline + Hd[i] + right * Hv[i])
+        likelihood_rate += term
+        likelihood_absolute += abs(state.ξ.θ[i]) *
+            (abs(baseline) + abs(Hd[i]) + right * abs(Hv[i]))
+    end
+    n = length(anchor)
+    gamma = n * eps(Float64) / (1 - n * eps(Float64))
+    result = nextfloat(nextfloat(likelihood_rate +
+        gamma * likelihood_absolute) + prior_upper)
+    isfinite(result) || throw(OverflowError(
+        "joint signed deterministic bound is not finite"))
+    return result
 end
 
 @inline function _omrf_node_hcv_alpha!(context::OMRFResidualContext,
@@ -1247,6 +1761,18 @@ end
         context.hcv_damping / (context.hcv_damping + displacement2)
     context.node_hcv_alphas[node] = α
     return α
+end
+
+function _omrf_observed_threshold_counts(X::Matrix{Int},
+        threshold_starts::Vector{Int}, no_thresholds::Int)
+    counts = zeros(Float64, no_thresholds)
+    @inbounds for node in axes(X, 2), person in axes(X, 1)
+        observed = X[person, node]
+        if observed > 0
+            counts[threshold_starts[node] + observed - 1] += 1.0
+        end
+    end
+    return counts
 end
 
 function _omrf_residual_context(envelope_spec, unc_names, anchor,
@@ -1335,14 +1861,8 @@ function _omrf_residual_context(envelope_spec, unc_names, anchor,
     zigzag_sign_aware = _haskey(envelope_spec, :zigzag_sign_aware) &&
         Bool(_rget(envelope_spec, :zigzag_sign_aware))
     X_float = Matrix{Float64}(X)
-    observed_threshold_counts = zeros(no_thresholds)
-    @inbounds for node in 1:P, n in 1:N
-        observed = X[n, node]
-        if observed > 0
-            observed_threshold_counts[
-                threshold_starts[node] + observed - 1] += 1.0
-        end
-    end
+    observed_threshold_counts = _omrf_observed_threshold_counts(
+        X, threshold_starts, no_thresholds)
     observed_interaction_sums = zeros(no_edges)
     edge = 1
     @inbounds for left in 1:(P - 1), right in (left + 1):P
@@ -1355,22 +1875,25 @@ function _omrf_residual_context(envelope_spec, unc_names, anchor,
         threshold_starts, incident_edges,
         incident_neighbours,
         Matrix{Float64}(undef, no_thresholds, N),
-        Matrix{Float64}(undef, P, N), zeros(N, P), zeros(P, P),
+        Matrix{Float64}(undef, P, N), Matrix{Float64}(undef, P, N),
+        zeros(N, P), zeros(P, P),
         zeros(N, P), zeros(P, P), observed_threshold_counts,
         observed_interaction_sums, zeros(maximum(seen) - 1),
         zeros(maximum(seen) - 1), nothing, use_hcv,
         use_hcv && !hcv_after_warmup, hcv_damping,
         zeros(d), zeros(d), hcv_nodewise, nothing,
         zeros(d, P), zeros(d, P), zeros(P), Vector{Vector{Int}}(),
-        factorization, Int[], falses(d), counts,
+        factorization, sizehint!(Int[], d), falses(d), counts,
         active_pattern_compression, trues(d), 0, zigzag_sign_aware,
         zeros(d), 0, 0.0, 0, 0, 0,
         _haskey(envelope_spec, :bound_type) &&
             String(_rget(envelope_spec, :bound_type)) in
-                ("direct_person_node_hcv", "direct_person_node_cv"),
+                ("direct_person_node_hcv", "direct_factor_roof_person_hcv",
+                 "direct_person_node_cv"),
         _haskey(envelope_spec, :bound_type) &&
             String(_rget(envelope_spec, :bound_type)) in
-                ("node_box_first_order", "cell_marked_node_box_first_order"))
+                ("node_box_first_order", "cell_marked_node_box_first_order"),
+        OMRFHCVProductCache(d))
     context.node_supports = _omrf_node_supports(context)
     _cache_omrf_anchor!(context, anchor)
     if use_hcv
@@ -1395,6 +1918,7 @@ end
 function _omrf_likelihood_hessian!(hessian::Matrix{Float64},
         context::OMRFResidualContext)
     fill!(hessian, 0.0)
+    _omrf_hcv_cache_invalidate!(context.hcv_cache)
     N, P = size(context.X)
     @inbounds for n in 1:N, node in 1:P
         q = context.seen[node] - 1
@@ -1493,10 +2017,10 @@ function _omrf_likelihood_hessians(context::OMRFResidualContext, anchor)
     return hessian, node_hessians
 end
 
-@inline function _omrf_node_probabilities!(context::OMRFResidualContext,
+@inline function _omrf_node_probabilities_with_reference!(context::OMRFResidualContext,
         x, n::Int, node::Int)
     q = context.seen[node] - 1
-    iszero(q) && return 0.0
+    iszero(q) && return (0.0, 1.0)
     field = 0.0
     edges = context.incident_edges[node]
     neighbours = context.incident_neighbours[node]
@@ -1511,7 +2035,8 @@ end
         context.probability_buffer[u] = eta
         max_eta = max(max_eta, eta)
     end
-    denominator = exp(-max_eta)
+    reference_weight = exp(-max_eta)
+    denominator = reference_weight
     @inbounds for u in 1:q
         probability = exp(context.probability_buffer[u] - max_eta)
         context.probability_buffer[u] = probability
@@ -1523,14 +2048,23 @@ end
         context.probability_buffer[u] = probability
         expected += u * probability
     end
+    return expected, reference_weight / denominator
+end
+
+@inline function _omrf_node_probabilities!(context::OMRFResidualContext,
+        x, n::Int, node::Int)
+    expected, _ = _omrf_node_probabilities_with_reference!(
+        context, x, n, node)
     return expected
 end
 
 function _cache_omrf_anchor!(context::OMRFResidualContext, anchor)
     N, P = size(context.X)
     @inbounds for n in 1:N, node in 1:P
-        expected = _omrf_node_probabilities!(context, anchor, n, node)
+        expected, reference_probability =
+            _omrf_node_probabilities_with_reference!(context, anchor, n, node)
         context.anchor_expected_scores[node, n] = expected
+        context.anchor_reference_probabilities[node, n] = reference_probability
         q = context.seen[node] - 1
         start = context.threshold_starts[node]
         for u in 1:q
@@ -1609,10 +2143,15 @@ function omrf_residual!(context::OMRFResidualContext, out, x, subset)
         0.0
     end
     if context.factorization === :person
+        # A person touches the support of every node; record it once.
+        if !isempty(subset)
+            @inbounds for node in 1:P
+                _record_omrf_touched_support!(context, node)
+            end
+        end
         @inbounds for n in subset
             1 <= n <= N || throw(BoundsError(context.X, (n, :)))
             for node in 1:P
-                _record_omrf_touched_support!(context, node)
                 node_α = context.hcv_nodewise && context.hcv_active ?
                     context.node_hcv_alphas[node] : α
                 _omrf_node_residual!(context, out, x, n, node, node_α)
@@ -2401,6 +2940,7 @@ mutable struct OMRFAnalyticSubsamplingOracle
     node_local_hcv::Union{Nothing,OMRFNodeLocalHCVBank}
     node_position_cv::Union{Nothing,OMRFNodePositionCV}
     lazy_residual_subset_bound::Float64
+    cached_deterministic_signed_rate::Float64
     exact_selected_refinement::Bool
     cached_residual::Vector{Float64}
     cached_residual_valid::Bool
@@ -2413,6 +2953,12 @@ mutable struct OMRFAnalyticSubsamplingOracle
     interval_glo::Vector{Float64}
     interval_ghi::Vector{Float64}
 end
+
+@inline _omrf_base_oracle(oracle) = oracle
+@inline _omrf_base_oracle(oracle::PDMPSamplers.WithStats) =
+    _omrf_base_oracle(oracle.f)
+@inline _omrf_base_oracle(oracle::PDMPSamplers.WithResidualStats) =
+    _omrf_base_oracle(oracle.f)
 
 # Opt-in research sidecar. It is disabled by default and records only scalar
 # proposal quantities, so ordinary sampling has one predictable branch and no
@@ -2496,12 +3042,17 @@ function OMRFAnalyticSubsamplingOracle(ctx::StanSubsamplingContext,
     residual_context = _omrf_residual_context(
         envelope_spec, unc_names, anchor, ctx.counts)
     analytic_prior = _omrf_analytic_prior(envelope_spec, residual_context)
-    exact_selected_refinement = get(
-        envelope_spec, "exact_selected_refinement", false)
+    # R lists arrive through JuliaCall with Symbol keys, whereas research
+    # fixtures commonly use String keys.  Resolve both forms consistently;
+    # `get(..., "name", default)` silently disabled the requested refinement
+    # for the ordinary R-origin path.
+    exact_selected_refinement = _haskey(
+        envelope_spec, :exact_selected_refinement) && Bool(_rget(
+            envelope_spec, :exact_selected_refinement))
     oracle = OMRFAnalyticSubsamplingOracle(ctx, copy(anchor), zeros(d), zeros(d),
         zeros(d), zeros(d), false, residual_context, analytic_prior, nothing,
         nothing,
-        NaN, exact_selected_refinement, zeros(d), false, trues(d), 0,
+        NaN, NaN, exact_selected_refinement, zeros(d), false, trues(d), 0,
         zeros(d), zeros(d), zeros(d), zeros(d), zeros(d), zeros(d))
     _clear_gradient!(ctx, :full, oracle.full_anchor, anchor)
     if analytic_prior === nothing
@@ -2526,7 +3077,7 @@ function OMRFAnalyticSubsamplingOracle(ctx::StanSubsamplingContext,
     return OMRFAnalyticSubsamplingOracle(ctx, anchor, full_anchor,
         prior_anchor, prior_x, prior_x_position, prior_x_valid,
         residual_context, analytic_prior, node_local_hcv, nothing,
-        lazy_residual_subset_bound, false, zeros(length(anchor)), false,
+        lazy_residual_subset_bound, NaN, false, zeros(length(anchor)), false,
         trues(length(anchor)), 0,
         zeros(length(anchor)), zeros(length(anchor)), zeros(length(anchor)),
         zeros(length(anchor)), zeros(length(anchor)), zeros(length(anchor)))
@@ -2555,8 +3106,7 @@ function PDMPSamplers.deterministic_rate_cell_bound(
         oracle::OMRFAnalyticSubsamplingOracle,
         state::PDMPSamplers.AbstractPDMPState,
         flow::PDMPSamplers.ContinuousDynamics, left::Real, right::Real)
-    (oracle.residual_context.use_hcv || oracle.analytic_prior === nothing) &&
-        return nothing
+    oracle.analytic_prior === nothing && return nothing
     active = oracle.analytic_prior isa OMRFNodeScaleAnalyticPrior ?
         oracle.active_free : nothing
     return _omrf_direct_deterministic_cell_bound(
@@ -2564,7 +3114,7 @@ function PDMPSamplers.deterministic_rate_cell_bound(
 end
 PDMPSamplers.has_direct_deterministic_rate_cell_bound(
     oracle::OMRFAnalyticSubsamplingOracle) =
-    !oracle.residual_context.use_hcv && oracle.analytic_prior !== nothing
+    oracle.analytic_prior !== nothing
 
 function _prior_gradient_at_x!(oracle::OMRFAnalyticSubsamplingOracle, x)
     if !oracle.prior_x_valid || oracle.prior_x_position != x
@@ -2627,8 +3177,8 @@ function (oracle::OMRFAnalyticSubsamplingOracle)(out, x)
             displacement2 = dot(context.displacement, context.displacement)
             α = isinf(context.hcv_damping) ? 1.0 :
                 context.hcv_damping / (context.hcv_damping + displacement2)
-            mul!(context.hcv_product, something(context.likelihood_hessian),
-                context.displacement)
+            _omrf_haffine!(context.hcv_product, context.hcv_cache,
+                something(context.likelihood_hessian), context.displacement)
             @. out += α * context.hcv_product
         end
     end
@@ -2687,7 +3237,7 @@ function (oracle::OMRFAnalyticSubsamplingOracle)(out, x, subset, anchor)
         empty!(context.touched_positions)
         N, P = size(context.X)
         if context.factorization === :person
-            @inbounds for _ in subset, node in 1:P
+            isempty(subset) || @inbounds for node in 1:P
                 _record_omrf_touched_support!(context, node)
             end
             context.counts.analytic_persons += length(subset)
@@ -3150,6 +3700,36 @@ end
     return upper - lower
 end
 
+"""
+Certified directional categorical HCV remainder bound.
+
+The local Taylor bound is `V * Delta^2 / 8`.  Independently, exponential
+tilting across a log-weight range `Delta` changes a categorical law by at
+most `tanh(Delta/4)` in total variation, while Hoeffding's covariance
+inequality gives `|z'C(a)delta| <= V * Delta / 4`.  Taking the smaller bound
+preserves the certificate while preventing a quadratic blow-up far from the
+anchor.
+"""
+@inline function _omrf_categorical_hcv_bound(
+        velocity_range::Real, displacement_range::Real)
+    V = max(0.0, Float64(velocity_range))
+    Delta = max(0.0, Float64(displacement_range))
+    local_bound = Delta * Delta / 8
+    # Unique positive solution of
+    #   Delta^2/8 = tanh(Delta/4) + Delta/4.
+    # Below it the quadratic branch is tighter, so the transcendental call is
+    # unnecessary.  Testing against the coarser `1 + Delta/4` is invalid: it
+    # switches too late and makes the resulting minimum non-monotone, which
+    # can make a closed-cell certificate smaller than an interior point.
+    Delta <= 3.592978281031538 && return V * local_bound
+    # Exponential tilting by a log-weight whose range is Delta changes a
+    # categorical probability vector by at most tanh(Delta/4) in total
+    # variation.  Combining this with the covariance term V*Delta/4 tightens
+    # the far-anchor enclosure.  `tanh` is evaluated only when the global
+    # branch beats the inexpensive local quadratic branch.
+    return V * (tanh(Delta / 4) + Delta / 4)
+end
+
 """Direct categorical directional Taylor remainder and its certified bound."""
 function _omrf_categorical_hcv_remainder(anchor_logits, delta, z)
     q = length(anchor_logits)
@@ -3191,8 +3771,8 @@ function _omrf_categorical_hcv_remainder(anchor_logits, delta, z)
             (z[u] - anchor_mean_z) * (delta[u] - anchor_mean_delta)
     end
     remainder = displaced_mean_z - anchor_mean_z - covariance
-    bound = _omrf_range_with_reference(z) *
-        _omrf_range_with_reference(delta)^2 / 8
+    bound = _omrf_categorical_hcv_bound(
+        _omrf_range_with_reference(z), _omrf_range_with_reference(delta))
     return remainder, bound
 end
 
@@ -3208,7 +3788,10 @@ function _omrf_direct_categorical_cell_bound(
     right, _ = _omrf_categorical_hcv_remainder(
         anchor_logits, right_delta, z)
     range_z = _omrf_range_with_reference(z)
-    return max(abs(left), abs(right)) + range_z^3 * width^2 / 32
+    delta_range = max(_omrf_range_with_reference(delta_left),
+        _omrf_range_with_reference(right_delta))
+    return min(max(abs(left), abs(right)) + range_z^3 * width^2 / 32,
+        _omrf_categorical_hcv_bound(range_z, delta_range))
 end
 
 """Exact first-order categorical CV directional residual."""
@@ -3253,7 +3836,8 @@ function _omrf_direct_categorical_cv_cell_bound(
 end
 
 """
-Research-only direct person-node HCV certificate for linear BPS cells.
+Research-only direct person-node HCV certificate for BPS, Zig-Zag and
+Boomerang cells.
 
 Along a linear path the exact directional remainder `h(t)` satisfies
 `h''(t) = D^3 logsumexp(eta(t))[z,z,z]`. With the reference-category value
@@ -3271,15 +3855,79 @@ For the ordinary first-order CV mode, `h(t)=z'(p(t)-p(a))` and
 `max(abs(h(t)))` on a cell is attained at an endpoint. The shared fill uses
 `nextfloat(max(abs(h(left)), abs(h(right))))`; its curvature coefficient is
 exactly zero. This mode stores no likelihood Hessian.
+
+For Zig-Zag, the cached cell mass is the sum of coordinatewise categorical
+HCV bounds. The velocity range is bounded by the sum of absolute threshold
+velocities plus the category range times the absolute incident-interaction
+field. Because the categorical displacement range is convex along a linear
+cell and the capped bound is monotone, its maximum is attained at an endpoint.
+
+For Boomerang, each factor stores its harmonic offset/cosine/sine triples.
+Pairwise analytic harmonic maxima give the displacement and velocity ranges
+over a closed cell, after which the same capped categorical HCV inequality is
+used. The cumulative factor table is built once for the cell and reused by
+every proposal drawn from that cell.
 """
-mutable struct OMRFDirectPersonNodeHCVEnvelope <:
+abstract type OMRFDirectHCVSamplingPolicy end
+struct OMRFDirectFactorSampling <: OMRFDirectHCVSamplingPolicy end
+struct OMRFDirectPersonSampling <: OMRFDirectHCVSamplingPolicy end
+
+mutable struct OMRFSharedCurrentWorkspace
+    representatives::Matrix{Int}
+    person_group::Matrix{Int}
+    multiplicities::Matrix{Int}
+    group_count::Vector{Int}
+    hash_keys::Vector{UInt}
+    hash_values::Vector{Int}
+    hash_epochs::Vector{Int}
+    epoch::Int
+    previous_free::BitVector
+    previous_frozen_nonzero::BitVector
+    dirty_nodes::BitVector
+    active_incident_slots::Matrix{Int}
+    active_incident_count::Vector{Int}
+    initialized::Bool
+    use_fallback::Bool
+    field0::Matrix{Float64}
+    field0_upper::Matrix{Float64}
+    fieldv::Matrix{Float64}
+    fieldv_upper::Matrix{Float64}
+    left_moment::Matrix{Float64}
+    right_moment::Matrix{Float64}
+    left_error::Matrix{Float64}
+    right_error::Matrix{Float64}
+    last_boundary::Float64
+    last_valid::Bool
+    rebuild_count::Int
+    rebuild_seconds::Float64
+    pattern_evaluations::Int
+end
+
+function _new_omrf_shared_current_workspace(context::OMRFResidualContext)
+    N, P = size(context.X)
+    slots = nextpow(2, max(4, 2N))
+    E = length(context.interaction_indices)
+    return OMRFSharedCurrentWorkspace(zeros(Int, N, P), zeros(Int, P, N),
+        zeros(Int, N, P), zeros(Int, P), zeros(UInt, slots),
+        zeros(Int, slots), zeros(Int, slots), 0, falses(length(context.active_free)),
+        falses(E), falses(P), zeros(Int, P - 1, P), zeros(Int, P),
+        false, false, zeros(N, P), zeros(N, P),
+        zeros(N, P), zeros(N, P), zeros(N, P), zeros(N, P),
+        zeros(N, P), zeros(N, P),
+        0.0, false, 0, 0.0, 0)
+end
+
+mutable struct OMRFDirectPersonNodeHCVEnvelope{S<:OMRFDirectHCVSamplingPolicy} <:
         PDMPSamplers.AbstractResidualEnvelope
+    sampling_policy::S
     n_persons::Int
     n_nodes::Int
     anchor::Vector{Float64}
     context::OMRFResidualContext
     hcv_remainder::Bool
     event_horizon_scope::Bool
+    person_signed_roof::Bool
+    signed_only_person_roof::Bool
     component_scales!::Nothing
     component_cell_scales!::Nothing
     totals::Vector{Float64}
@@ -3292,28 +3940,54 @@ mutable struct OMRFDirectPersonNodeHCVEnvelope <:
     cell_mass::Vector{Float64}
     cell_cumulative::Matrix{Float64}
     factor_workspace::Vector{Float64}
+    person_cell_cumulative::Matrix{Float64}
+    person_workspace::Vector{Float64}
+    person_left_signed::Vector{Float64}
+    person_right_signed::Vector{Float64}
+    person_left_abs::Vector{Float64}
+    person_right_abs::Vector{Float64}
+    person_curvature::Vector{Float64}
+    joint_group_size::Int
+    joint_groups::Matrix{Int}
+    joint_group_offsets::Vector{Int}
+    joint_group_lengths::Vector{Int}
+    joint_cell_caps::Matrix{Float64}
+    joint_cell_cumulative::Matrix{Float64}
+    joint_cell_mass::Vector{Float64}
+    shared_current::Union{Nothing,OMRFSharedCurrentWorkspace}
     cell_count::Int
     active_cell::Int
+    active_time::Float64
+    path_kind::UInt8
     origin_time::Float64
     path_x::Vector{Float64}
     path_theta::Vector{Float64}
     path_anchor::Vector{Float64}
+    hcv_path_offset::Vector{Float64}
+    hcv_path_cosine::Vector{Float64}
+    hcv_path_sine::Vector{Float64}
     path_active_generation::Int
     path_flow_token::UInt
     qmax::Int
     path_threshold_delta0::Matrix{Float64}
     path_threshold_z::Matrix{Float64}
+    path_threshold_sine::Matrix{Float64}
     interaction_delta::Matrix{Float64}
     interaction_velocity::Matrix{Float64}
+    interaction_abs_velocity::Matrix{Float64}
     field_delta::Matrix{Float64}
     field_velocity::Matrix{Float64}
+    field_abs_velocity::Matrix{Float64}
     path_delta0::Matrix{Float64}
     path_z::Matrix{Float64}
+    path_harmonic_sine::Matrix{Float64}
     path_anchor_reference_probability::Vector{Float64}
     path_anchor_mean_z::Vector{Float64}
     path_anchor_cov_z_delta0::Vector{Float64}
     path_anchor_var_z::Vector{Float64}
     path_curvature_coefficient::Vector{Float64}
+    path_velocity_range::Vector{Float64}
+    path_zigzag_velocity_sum::Vector{Float64}
     last_boundary_remainders::Vector{Float64}
     last_boundary::Float64
     last_boundary_valid::Bool
@@ -3324,49 +3998,451 @@ end
 
 function _new_omrf_direct_hcv_envelope(anchor,
         context::OMRFResidualContext; max_cells::Int=128,
-        hcv_remainder::Bool=true, event_horizon_scope::Bool=false)
+        hcv_remainder::Bool=true, event_horizon_scope::Bool=false,
+        person_signed_roof::Bool=false,
+        signed_only_person_roof::Bool=false,
+        joint_group_size::Int=0,
+        shared_current::Bool=false)
     max_cells >= 1 || throw(ArgumentError(
         "direct HCV cache must hold at least one cell"))
     N, P = size(context.X)
     n_factors = N * P
     qmax = maximum(context.seen) - 1
+    sampling_policy = context.factorization === :person ?
+        OMRFDirectPersonSampling() : OMRFDirectFactorSampling()
+    person_signed_roof &&
+        !(sampling_policy isa OMRFDirectPersonSampling && hcv_remainder) &&
+        throw(ArgumentError(
+            "signed person roofs require whole-person undamped HCV"))
+    signed_only_person_roof &&
+        !(person_signed_roof && !event_horizon_scope) &&
+        throw(ArgumentError(
+            "signed-only person roofs require per-cell signed HCV"))
+    joint_group_size in (0, 4, 16, 32, 64) || throw(ArgumentError(
+        "research joint signed route supports groups of 4, 16, 32 or 64 only"))
+    joint_group_size > 0 &&
+        !signed_only_person_roof &&
+        throw(ArgumentError(
+            "joint groups require a signed-only person roof"))
+    joint_group_size == 4 && N % 4 != 0 && throw(ArgumentError(
+        "fixed groups of four require a divisible population"))
+    joint_group_size >= 16 &&
+        !(shared_current && context.use_hcv && !context.hcv_nodewise &&
+          isinf(context.hcv_damping)) && throw(ArgumentError(
+            "grouped joint signed bounds require shared-current evaluation and global undamped HCV; got shared=$shared_current use_hcv=$(context.use_hcv) nodewise=$(context.hcv_nodewise) damping=$(context.hcv_damping)"))
+    joint_group_size >= 16 && N < 2joint_group_size && throw(ArgumentError(
+        "grouped joint signed bounds need at least two full groups (N >= 2m)"))
+    shared_current && joint_group_size == 0 && throw(ArgumentError(
+        "shared-current categorical evaluation requires joint groups"))
+    shared_current && any(!=(4), context.seen) && throw(ArgumentError(
+        "shared-current categorical evaluation currently requires four categories at every node"))
+    shared_current && !(context.hcv_active && !context.hcv_nodewise &&
+        isinf(context.hcv_damping)) && throw(ArgumentError(
+        "shared-current JS4 requires active global undamped HCV"))
+    n_groups = joint_group_size == 0 ? 0 : cld(N, joint_group_size)
+    permutation = joint_group_size == 0 ? Int[] :
+        randperm(Random.Xoshiro(230923), N)
+    groups = zeros(Int, joint_group_size, n_groups)
+    group_offsets = Vector{Int}(undef, n_groups)
+    group_lengths = Vector{Int}(undef, n_groups)
+    @inbounds for b in 1:n_groups
+        offset = (b - 1) * joint_group_size + 1
+        length_b = min(joint_group_size, N - offset + 1)
+        group_offsets[b] = offset
+        group_lengths[b] = length_b
+        for slot in 1:length_b
+            groups[slot, b] = permutation[offset + slot - 1]
+        end
+    end
     return OMRFDirectPersonNodeHCVEnvelope(
+        sampling_policy,
         N, P, anchor, context, hcv_remainder, event_horizon_scope,
+        person_signed_roof, signed_only_person_roof,
         nothing, nothing,
         ones(1), zeros(1), zeros(1),
         zeros(1), max_cells, zeros(max_cells), zeros(max_cells),
         zeros(max_cells), zeros(n_factors, max_cells), zeros(n_factors),
-        0, 0, 0.0, zeros(length(anchor)), zeros(length(anchor)),
-        zeros(length(anchor)), -1, UInt(0), qmax,
-        zeros(qmax, P), zeros(qmax, P),
-        zeros(P, P), zeros(P, P), zeros(N, P), zeros(N, P),
-        zeros(qmax, n_factors),
+        zeros(N, max_cells), zeros(N), zeros(N), zeros(N), zeros(N),
+        zeros(N), zeros(N),
+        joint_group_size, groups, group_offsets, group_lengths,
+        zeros(n_groups, max_cells),
+        zeros(n_groups, max_cells), zeros(max_cells),
+        shared_current ? _new_omrf_shared_current_workspace(context) : nothing,
+        0, 0, 0.0, UInt8(0), 0.0,
+        zeros(length(anchor)), zeros(length(anchor)),
+        zeros(length(anchor)), zeros(length(anchor)),
+        zeros(length(anchor)), zeros(length(anchor)),
+        -1, UInt(0), qmax,
+        zeros(qmax, P), zeros(qmax, P), zeros(qmax, P),
+        zeros(P, P), zeros(P, P), zeros(P, P),
+        zeros(N, P), zeros(N, P), zeros(N, P),
+        zeros(qmax, n_factors), zeros(qmax, n_factors),
         zeros(qmax, n_factors), zeros(n_factors), zeros(n_factors),
-        zeros(n_factors),
-        zeros(n_factors), zeros(n_factors), zeros(n_factors), 0.0, false,
+        zeros(n_factors), zeros(n_factors),
+        zeros(n_factors), zeros(n_factors), zeros(n_factors),
+        zeros(n_factors), 0.0, false,
         0.0, false, false)
 end
 
-PDMPSamplers.n_observations(envelope::OMRFDirectPersonNodeHCVEnvelope) =
+PDMPSamplers.n_observations(
+    envelope::OMRFDirectPersonNodeHCVEnvelope{OMRFDirectPersonSampling}) =
+    envelope.n_persons
+PDMPSamplers.n_observations(
+    envelope::OMRFDirectPersonNodeHCVEnvelope{OMRFDirectFactorSampling}) =
     envelope.n_persons * envelope.n_nodes
 PDMPSamplers._trajectory_scale_anchor(
     envelope::OMRFDirectPersonNodeHCVEnvelope) = envelope.anchor
 
+@inline function _omrf_shared_equal(workspace::OMRFSharedCurrentWorkspace,
+        context, node::Int, person::Int,
+        representative::Int, free, x)
+    neighbours = context.incident_neighbours[node]
+    @inbounds for slot in 1:workspace.active_incident_count[node]
+        k = workspace.active_incident_slots[slot, node]
+        context.X[person, neighbours[k]] ==
+            context.X[representative, neighbours[k]] || return false
+    end
+    return true
+end
+
+function _omrf_shared_rebuild_node!(workspace::OMRFSharedCurrentWorkspace,
+        context, node::Int, free, x)
+    workspace.epoch = workspace.epoch == typemax(Int) ? 1 :
+        workspace.epoch + 1
+    workspace.epoch == 1 && fill!(workspace.hash_epochs, 0)
+    epoch = workspace.epoch
+    edges = context.incident_edges[node]
+    neighbours = context.incident_neighbours[node]
+    N = size(context.X, 1)
+    slots = length(workspace.hash_keys)
+    groups = 0
+    active_count = 0
+    @inbounds for k in eachindex(edges)
+        index = context.interaction_indices[edges[k]]
+        if free[index] || !iszero(x[index])
+            active_count += 1
+            workspace.active_incident_slots[active_count, node] = k
+        end
+    end
+    workspace.active_incident_count[node] = active_count
+    @inbounds for person in 1:N
+        key = UInt(0x7b8a9cdef0123456)
+        for slot in 1:active_count
+            k = workspace.active_incident_slots[slot, node]
+            key = hash(context.X[person, neighbours[k]], key)
+        end
+        slot = Int(key & UInt(slots - 1)) + 1
+        group = 0
+        while workspace.hash_epochs[slot] == epoch
+            if workspace.hash_keys[slot] == key
+                candidate = workspace.hash_values[slot]
+                representative = workspace.representatives[candidate, node]
+                if _omrf_shared_equal(workspace, context, node, person,
+                        representative, free, x)
+                    group = candidate
+                    break
+                end
+            end
+            slot = slot == slots ? 1 : slot + 1
+        end
+        if group == 0
+            groups += 1
+            group = groups
+            workspace.representatives[group, node] = person
+            workspace.multiplicities[group, node] = 0
+            workspace.hash_epochs[slot] = epoch
+            workspace.hash_keys[slot] = key
+            workspace.hash_values[slot] = group
+        end
+        workspace.multiplicities[group, node] += 1
+        workspace.person_group[node, person] = group
+    end
+    workspace.group_count[node] = groups
+    return nothing
+end
+
+function _omrf_shared_sync_patterns!(workspace::OMRFSharedCurrentWorkspace,
+        context, x)
+    started = time_ns()
+    free = context.active_free
+    fill!(workspace.dirty_nodes, !workspace.initialized)
+    @inbounds for node in eachindex(context.incident_edges)
+        for edge in context.incident_edges[node]
+            index = context.interaction_indices[edge]
+            frozen_nonzero = !free[index] && !iszero(x[index])
+            if workspace.previous_free[index] != free[index] ||
+                    workspace.previous_frozen_nonzero[edge] != frozen_nonzero
+                workspace.dirty_nodes[node] = true
+            end
+        end
+    end
+    @inbounds for node in eachindex(workspace.dirty_nodes)
+        if workspace.dirty_nodes[node]
+            _omrf_shared_rebuild_node!(workspace, context, node, free, x)
+            workspace.rebuild_count += 1
+            context.counts.shared_current_rebuilt_nodes += 1
+        end
+    end
+    copyto!(workspace.previous_free, free)
+    @inbounds for edge in eachindex(context.interaction_indices)
+        index = context.interaction_indices[edge]
+        workspace.previous_frozen_nonzero[edge] =
+            !free[index] && !iszero(x[index])
+    end
+    workspace.initialized = true
+    duration = (time_ns() - started) * 1e-9
+    workspace.rebuild_seconds += duration
+    context.counts.shared_current_rebuild_seconds += duration
+    return nothing
+end
+
+function _omrf_shared_prepare_fields!(workspace::OMRFSharedCurrentWorkspace,
+        context, x, v)
+    @inbounds for node in eachindex(workspace.group_count)
+        edges = context.incident_edges[node]
+        neighbours = context.incident_neighbours[node]
+        for group in 1:workspace.group_count[node]
+            person = workspace.representatives[group, node]
+            f0lo = 0.0; f0hi = 0.0
+            fvlo = 0.0; fvhi = 0.0
+            for slot in 1:workspace.active_incident_count[node]
+                k = workspace.active_incident_slots[slot, node]
+                index = context.interaction_indices[edges[k]]
+                observed = context.X[person, neighbours[k]]
+                # Exact zero products contribute no interval width for finite
+                # four-category observations. The active list still contains
+                # free-zero edges, so later velocity/position changes retain
+                # the correct fixed current-pattern membership.
+                if !iszero(x[index])
+                    tl, th = _omrf_iscale(x[index], x[index], observed)
+                    f0lo, f0hi = _omrf_iadd(f0lo, f0hi, tl, th)
+                end
+                if !iszero(v[index])
+                    tl, th = _omrf_iscale(v[index], v[index], observed)
+                    fvlo, fvhi = _omrf_iadd(fvlo, fvhi, tl, th)
+                end
+            end
+            workspace.field0[group, node] = f0lo
+            workspace.field0_upper[group, node] = f0hi
+            workspace.fieldv[group, node] = fvlo
+            workspace.fieldv_upper[group, node] = fvhi
+        end
+    end
+    workspace.last_valid = false
+    return nothing
+end
+
+@inline function _omrf_shared_logit_interval(context, node::Int, u::Int,
+        f0lo::Float64, f0hi::Float64, fvlo::Float64, fvhi::Float64,
+        x, v, t::Float64)
+    index = context.threshold_indices[context.threshold_starts[node] + u - 1]
+    tl, th = _omrf_iscale(v[index], v[index], t)
+    xl, xh = _omrf_iadd(x[index], x[index], tl, th)
+    tl, th = _omrf_iscale(fvlo, fvhi, t)
+    fl, fh = _omrf_iadd(f0lo, f0hi, tl, th)
+    tl, th = _omrf_iscale(fl, fh, u)
+    ll, lh = _omrf_iadd(xl, xh, tl, th)
+    tl, th = _omrf_iscale(fvlo, fvhi, u)
+    zl, zh = _omrf_iadd(v[index], v[index], tl, th)
+    return ll, lh, zl, zh
+end
+
+@inline function _omrf_shared_moment(context, node::Int,
+        f0lo::Float64, f0hi::Float64, fvlo::Float64, fvhi::Float64,
+        x, v, t::Float64)
+    q = context.seen[node] - 1
+    f0 = f0lo + 0.5 * (f0hi - f0lo)
+    fv = fvlo + 0.5 * (fvhi - fvlo)
+    maximum_logit = 0.0
+    max_logit_error = 0.0
+    max_z_error = 0.0
+    max_abs_z = 0.0
+    @inbounds for u in 1:q
+        index = context.threshold_indices[context.threshold_starts[node] + u - 1]
+        logit = x[index] + t * v[index] + u * (f0 + t * fv)
+        z = v[index] + u * fv
+        ll, lh, zl, zh = _omrf_shared_logit_interval(context, node, u,
+            f0lo, f0hi, fvlo, fvhi, x, v, t)
+        max_logit_error = max(max_logit_error,
+            abs(logit - ll), abs(lh - logit))
+        max_z_error = max(max_z_error, abs(z - zl), abs(zh - z))
+        max_abs_z = max(max_abs_z, abs(z))
+        maximum_logit = max(maximum_logit, logit)
+    end
+    denominator = exp(-maximum_logit)
+    numerator = 0.0
+    @inbounds for u in 1:q
+        index = context.threshold_indices[context.threshold_starts[node] + u - 1]
+        logit = x[index] + t * v[index] + u * (f0 + t * fv)
+        z = v[index] + u * fv
+        weight = exp(logit - maximum_logit)
+        denominator += weight
+        numerator += weight * z
+    end
+    moment = numerator / denominator
+    # If all logits move by at most delta, every softmax probability ratio
+    # moves by at most exp(2delta). Thus the expectation changes by at most
+    # expm1(2delta)*max(abs(z)); derivative uncertainty adds max_z_error.
+    # The interval above includes all field, path and logit rounding. The
+    # gamma_32 term encloses the four-category exp/sum/divide evaluation;
+    # this is operation-count based, not calibrated to saved discrepancies.
+    sensitivity = _omrf_up(expm1(_omrf_up(2max_logit_error)))
+    isfinite(sensitivity) || throw(OverflowError(
+        "shared-current softmax sensitivity overflow"))
+    gamma32 = 32eps(Float64) / (1 - 32eps(Float64))
+    error = _omrf_up(max_z_error +
+        _omrf_up(sensitivity * max_abs_z) +
+        gamma32 * (1 + max_abs_z))
+    return moment, error
+end
+
+function _omrf_shared_fill_signed_cell!(envelope, workspace, state,
+        left::Float64, right::Float64, cell::Int)
+    context = envelope.context
+    context.counts.shared_current_cell_evaluations += 1
+    adjacent = workspace.last_valid && workspace.last_boundary == left
+    @inbounds for node in 1:envelope.n_nodes
+        for group in 1:workspace.group_count[node]
+            f0 = workspace.field0[group, node]
+            f0hi = workspace.field0_upper[group, node]
+            fv = workspace.fieldv[group, node]
+            fvhi = workspace.fieldv_upper[group, node]
+            if adjacent
+                workspace.left_moment[group, node] =
+                    workspace.right_moment[group, node]
+                workspace.left_error[group, node] =
+                    workspace.right_error[group, node]
+            else
+                moment, error = _omrf_shared_moment(context, node, f0,
+                    f0hi, fv, fvhi, state.ξ.x, state.ξ.θ, left)
+                workspace.left_moment[group, node] = moment
+                workspace.left_error[group, node] = error
+                workspace.pattern_evaluations += 1
+                context.counts.shared_current_pattern_evaluations += 1
+            end
+            moment, error = _omrf_shared_moment(context, node, f0,
+                f0hi, fv, fvhi, state.ξ.x, state.ξ.θ, right)
+            workspace.right_moment[group, node] = moment
+            workspace.right_error[group, node] = error
+            workspace.pattern_evaluations += 1
+            context.counts.shared_current_pattern_evaluations += 1
+        end
+    end
+    fill!(envelope.person_left_signed, 0.0)
+    fill!(envelope.person_right_signed, 0.0)
+    fill!(envelope.person_left_abs, 0.0)
+    fill!(envelope.person_right_abs, 0.0)
+    fill!(envelope.person_curvature, 0.0)
+    factor = 1
+    @inbounds for node in 1:envelope.n_nodes
+        for person in 1:envelope.n_persons
+            group = workspace.person_group[node, person]
+            left_error = workspace.left_error[group, node]
+            right_error = workspace.right_error[group, node]
+            left_h = workspace.left_moment[group, node] -
+                envelope.path_anchor_mean_z[factor] -
+                envelope.path_anchor_cov_z_delta0[factor] -
+                left * envelope.path_anchor_var_z[factor]
+            right_h = workspace.right_moment[group, node] -
+                envelope.path_anchor_mean_z[factor] -
+                envelope.path_anchor_cov_z_delta0[factor] -
+                right * envelope.path_anchor_var_z[factor]
+            gamma8 = 8eps(Float64) / (1 - 8eps(Float64))
+            left_error = _omrf_up(left_error + gamma8 *
+                (1 + abs(workspace.left_moment[group, node]) +
+                 abs(envelope.path_anchor_mean_z[factor]) +
+                 abs(envelope.path_anchor_cov_z_delta0[factor]) +
+                 abs(left * envelope.path_anchor_var_z[factor])))
+            right_error = _omrf_up(right_error + gamma8 *
+                (1 + abs(workspace.right_moment[group, node]) +
+                 abs(envelope.path_anchor_mean_z[factor]) +
+                 abs(envelope.path_anchor_cov_z_delta0[factor]) +
+                 abs(right * envelope.path_anchor_var_z[factor])))
+            envelope.last_boundary_remainders[factor] = right_h
+            envelope.person_left_signed[person] += left_h + left_error
+            envelope.person_right_signed[person] += right_h + right_error
+            envelope.person_left_abs[person] += abs(left_h) + left_error
+            envelope.person_right_abs[person] += abs(right_h) + right_error
+            envelope.person_curvature[person] +=
+                envelope.path_curvature_coefficient[factor]
+            factor += 1
+        end
+    end
+    envelope.cell_left[cell] = left
+    envelope.cell_right[cell] = right
+    width2 = nextfloat((right - left)^2)
+    rounding = envelope.n_nodes * eps(Float64) /
+        (1 - envelope.n_nodes * eps(Float64))
+    cumulative = 0.0
+    @inbounds for person in 1:envelope.n_persons
+        # The signed sums above include a one-sided error allowance for JS4.
+        # This auxiliary person mass remains a valid *absolute* fallback by
+        # using the sum of absolute factor endpoints, including that error.
+        endpoint_bound = max(
+            nextfloat(envelope.person_left_abs[person] * (1 + rounding)),
+            nextfloat(envelope.person_right_abs[person] * (1 + rounding)))
+        curvature_bound = nextfloat(envelope.person_curvature[person] *
+            (1 + rounding))
+        bound = nextfloat(endpoint_bound +
+            nextfloat(curvature_bound * width2))
+        envelope.person_workspace[person] = bound
+        cumulative = nextfloat(cumulative + bound)
+        envelope.person_cell_cumulative[person, cell] = cumulative
+    end
+    envelope.cell_mass[cell] = cumulative
+    envelope.last_boundary = right
+    envelope.last_boundary_valid = true
+    workspace.last_boundary = right
+    workspace.last_valid = true
+    counts = context.counts
+    counts.direct_factor_bound_scans += 1
+    counts.direct_factors_evaluated += factor - 1
+    counts.direct_residual_table_constructions += 1
+    counts.direct_left_endpoint_evaluations += adjacent ? 0 : factor - 1
+    counts.direct_right_endpoint_evaluations += factor - 1
+    counts.direct_adjacent_endpoint_reuses += adjacent ? factor - 1 : 0
+    return cumulative
+end
+
+# The direct envelope exposes its certified Boomerang cell callback by Julia
+# dispatch rather than through the legacy callback field.  Tell the generic
+# grid validator about that explicit implementation; this does not weaken the
+# validation for any other envelope.
+PDMPSamplers._validate_subsampling_grid_envelope(
+    ::PDMPSamplers.AnyBoomerang,
+    ::OMRFDirectPersonNodeHCVEnvelope) = nothing
+
 function _omrf_direct_prepare_linear_fields!(
         envelope::OMRFDirectPersonNodeHCVEnvelope, state, flow)
     context = envelope.context
+    actual_flow = _omrf_actual_flow(flow)
+    zigzag = actual_flow isa ZigZag
+    harmonic = actual_flow isa PDMPSamplers.AnyBoomerang
+    envelope.path_kind = harmonic ? UInt8(2) : zigzag ? UInt8(1) : UInt8(0)
     fill!(envelope.interaction_delta, 0.0)
     fill!(envelope.interaction_velocity, 0.0)
+    (zigzag || harmonic) && fill!(envelope.interaction_abs_velocity, 0.0)
     edge = 1
     @inbounds for left in 1:(envelope.n_nodes - 1)
         for right in (left + 1):envelope.n_nodes
-            index = context.interaction_indices[edge]
-            delta, velocity = _omrf_coordinate_at(
-                state, flow, envelope.anchor, index, 0.0)
+        index = context.interaction_indices[edge]
+        delta, velocity, sine = if harmonic
+            _omrf_harmonic_coefficients(
+                state, actual_flow, envelope.anchor, index)
+        else
+            d, v = _omrf_coordinate_at(
+                state, actual_flow, envelope.anchor, index, 0.0)
+            (d, v, 0.0)
+        end
             envelope.interaction_delta[left, right] = delta
             envelope.interaction_delta[right, left] = delta
             envelope.interaction_velocity[left, right] = velocity
             envelope.interaction_velocity[right, left] = velocity
+            if zigzag || harmonic
+                third = harmonic ? sine : abs(velocity)
+                envelope.interaction_abs_velocity[left, right] = third
+                envelope.interaction_abs_velocity[right, left] = third
+            end
             edge += 1
         end
     end
@@ -3374,6 +4450,8 @@ function _omrf_direct_prepare_linear_fields!(
         envelope.interaction_delta)
     mul!(envelope.field_velocity, context.X_float,
         envelope.interaction_velocity)
+    (zigzag || harmonic) && mul!(envelope.field_abs_velocity,
+        context.X_float, envelope.interaction_abs_velocity)
     return nothing
 end
 
@@ -3399,6 +4477,7 @@ end
     mean_delta = 0.0
     mean_z_delta = 0.0
     probability_sum = 0.0
+    minimum_delta = 0.0
     maximum_delta = 0.0
     minimum_z = 0.0
     maximum_z = 0.0
@@ -3413,11 +4492,12 @@ end
         mean_z += probability * z
         mean_delta += probability * delta
         mean_z_delta += probability * z * delta
+        minimum_delta = min(minimum_delta, delta)
         maximum_delta = max(maximum_delta, delta)
         minimum_z = min(minimum_z, z)
         maximum_z = max(maximum_z, z)
     end
-    reference_probability = max(0.0, 1.0 - probability_sum)
+    reference_probability = context.anchor_reference_probabilities[node, person]
     denominator = reference_probability * exp(-maximum_delta)
     displaced_mean_z = 0.0
     @inbounds for u in 1:q
@@ -3433,19 +4513,22 @@ end
     end
     displaced_mean_z /= denominator
     covariance = mean_z_delta - mean_z * mean_delta
-    return displaced_mean_z - mean_z - covariance, maximum_z - minimum_z
+    return displaced_mean_z - mean_z - covariance,
+        maximum_z - minimum_z, maximum_delta - minimum_delta
 end
 
 @inline function _omrf_direct_hcv_factor_cell_bound(
         envelope::OMRFDirectPersonNodeHCVEnvelope, state, flow,
         person::Int, node::Int, left::Float64, right::Float64)
-    left_h, range_z = _omrf_direct_hcv_remainder_at(
+    left_h, range_z, left_delta_range = _omrf_direct_hcv_remainder_at(
         envelope, state, flow, person, node, left)
-    right_h, _ = _omrf_direct_hcv_remainder_at(
+    right_h, _, right_delta_range = _omrf_direct_hcv_remainder_at(
         envelope, state, flow, person, node, right)
     width = right - left
-    return nextfloat(max(abs(left_h), abs(right_h)) +
-        range_z^3 * width^2 / 32)
+    global_cap = range_z * (1 + max(left_delta_range,
+        right_delta_range) / 4)
+    return nextfloat(min(max(abs(left_h), abs(right_h)) +
+        range_z^3 * width^2 / 32, global_cap))
 end
 
 function _omrf_direct_path_matches(
@@ -3466,62 +4549,123 @@ end
 
 function _omrf_direct_prepare_path!(
         envelope::OMRFDirectPersonNodeHCVEnvelope, state, flow,
-        flow_token::UInt=UInt(0))
+        flow_token::UInt=_omrf_direct_flow_token(flow))
+    context = envelope.context
+    counts = context.counts
+    anchor_changed = false
+    state_changed = state.t[] != envelope.origin_time
+    @inbounds for index in eachindex(envelope.path_x)
+        anchor_changed |= envelope.path_anchor[index] != envelope.anchor[index]
+        state_changed |= envelope.path_x[index] != state.ξ.x[index] ||
+            envelope.path_theta[index] != state.ξ.θ[index]
+    end
+    if anchor_changed
+        counts.direct_path_anchor_changes += 1
+    elseif envelope.path_active_generation != context.active_generation
+        counts.direct_path_mask_changes += 1
+    elseif envelope.path_flow_token != flow_token
+        counts.direct_path_flow_changes += 1
+    elseif state_changed
+        counts.direct_path_state_changes += 1
+    else
+        counts.direct_path_forced_rebuilds += 1
+    end
     copyto!(envelope.path_x, state.ξ.x)
     copyto!(envelope.path_theta, state.ξ.θ)
     copyto!(envelope.path_anchor, envelope.anchor)
     envelope.origin_time = state.t[]
     envelope.path_active_generation = envelope.context.active_generation
     envelope.path_flow_token = flow_token
-    context = envelope.context
     N = envelope.n_persons
-    if !envelope.hcv_remainder
-        _omrf_direct_prepare_linear_fields!(envelope, state, flow)
+    actual_flow = _omrf_actual_flow(flow)
+    harmonic = actual_flow isa PDMPSamplers.AnyBoomerang
+    if context.hcv_active && !context.hcv_nodewise
+        H = something(context.likelihood_hessian)
+        if harmonic
+            @inbounds for index in eachindex(envelope.anchor)
+                if _omrf_is_free(state, index)
+                    context.displacement[index] =
+                        actual_flow.μ[index] - envelope.anchor[index]
+                    envelope.hcv_path_cosine[index] =
+                        state.ξ.x[index] - actual_flow.μ[index]
+                    envelope.hcv_path_sine[index] = state.ξ.θ[index]
+                else
+                    context.displacement[index] =
+                        state.ξ.x[index] - envelope.anchor[index]
+                    envelope.hcv_path_cosine[index] = 0.0
+                    envelope.hcv_path_sine[index] = 0.0
+                end
+            end
+            cache = context.hcv_cache
+            copyto!(envelope.hcv_path_offset,
+                _omrf_hmemo(cache, cache.reference, H, context.displacement))
+            # x - mu and v stay in a fixed two-dimensional span along an orbit.
+            _omrf_haffine!(context.hcv_product, cache, H,
+                envelope.hcv_path_cosine, cache.harmonic)
+            copyto!(envelope.hcv_path_cosine, context.hcv_product)
+            _omrf_haffine!(context.hcv_product, cache, H,
+                envelope.hcv_path_sine, cache.harmonic)
+            copyto!(envelope.hcv_path_sine, context.hcv_product)
+        else
+            @inbounds for index in eachindex(envelope.anchor)
+                context.displacement[index] =
+                    state.ξ.x[index] - envelope.anchor[index]
+                envelope.hcv_path_sine[index] = _omrf_is_free(state, index) ?
+                    state.ξ.θ[index] : 0.0
+            end
+            cache = context.hcv_cache
+            _omrf_path_offset!(envelope.hcv_path_offset, cache, H,
+                context.displacement)
+            copyto!(envelope.hcv_path_sine,
+                _omrf_hmemo(cache, cache.velocity, H, envelope.hcv_path_sine))
+            fill!(envelope.hcv_path_cosine, 0.0)
+        end
     end
+    # Cache linear signed/absolute fields or harmonic offset/cosine/sine
+    # fields with matrix products once per physical path instead of repeating
+    # an incident-edge traversal for every factor.
+    _omrf_direct_prepare_linear_fields!(envelope, state, flow)
     destination = 1
     @inbounds for node in 1:envelope.n_nodes
         q = context.seen[node] - 1
         start = context.threshold_starts[node]
         for u in 1:q
             index = context.threshold_indices[start + u - 1]
-            threshold_delta0, threshold_velocity = _omrf_coordinate_at(
-                state, flow, envelope.anchor, index, 0.0)
+            threshold_delta0, threshold_velocity, threshold_sine = if harmonic
+                _omrf_harmonic_coefficients(
+                    state, actual_flow, envelope.anchor, index)
+            else
+                d, v = _omrf_coordinate_at(
+                    state, actual_flow, envelope.anchor, index, 0.0)
+                (d, v, 0.0)
+            end
             envelope.path_threshold_delta0[u, node] = threshold_delta0
             envelope.path_threshold_z[u, node] = threshold_velocity
+            envelope.path_threshold_sine[u, node] = threshold_sine
         end
         for person in 1:N
-            if envelope.hcv_remainder
-                field_delta0 = 0.0
-                field_velocity = 0.0
-                for k in eachindex(context.incident_edges[node])
-                    covariate = context.X[person,
-                        context.incident_neighbours[node][k]]
-                    iszero(covariate) && continue
-                    index = context.interaction_indices[
-                        context.incident_edges[node][k]]
-                    delta, velocity = _omrf_coordinate_at(
-                        state, flow, envelope.anchor, index, 0.0)
-                    field_delta0 += covariate * delta
-                    field_velocity += covariate * velocity
-                end
-            else
-                field_delta0 = envelope.field_delta[person, node]
-                field_velocity = envelope.field_velocity[person, node]
-            end
+            field_delta0 = envelope.field_delta[person, node]
+            field_velocity = envelope.field_velocity[person, node]
+            field_sine = harmonic ?
+                envelope.field_abs_velocity[person, node] : 0.0
             probability_sum = 0.0
             mean_z = 0.0
             mean_delta0 = 0.0
             mean_z_delta0 = 0.0
             mean_z2 = 0.0
+            zigzag_velocity_sum = 0.0
             minimum_z = 0.0
             maximum_z = 0.0
             for u in 1:q
                 threshold_delta0 = envelope.path_threshold_delta0[u, node]
                 threshold_velocity = envelope.path_threshold_z[u, node]
+                threshold_sine = envelope.path_threshold_sine[u, node]
                 delta0 = threshold_delta0 + u * field_delta0
                 z = threshold_velocity + u * field_velocity
+                sine = threshold_sine + u * field_sine
                 envelope.path_delta0[u, destination] = delta0
                 envelope.path_z[u, destination] = z
+                envelope.path_harmonic_sine[u, destination] = sine
                 probability = context.anchor_probabilities[
                     start + u - 1, person]
                 probability_sum += probability
@@ -3529,17 +4673,19 @@ function _omrf_direct_prepare_path!(
                 mean_delta0 += probability * delta0
                 mean_z_delta0 += probability * z * delta0
                 mean_z2 += probability * z * z
+                zigzag_velocity_sum += abs(threshold_velocity)
                 minimum_z = min(minimum_z, z)
                 maximum_z = max(maximum_z, z)
             end
             for u in (q + 1):envelope.qmax
                 envelope.path_delta0[u, destination] = 0.0
                 envelope.path_z[u, destination] = 0.0
+                envelope.path_harmonic_sine[u, destination] = 0.0
             end
             # The reference category has delta=z=0; its probability therefore
             # does not contribute to these raw moments.
             envelope.path_anchor_reference_probability[destination] =
-                max(0.0, 1.0 - probability_sum)
+                context.anchor_reference_probabilities[node, person]
             envelope.path_anchor_mean_z[destination] = mean_z
             if envelope.hcv_remainder
                 envelope.path_anchor_cov_z_delta0[destination] =
@@ -3548,12 +4694,34 @@ function _omrf_direct_prepare_path!(
                 range_z = maximum_z - minimum_z
                 envelope.path_curvature_coefficient[destination] =
                     range_z^3 / 32
+                envelope.path_velocity_range[destination] = range_z
+                envelope.path_zigzag_velocity_sum[destination] =
+                    zigzag_velocity_sum +
+                    q * envelope.field_abs_velocity[person, node]
             else
                 envelope.path_anchor_cov_z_delta0[destination] = 0.0
                 envelope.path_anchor_var_z[destination] = 0.0
                 envelope.path_curvature_coefficient[destination] = 0.0
+                envelope.path_velocity_range[destination] = 0.0
+                envelope.path_zigzag_velocity_sum[destination] = 0.0
             end
             destination += 1
+        end
+    end
+    if envelope.shared_current !== nothing
+        workspace = envelope.shared_current::OMRFSharedCurrentWorkspace
+        _omrf_shared_sync_patterns!(workspace, context, state.ξ.x)
+        # The dense initial D2 fixture showed no useful arithmetic reuse.
+        # Freeze this conservative cutoff before any route comparison.
+        total_patterns = 0
+        @inbounds for count in workspace.group_count
+            total_patterns += count
+        end
+        workspace.use_fallback = total_patterns >= 4000
+        workspace.last_valid = false
+        if !workspace.use_fallback
+            _omrf_shared_prepare_fields!(workspace, context, state.ξ.x,
+                state.ξ.θ)
         end
     end
     envelope.cell_count = 0
@@ -3565,6 +4733,137 @@ function _omrf_direct_prepare_path!(
     counts.direct_path_preparations += 1
     counts.direct_path_factors_prepared += N * envelope.n_nodes
     return envelope
+end
+
+function PDMPSamplers.deterministic_gradient!(out,
+        cv::PDMPSamplers.SubsampledControlVariate{F,O,E}, state, flow) where
+        {F,O,E<:OMRFDirectPersonNodeHCVEnvelope}
+    provider = cv.deterministic_gradient!
+    if provider isa PDMPSamplers.WithStats
+        PDMPSamplers._inc_counter_∇f_calls(provider.stats)
+        PDMPSamplers._inc_gradient_purpose!(
+            provider.stats, Val(:deterministic_gradient))
+    end
+    oracle = _omrf_base_oracle(provider)
+    oracle isa OMRFAnalyticSubsamplingOracle ||
+        return cv.deterministic_gradient!(out, state.ξ.x)
+    context = oracle.residual_context
+    envelope = cv.envelope
+    if !context.hcv_active || context.hcv_nodewise || !envelope.path_valid ||
+            envelope.path_active_generation != context.active_generation
+        return cv.deterministic_gradient!(out, state.ξ.x)
+    end
+    _omrf_deterministic_gradient!(out, oracle,
+        something(oracle.analytic_prior), state.ξ.x)
+    elapsed = Float64(state.t[] - envelope.origin_time)
+    actual = _omrf_actual_flow(flow)
+    if actual isa PDMPSamplers.AnyBoomerang
+        sine, cosine = sincos(elapsed)
+        @inbounds @simd for index in eachindex(out)
+            out[index] += envelope.hcv_path_offset[index] +
+                cosine * envelope.hcv_path_cosine[index] +
+                sine * envelope.hcv_path_sine[index]
+        end
+    else
+        @inbounds @simd for index in eachindex(out)
+            out[index] += envelope.hcv_path_offset[index] +
+                elapsed * envelope.hcv_path_sine[index]
+        end
+    end
+    return out
+end
+
+function PDMPSamplers.subsampling_deterministic_signed_rate(
+        oracle::OMRFAnalyticSubsamplingOracle,
+        cv::PDMPSamplers.SubsampledControlVariate{F,O,E}, state, flow) where
+        {F,O,E<:OMRFDirectPersonNodeHCVEnvelope}
+    actual = _omrf_actual_flow(flow)
+    actual isa Union{BouncyParticle,PDMPSamplers.AnyBoomerang} ||
+        return PDMPSamplers.DeferredSubsamplingRate(0.0, false)
+    context = oracle.residual_context
+    context.hcv_active && !context.hcv_nodewise &&
+        oracle.exact_selected_refinement ||
+        return PDMPSamplers.DeferredSubsamplingRate(0.0, false)
+    scratch = oracle.interval_glo
+    PDMPSamplers.deterministic_gradient!(scratch, cv, state, flow)
+    if actual isa PDMPSamplers.AnyBoomerang
+        actual.Γ isa Diagonal ||
+            return PDMPSamplers.DeferredSubsamplingRate(0.0, false)
+        @inbounds @simd for index in eachindex(scratch)
+            scratch[index] -= actual.Γ.diag[index] *
+                (state.ξ.x[index] - actual.μ[index])
+        end
+    end
+    signed = dot(state.ξ.θ, scratch)
+    oracle.cached_deterministic_signed_rate = signed
+    return PDMPSamplers.DeferredSubsamplingRate(signed, true)
+end
+
+function PDMPSamplers.subsampling_deferred_candidate_rate(
+        oracle::OMRFAnalyticSubsamplingOracle, state, residual, scale,
+        flow::Union{BouncyParticle,PDMPSamplers.AnyBoomerang,
+            PDMPSamplers.PreconditionedDynamics}, signed_rate, subset)
+    return max(0.0, signed_rate + scale * dot(state.ξ.θ, residual))
+end
+
+@inline function _omrf_direct_cached_zigzag_bound(
+        envelope::OMRFDirectPersonNodeHCVEnvelope,
+        factor::Int, node::Int, left::Float64, right::Float64)
+    velocity_sum = envelope.path_zigzag_velocity_sum[factor]
+    left_delta = _omrf_direct_cached_delta_range(
+        envelope, factor, node, left)
+    right_delta = _omrf_direct_cached_delta_range(
+        envelope, factor, node, right)
+    return nextfloat(max(
+        _omrf_categorical_hcv_bound(velocity_sum, left_delta),
+        _omrf_categorical_hcv_bound(velocity_sum, right_delta)))
+end
+
+@inline function _omrf_direct_harmonic_abs_cell_bound(
+        offset::Float64, cosine::Float64, sine::Float64,
+        midpoint_sine::Float64, midpoint_cosine::Float64,
+        half_width::Float64)
+    amplitude = sqrt(muladd(cosine, cosine, sine * sine))
+    midpoint = abs(offset + cosine * midpoint_cosine +
+        sine * midpoint_sine)
+    return nextfloat(min(abs(offset) + amplitude,
+        midpoint + half_width * amplitude))
+end
+
+@inline function _omrf_direct_cached_harmonic_bound(
+        envelope::OMRFDirectPersonNodeHCVEnvelope,
+        factor::Int, node::Int, midpoint_sine::Float64,
+        midpoint_cosine::Float64, half_width::Float64)
+    q = envelope.context.seen[node] - 1
+    iszero(q) && return 0.0
+    displacement_range = 0.0
+    velocity_range = 0.0
+    # Include the reference category as the identically zero coefficient
+    # triple.  Pairwise harmonic extrema give the exact range envelope over
+    # the complete closed cell; the categorical cap then certifies the HCV
+    # directional remainder for this factor.
+    @inbounds for u in 1:q, v in 0:(u - 1)
+        offset = envelope.path_delta0[u, factor]
+        cosine = envelope.path_z[u, factor]
+        sine = envelope.path_harmonic_sine[u, factor]
+        if v > 0
+            offset -= envelope.path_delta0[v, factor]
+            cosine -= envelope.path_z[v, factor]
+            sine -= envelope.path_harmonic_sine[v, factor]
+        end
+        # These coefficients are ordinary finite posterior coordinates.  The
+        # generic `hypot` helper pays for overflow/underflow rescaling that is
+        # unnecessary in this hot factor loop.  The fused square norm is the
+        # same harmonic amplitude for the model's numerical range.
+        displacement_bound = _omrf_direct_harmonic_abs_cell_bound(
+            offset, cosine, sine, midpoint_sine, midpoint_cosine, half_width)
+        velocity_bound = _omrf_direct_harmonic_abs_cell_bound(
+            0.0, sine, -cosine, midpoint_sine, midpoint_cosine, half_width)
+        displacement_range = max(displacement_range, displacement_bound)
+        velocity_range = max(velocity_range, velocity_bound)
+    end
+    return nextfloat(_omrf_categorical_hcv_bound(
+        velocity_range, displacement_range))
 end
 
 @inline function _omrf_direct_cached_remainder_at(
@@ -3601,9 +4900,24 @@ end
     return residual
 end
 
+@inline function _omrf_direct_cached_delta_range(
+        envelope::OMRFDirectPersonNodeHCVEnvelope,
+        factor::Int, node::Int, t::Float64)
+    q = envelope.context.seen[node] - 1
+    minimum_delta = 0.0
+    maximum_delta = 0.0
+    @inbounds for u in 1:q
+        delta = envelope.path_delta0[u, factor] +
+            t * envelope.path_z[u, factor]
+        minimum_delta = min(minimum_delta, delta)
+        maximum_delta = max(maximum_delta, delta)
+    end
+    return maximum_delta - minimum_delta
+end
+
 function _omrf_direct_reset_path!(
         envelope::OMRFDirectPersonNodeHCVEnvelope, state, flow,
-        flow_token::UInt=UInt(0))
+        flow_token::UInt=_omrf_direct_flow_token(flow))
     started = time_ns()
     _omrf_direct_prepare_path!(envelope, state, flow, flow_token)
     envelope.context.counts.direct_path_preparation_seconds +=
@@ -3639,6 +4953,7 @@ function _omrf_direct_hcv_fill_cell_original!(
     envelope.cell_left[cell] = left
     envelope.cell_right[cell] = right
     envelope.cell_mass[cell] = cumulative
+    _omrf_direct_finish_person_cell!(envelope, cell, false)
     counts = envelope.context.counts
     counts.direct_factor_bound_scans += 1
     counts.direct_factors_evaluated += envelope.n_persons * envelope.n_nodes
@@ -3646,28 +4961,196 @@ function _omrf_direct_hcv_fill_cell_original!(
     return cumulative
 end
 
+@inline _omrf_direct_finish_person_cell!(
+    envelope::OMRFDirectPersonNodeHCVEnvelope{OMRFDirectFactorSampling},
+    cell::Int, signed_available::Bool) = envelope.cell_mass[cell]
+
+function _omrf_direct_finish_person_cell!(
+        envelope::OMRFDirectPersonNodeHCVEnvelope{OMRFDirectPersonSampling},
+        cell::Int, signed_available::Bool)
+    fill!(envelope.person_workspace, 0.0)
+    N = envelope.n_persons
+    @inbounds for node in 1:envelope.n_nodes, person in 1:N
+        envelope.person_workspace[person] +=
+            envelope.factor_workspace[(node - 1) * N + person]
+    end
+    cumulative = 0.0
+    rounding = envelope.n_nodes * eps(Float64) /
+        (1 - envelope.n_nodes * eps(Float64))
+    @inbounds for person in 1:N
+        factor_bound = envelope.person_workspace[person]
+        if signed_available && envelope.person_signed_roof
+            # Each factor coefficient already contains K_nj/8. Summing the
+            # signed endpoints before taking absolute values preserves node
+            # cancellation, while the curvature sum remains conservative.
+            width2 = nextfloat((envelope.cell_right[cell] -
+                envelope.cell_left[cell])^2)
+            endpoint_bound = max(
+                nextfloat(abs(envelope.person_left_signed[person]) +
+                    rounding * envelope.person_left_abs[person]),
+                nextfloat(abs(envelope.person_right_signed[person]) +
+                    rounding * envelope.person_right_abs[person]))
+            curvature_bound = nextfloat(envelope.person_curvature[person] *
+                (1 + rounding))
+            signed_bound = nextfloat(endpoint_bound +
+                nextfloat(curvature_bound * width2))
+            factor_bound = min(factor_bound, nextfloat(signed_bound))
+        end
+        cumulative += factor_bound
+        envelope.person_cell_cumulative[person, cell] = cumulative
+    end
+    envelope.cell_mass[cell] = cumulative
+    return cumulative
+end
+
+"""Harmonic (Boomerang) cell of the cached direct envelope.
+
+Computes the same factor bounds as `_omrf_direct_cached_harmonic_bound`, but
+pair by pair over all persons of a node, so that the inner loop runs over
+persons and vectorises. Every factor sees the same category pairs in the same
+order, so the running maxima, and hence all outputs, are bit-identical to the
+factor-by-factor loop. `person_left_signed` and `person_right_signed` hold the
+per-person running maxima: they are used only by linear (BPS) signed roofs.
+"""
+function _omrf_direct_hcv_fill_harmonic_cell!(
+        envelope::OMRFDirectPersonNodeHCVEnvelope,
+        left::Float64, right::Float64, cell::Int, adjacent::Bool)
+    midpoint_sine, midpoint_cosine = sincos((left + right) / 2)
+    half_width = (right - left) / 2
+    delta0 = envelope.path_delta0
+    velocity = envelope.path_z
+    sine_coefficient = envelope.path_harmonic_sine
+    factor_bound = envelope.factor_workspace
+    displacement_range = envelope.person_left_signed
+    velocity_range = envelope.person_right_signed
+    n_persons = envelope.n_persons
+    @inbounds for node in 1:envelope.n_nodes
+        q = envelope.context.seen[node] - 1
+        first = (node - 1) * n_persons
+        if iszero(q)
+            for person in 1:n_persons
+                factor_bound[first + person] = 0.0
+            end
+            continue
+        end
+        fill!(displacement_range, 0.0)
+        fill!(velocity_range, 0.0)
+        # The reference category is the identically zero coefficient triple.
+        for u in 1:q, v in 0:(u - 1)
+            @simd ivdep for person in 1:n_persons
+                factor = first + person
+                offset = delta0[u, factor]
+                cosine = velocity[u, factor]
+                sine = sine_coefficient[u, factor]
+                if v > 0
+                    offset -= delta0[v, factor]
+                    cosine -= velocity[v, factor]
+                    sine -= sine_coefficient[v, factor]
+                end
+                displacement_bound = _omrf_direct_harmonic_abs_cell_bound(
+                    offset, cosine, sine, midpoint_sine, midpoint_cosine,
+                    half_width)
+                velocity_bound = _omrf_direct_harmonic_abs_cell_bound(
+                    0.0, sine, -cosine, midpoint_sine, midpoint_cosine,
+                    half_width)
+                displacement_range[person] = max(displacement_range[person],
+                    displacement_bound)
+                velocity_range[person] = max(velocity_range[person],
+                    velocity_bound)
+            end
+        end
+        for person in 1:n_persons
+            factor_bound[first + person] = nextfloat(_omrf_categorical_hcv_bound(
+                velocity_range[person], displacement_range[person]))
+        end
+    end
+    cumulative = 0.0
+    @inbounds for factor in eachindex(factor_bound)
+        cumulative += factor_bound[factor]
+        envelope.cell_cumulative[factor, cell] = cumulative
+    end
+    envelope.cell_left[cell] = left
+    envelope.cell_right[cell] = right
+    envelope.cell_mass[cell] = cumulative
+    cumulative = _omrf_direct_finish_person_cell!(envelope, cell, false)
+    envelope.last_boundary = right
+    envelope.last_boundary_valid = true
+    n_factors = envelope.n_persons * envelope.n_nodes
+    counts = envelope.context.counts
+    counts.direct_factor_bound_scans += 1
+    counts.direct_factors_evaluated += n_factors
+    counts.direct_residual_table_constructions += 1
+    counts.direct_left_endpoint_evaluations += adjacent ? 0 : n_factors
+    counts.direct_right_endpoint_evaluations += n_factors
+    counts.direct_adjacent_endpoint_reuses += adjacent ? n_factors : 0
+    return cumulative
+end
+
 function _omrf_direct_hcv_fill_cell_cached!(
         envelope::OMRFDirectPersonNodeHCVEnvelope,
         left::Float64, right::Float64, cell::Int,
-        reuse_adjacent::Bool)
+        reuse_adjacent::Bool, zigzag::Bool=false, harmonic::Bool=false)
     adjacent = reuse_adjacent && envelope.last_boundary_valid &&
         envelope.last_boundary == left
+    harmonic && return _omrf_direct_hcv_fill_harmonic_cell!(
+        envelope, left, right, cell, adjacent)
     cumulative = 0.0
     factor = 1
     width2 = (right - left)^2
+    midpoint_sine, midpoint_cosine = harmonic ?
+        sincos((left + right) / 2) : (0.0, 1.0)
+    half_width = harmonic ? (right - left) / 2 : 0.0
+    signed_linear = envelope.person_signed_roof && !zigzag && !harmonic
+    if signed_linear
+        fill!(envelope.person_left_signed, 0.0)
+        fill!(envelope.person_right_signed, 0.0)
+        fill!(envelope.person_left_abs, 0.0)
+        fill!(envelope.person_right_abs, 0.0)
+        fill!(envelope.person_curvature, 0.0)
+    end
     @inbounds for node in 1:envelope.n_nodes
         for person in 1:envelope.n_persons
-            if adjacent
-                left_h = envelope.last_boundary_remainders[factor]
+            if harmonic
+                bound = _omrf_direct_cached_harmonic_bound(
+                    envelope, factor, node, midpoint_sine,
+                    midpoint_cosine, half_width)
+            elseif zigzag
+                bound = _omrf_direct_cached_zigzag_bound(
+                    envelope, factor, node, left, right)
             else
-                left_h = _omrf_direct_cached_remainder_at(
-                    envelope, factor, person, node, left)
+                if adjacent
+                    left_h = envelope.last_boundary_remainders[factor]
+                else
+                    left_h = _omrf_direct_cached_remainder_at(
+                        envelope, factor, person, node, left)
+                end
+                right_h = _omrf_direct_cached_remainder_at(
+                    envelope, factor, person, node, right)
+                envelope.last_boundary_remainders[factor] = right_h
+                if signed_linear
+                    envelope.person_left_signed[person] += left_h
+                    envelope.person_right_signed[person] += right_h
+                    envelope.person_left_abs[person] += abs(left_h)
+                    envelope.person_right_abs[person] += abs(right_h)
+                    envelope.person_curvature[person] +=
+                        envelope.path_curvature_coefficient[factor]
+                end
+                interpolation_bound = max(abs(left_h), abs(right_h)) +
+                    envelope.path_curvature_coefficient[factor] * width2
+                if envelope.hcv_remainder
+                    delta_range = max(
+                        _omrf_direct_cached_delta_range(
+                            envelope, factor, node, left),
+                        _omrf_direct_cached_delta_range(
+                            envelope, factor, node, right))
+                    velocity_range = envelope.path_velocity_range[factor]
+                    global_cap = _omrf_categorical_hcv_bound(
+                        velocity_range, delta_range)
+                    bound = nextfloat(min(interpolation_bound, global_cap))
+                else
+                    bound = nextfloat(interpolation_bound)
+                end
             end
-            right_h = _omrf_direct_cached_remainder_at(
-                envelope, factor, person, node, right)
-            envelope.last_boundary_remainders[factor] = right_h
-            bound = nextfloat(max(abs(left_h), abs(right_h)) +
-                envelope.path_curvature_coefficient[factor] * width2)
             envelope.factor_workspace[factor] = bound
             cumulative += bound
             envelope.cell_cumulative[factor, cell] = cumulative
@@ -3677,6 +5160,8 @@ function _omrf_direct_hcv_fill_cell_cached!(
     envelope.cell_left[cell] = left
     envelope.cell_right[cell] = right
     envelope.cell_mass[cell] = cumulative
+    cumulative = _omrf_direct_finish_person_cell!(
+        envelope, cell, signed_linear)
     envelope.last_boundary = right
     envelope.last_boundary_valid = true
     counts = envelope.context.counts
@@ -3689,14 +5174,100 @@ function _omrf_direct_hcv_fill_cell_cached!(
     return cumulative
 end
 
+"""Certified person endpoints without constructing unused factor fallback masses.
+
+The signed Taylor enclosure is identical to the S1a branch of
+`_omrf_direct_finish_person_cell!`. Only BPS uses this research policy.
+Selected-person point refinement still evaluates its own valid factor caps.
+"""
+function _omrf_direct_hcv_fill_signed_only_cell!(
+        envelope::OMRFDirectPersonNodeHCVEnvelope,
+        left::Float64, right::Float64, cell::Int)
+    adjacent = envelope.last_boundary_valid &&
+        envelope.last_boundary == left
+    fill!(envelope.person_left_signed, 0.0)
+    fill!(envelope.person_right_signed, 0.0)
+    fill!(envelope.person_left_abs, 0.0)
+    fill!(envelope.person_right_abs, 0.0)
+    fill!(envelope.person_curvature, 0.0)
+    factor = 1
+    @inbounds for node in 1:envelope.n_nodes
+        for person in 1:envelope.n_persons
+            left_h = adjacent ? envelope.last_boundary_remainders[factor] :
+                _omrf_direct_cached_remainder_at(
+                    envelope, factor, person, node, left)
+            right_h = _omrf_direct_cached_remainder_at(
+                envelope, factor, person, node, right)
+            envelope.last_boundary_remainders[factor] = right_h
+            envelope.person_left_signed[person] += left_h
+            envelope.person_right_signed[person] += right_h
+            envelope.person_left_abs[person] += abs(left_h)
+            envelope.person_right_abs[person] += abs(right_h)
+            envelope.person_curvature[person] +=
+                envelope.path_curvature_coefficient[factor]
+            factor += 1
+        end
+    end
+    envelope.cell_left[cell] = left
+    envelope.cell_right[cell] = right
+    width2 = nextfloat((right - left)^2)
+    rounding = envelope.n_nodes * eps(Float64) /
+        (1 - envelope.n_nodes * eps(Float64))
+    cumulative = 0.0
+    @inbounds for person in 1:envelope.n_persons
+        endpoint_bound = max(
+            nextfloat(abs(envelope.person_left_signed[person]) +
+                rounding * envelope.person_left_abs[person]),
+            nextfloat(abs(envelope.person_right_signed[person]) +
+                rounding * envelope.person_right_abs[person]))
+        curvature_bound = nextfloat(envelope.person_curvature[person] *
+            (1 + rounding))
+        signed_bound = nextfloat(endpoint_bound +
+            nextfloat(curvature_bound * width2))
+        envelope.person_workspace[person] = signed_bound
+        cumulative = nextfloat(cumulative + signed_bound)
+        envelope.person_cell_cumulative[person, cell] = cumulative
+    end
+    envelope.cell_mass[cell] = cumulative
+    envelope.last_boundary = right
+    envelope.last_boundary_valid = true
+    counts = envelope.context.counts
+    counts.direct_factor_bound_scans += 1
+    counts.direct_factors_evaluated += factor - 1
+    counts.direct_residual_table_constructions += 1
+    counts.direct_left_endpoint_evaluations += adjacent ? 0 : factor - 1
+    counts.direct_right_endpoint_evaluations += factor - 1
+    counts.direct_adjacent_endpoint_reuses += adjacent ? factor - 1 : 0
+    return cumulative
+end
+
 function _omrf_direct_hcv_fill_cell!(
         envelope::OMRFDirectPersonNodeHCVEnvelope, state, flow,
         left::Float64, right::Float64, cell::Int)
+    if envelope.signed_only_person_roof
+        _omrf_actual_flow(flow) isa BouncyParticle || throw(ArgumentError(
+            "signed-only person roofs currently support linear BPS"))
+        if envelope.shared_current !== nothing
+            workspace = envelope.shared_current::OMRFSharedCurrentWorkspace
+            if !workspace.use_fallback
+                return _omrf_shared_fill_signed_cell!(envelope, workspace,
+                    state, left, right, cell)
+            end
+            envelope.context.counts.shared_current_dense_fallback_cells += 1
+        end
+        return _omrf_direct_hcv_fill_signed_only_cell!(
+            envelope, left, right, cell)
+    end
     return _omrf_direct_hcv_fill_cell_cached!(
-        envelope, left, right, cell, true)
+        envelope, left, right, cell, true,
+        _omrf_actual_flow(flow) isa ZigZag,
+        _omrf_actual_flow(flow) isa PDMPSamplers.AnyBoomerang)
 end
 
-@inline _omrf_direct_flow_token(flow) = UInt(0)
+@inline _omrf_direct_flow_token(::BouncyParticle) = UInt(0x01)
+@inline _omrf_direct_flow_token(::ZigZag) = UInt(0x02)
+@inline _omrf_direct_flow_token(::PDMPSamplers.AnyBoomerang) = UInt(0x03)
+@inline _omrf_direct_flow_token(flow) = UInt(hash(typeof(flow)))
 @inline function _omrf_direct_flow_token(
         flow::PDMPSamplers.PreconditionedDynamics)
     generation = hasproperty(flow.metric, :generation) ?
@@ -3706,7 +5277,7 @@ end
 
 function _omrf_direct_component_cell_scales!(out,
         envelope::OMRFDirectPersonNodeHCVEnvelope, state,
-        actual_flow::BouncyParticle,
+        actual_flow::Union{BouncyParticle,ZigZag,PDMPSamplers.AnyBoomerang},
         left, right, flow_token::UInt)
     left = Float64(left)
     right = Float64(right)
@@ -3752,14 +5323,29 @@ function PDMPSamplers.component_cell_scales!(out,
         envelope::OMRFDirectPersonNodeHCVEnvelope, state,
         actual_flow::BouncyParticle, left, right)
     return _omrf_direct_component_cell_scales!(out, envelope, state,
-        actual_flow, left, right, UInt(0))
+        actual_flow, left, right, _omrf_direct_flow_token(actual_flow))
+end
+
+function PDMPSamplers.component_cell_scales!(out,
+        envelope::OMRFDirectPersonNodeHCVEnvelope, state,
+        actual_flow::ZigZag, left, right)
+    return _omrf_direct_component_cell_scales!(out, envelope, state,
+        actual_flow, left, right, _omrf_direct_flow_token(actual_flow))
+end
+
+function PDMPSamplers.component_cell_scales!(out,
+        envelope::OMRFDirectPersonNodeHCVEnvelope, state,
+        actual_flow::PDMPSamplers.AnyBoomerang, left, right)
+    return _omrf_direct_component_cell_scales!(out, envelope, state,
+        actual_flow, left, right, _omrf_direct_flow_token(actual_flow))
 end
 
 function PDMPSamplers.component_cell_scales!(out,
         envelope::OMRFDirectPersonNodeHCVEnvelope, state,
         flow::PDMPSamplers.PreconditionedDynamics, left, right)
-    flow.dynamics isa BouncyParticle || throw(ArgumentError(
-        "direct person-node HCV cells currently support only linear BPS"))
+    flow.dynamics isa Union{BouncyParticle,ZigZag,
+            PDMPSamplers.AnyBoomerang} || throw(ArgumentError(
+        "direct person-node HCV cells require BPS, Zig-Zag, or Boomerang"))
     return _omrf_direct_component_cell_scales!(out, envelope, state,
         flow.dynamics, left, right, _omrf_direct_flow_token(flow))
 end
@@ -3779,7 +5365,7 @@ function _omrf_direct_prepare_horizon!(
     envelope.last_boundary_valid = false
     started = time_ns()
     _omrf_direct_hcv_fill_cell_cached!(
-        envelope, 0.0, horizon, 1, false)
+        envelope, 0.0, horizon, 1, false, false)
     envelope.context.counts.direct_cell_certificate_seconds +=
         (time_ns() - started) * 1e-9
     envelope.cell_count = 1
@@ -3793,14 +5379,20 @@ function PDMPSamplers.prepare_residual_horizon!(
         envelope::OMRFDirectPersonNodeHCVEnvelope, state,
         flow::BouncyParticle, horizon)
     return _omrf_direct_prepare_horizon!(
-        envelope, state, flow, Float64(horizon), UInt(0))
+        envelope, state, flow, Float64(horizon),
+        _omrf_direct_flow_token(flow))
 end
 
 function PDMPSamplers.prepare_residual_horizon!(
         envelope::OMRFDirectPersonNodeHCVEnvelope, state,
         flow::PDMPSamplers.PreconditionedDynamics, horizon)
+    if flow.dynamics isa Union{ZigZag,PDMPSamplers.AnyBoomerang}
+        envelope.event_horizon_scope && throw(ArgumentError(
+            "direct CV event-horizon cells currently support only linear BPS"))
+        return nothing
+    end
     flow.dynamics isa BouncyParticle || throw(ArgumentError(
-        "direct CV event-horizon cells currently support only linear BPS"))
+        "direct CV cells require a linear BPS or Zig-Zag flow"))
     return _omrf_direct_prepare_horizon!(envelope, state, flow.dynamics,
         Float64(horizon), _omrf_direct_flow_token(flow))
 end
@@ -3817,6 +5409,7 @@ end
         if envelope.cell_left[cell] - tolerance <= local_time <=
                 envelope.cell_right[cell] + tolerance
             envelope.active_cell = cell
+            envelope.active_time = local_time
             mass = envelope.cell_mass[cell]
             envelope.scales[1] = mass
             envelope.cumulative_masses[1] = mass
@@ -3826,6 +5419,125 @@ end
     end
     throw(ArgumentError(
         "direct HCV proposal time is outside the cached active grid"))
+end
+
+PDMPSamplers._joint_signed_group_enabled(
+    envelope::OMRFDirectPersonNodeHCVEnvelope) =
+    envelope.joint_group_size > 0
+
+function PDMPSamplers._joint_signed_cell_mass!(cv,
+        envelope::OMRFDirectPersonNodeHCVEnvelope, state, flow,
+        left::Float64, right::Float64)
+    envelope.joint_group_size > 0 || throw(ArgumentError(
+        "joint cell requested for an ordinary person envelope"))
+    if envelope.shared_current !== nothing
+        oracle_check = _omrf_base_oracle(cv.deterministic_gradient!)
+        oracle_check.analytic_prior isa OMRFIndependentAnalyticPrior ||
+            throw(ArgumentError(
+                "shared-current joint groups require an independent analytic prior"))
+        _omrf_actual_flow(flow) isa BouncyParticle || throw(ArgumentError(
+            "shared-current joint groups require linear BPS"))
+    end
+    width = right - left
+    width_bin = width <= 0.001 ? 1 :
+        width <= 0.005 ? 2 :
+        width <= 0.01 ? 3 :
+        width <= 0.02 ? 4 :
+        width <= 0.05 ? 5 :
+        width <= 0.1 ? 6 :
+        width <= 0.2 ? 7 :
+        width <= 0.5 ? 8 :
+        width <= 1.0 ? 9 : 10
+    envelope.context.counts.joint_cell_width_bins[width_bin] += 1
+    PDMPSamplers.component_cell_scales!(envelope.cell_scales,
+        envelope, state, flow, left, right)
+    cell = envelope.active_cell
+    oracle = _omrf_base_oracle(cv.deterministic_gradient!)
+    Ud = _omrf_joint_signed_deterministic_upper(oracle,
+        oracle.active_free, state, flow, left, right)
+    B = size(envelope.joint_groups, 2)
+    width2 = nextfloat((right - left)^2)
+    equal_groups = envelope.joint_group_size == 4
+    n_terms = envelope.joint_group_size * envelope.n_nodes
+    gamma = n_terms * eps(Float64) / (1 - n_terms * eps(Float64))
+    total = 0.0
+    @inbounds for b in 1:B
+        left_signed = 0.0; right_signed = 0.0
+        left_abs = 0.0; right_abs = 0.0; curvature = 0.0
+        m_b = envelope.joint_group_lengths[b]
+        for slot in 1:m_b
+            person = envelope.joint_groups[slot, b]
+            left_signed += envelope.person_left_signed[person]
+            right_signed += envelope.person_right_signed[person]
+            left_abs += envelope.person_left_abs[person]
+            right_abs += envelope.person_right_abs[person]
+            curvature += envelope.person_curvature[person]
+        end
+        if !equal_groups
+            n_terms_b = m_b * envelope.n_nodes
+            gamma = n_terms_b * eps(Float64) /
+                (1 - n_terms_b * eps(Float64))
+        end
+        upper_left = equal_groups ?
+            nextfloat(left_signed + gamma * left_abs) :
+            nextfloat(left_signed + nextfloat(gamma * left_abs))
+        upper_right = equal_groups ?
+            nextfloat(right_signed + gamma * right_abs) :
+            nextfloat(right_signed + nextfloat(gamma * right_abs))
+        curvature = nextfloat(curvature * (1 + gamma))
+        Ub = nextfloat(max(upper_left, upper_right) +
+            nextfloat(curvature * width2))
+        cap = if equal_groups
+            max(0.0, nextfloat(Ud + B * Ub))
+        else
+            # The final JS16 mark has four people. Bracket N/m_b before
+            # multiplication, choosing the endpoint by the signed bound.
+            scale = envelope.n_persons / m_b
+            scaled = Ub >= 0 ? nextfloat(nextfloat(scale) * Ub) :
+                nextfloat(prevfloat(scale) * Ub)
+            max(0.0, nextfloat(Ud + scaled))
+        end
+        envelope.joint_cell_caps[b, cell] = cap
+        # Equal JS4 retains its original cumulative CDF exactly. JS16 uses
+        # integer group sizes as weights: m_b*C_b, then divides by N once.
+        total = equal_groups ? nextfloat(total + cap) :
+            nextfloat(total + nextfloat(m_b * cap))
+        envelope.joint_cell_cumulative[b, cell] = total
+    end
+    mass = equal_groups ? nextfloat(total / B) :
+        nextfloat(total / envelope.n_persons)
+    envelope.joint_cell_mass[cell] = mass
+    return mass
+end
+
+function PDMPSamplers._joint_signed_active_mass!(
+        envelope::OMRFDirectPersonNodeHCVEnvelope, state, t)
+    _omrf_direct_activate_time!(envelope, state, t)
+    return @inbounds envelope.joint_cell_mass[envelope.active_cell]
+end
+
+function PDMPSamplers._joint_signed_draw_mark!(rng::Random.AbstractRNG,
+        envelope::OMRFDirectPersonNodeHCVEnvelope, subset::Vector{Int})
+    cell = envelope.active_cell
+    B = size(envelope.joint_groups, 2)
+    total = @inbounds envelope.joint_cell_cumulative[B, cell]
+    total > 0 || return 0.0
+    u = rand(rng) * total
+    lo = 1; hi = B
+    @inbounds while lo < hi
+        mid = (lo + hi) >>> 1
+        if envelope.joint_cell_cumulative[mid, cell] <= u
+            lo = mid + 1
+        else
+            hi = mid
+        end
+    end
+    m_b = @inbounds envelope.joint_group_lengths[lo]
+    resize!(subset, m_b)
+    @inbounds for slot in 1:m_b
+        subset[slot] = envelope.joint_groups[slot, lo]
+    end
+    return @inbounds envelope.joint_cell_caps[lo, cell]
 end
 
 function PDMPSamplers.component_scales!(out,
@@ -3847,8 +5559,13 @@ end
 
 function PDMPSamplers.observation_residual_bound(
         envelope::OMRFDirectPersonNodeHCVEnvelope, observation::Integer)
-    1 <= observation <= PDMPSamplers.n_observations(envelope) ||
-        throw(BoundsError(1:PDMPSamplers.n_observations(envelope), observation))
+    envelope.signed_only_person_roof && throw(ArgumentError(
+        "signed-only person roofs do not construct factor cell bounds"))
+    # The internal table is always factor-indexed even when the public
+    # sampling population is persons for the hybrid route.
+    n_factors = envelope.n_persons * envelope.n_nodes
+    1 <= observation <= n_factors ||
+        throw(BoundsError(1:n_factors, observation))
     cell = envelope.active_cell
     iszero(cell) && throw(ArgumentError(
         "direct HCV factor bound requested before cell activation"))
@@ -3865,13 +5582,17 @@ function PDMPSamplers.observation_residual_bound(
 end
 
 function PDMPSamplers._draw_component(rng::Random.AbstractRNG,
-        envelope::OMRFDirectPersonNodeHCVEnvelope, B::Real)::Int
+        envelope::OMRFDirectPersonNodeHCVEnvelope{OMRFDirectFactorSampling},
+        B::Real)::Int
     cell = envelope.active_cell
     iszero(cell) && throw(ArgumentError(
         "direct HCV distinguished factor requested before cell activation"))
     target = rand(rng) * B
     left = 1
-    right = PDMPSamplers.n_observations(envelope)
+    # The direct table always contains one entry per person-node factor.  A
+    # person-gradient route still draws its distinguished *factor* from this
+    # table and maps it to the owning person below.
+    right = envelope.n_persons * envelope.n_nodes
     @inbounds while left < right
         middle = (left + right) >>> 1
         if envelope.cell_cumulative[middle, cell] < target
@@ -3883,8 +5604,271 @@ function PDMPSamplers._draw_component(rng::Random.AbstractRNG,
     return left
 end
 
+
+function PDMPSamplers._draw_component(rng::Random.AbstractRNG,
+        envelope::OMRFDirectPersonNodeHCVEnvelope{OMRFDirectPersonSampling},
+        B::Real)::Int
+    cell = envelope.active_cell
+    iszero(cell) && throw(ArgumentError(
+        "direct HCV distinguished person requested before cell activation"))
+    target = rand(rng) * B
+    left = 1
+    right = envelope.n_persons
+    @inbounds while left < right
+        middle = (left + right) >>> 1
+        if envelope.person_cell_cumulative[middle, cell] < target
+            left = middle + 1
+        else
+            right = middle
+        end
+    end
+    return left
+end
+
+@inline function _omrf_direct_person_cell_bound(
+        envelope::OMRFDirectPersonNodeHCVEnvelope, person::Int)
+    envelope.signed_only_person_roof &&
+        return @inbounds envelope.person_workspace[person]
+    cell = envelope.active_cell
+    @inbounds return person == 1 ? envelope.person_cell_cumulative[1, cell] :
+        envelope.person_cell_cumulative[person, cell] -
+        envelope.person_cell_cumulative[person - 1, cell]
+end
+
 PDMPSamplers._draw_distinguished(rng::Random.AbstractRNG,
     ::OMRFDirectPersonNodeHCVEnvelope, observation::Int) = observation
+
+@inline function PDMPSamplers.begin_subsampling_mark!(
+        oracle::OMRFAnalyticSubsamplingOracle)
+    oracle.cached_residual_valid = false
+    oracle.cached_deterministic_signed_rate = NaN
+    return nothing
+end
+
+# Failure-only diagnostics for the direct person-node envelope.  This method
+# is reached only when the generic sampler's opt-in immutable failure capture
+# is enabled; ordinary proposals retain the allocation-free empty hook.
+function PDMPSamplers.subsampling_failure_context(
+        oracle::OMRFAnalyticSubsamplingOracle,
+        envelope::OMRFDirectPersonNodeHCVEnvelope, subset)
+    N = envelope.n_persons
+    factors = if envelope.context.factorization === :person
+        [((node - 1) * N + Int(person))
+            for person in subset for node in 1:envelope.n_nodes]
+    else
+        collect(Int, subset)
+    end
+    times = fill(envelope.active_time, length(factors))
+    cached_remainders = Vector{Float64}(undef, length(factors))
+    point_bounds = similar(cached_remainders)
+    cell_bounds = similar(cached_remainders)
+    displacement_ranges = similar(cached_remainders)
+    velocity_ranges = similar(cached_remainders)
+    qmax = maximum(envelope.context.seen) - 1
+    anchor_probabilities = fill(NaN, qmax, length(factors))
+    path_deltas = fill(NaN, qmax, length(factors))
+    path_directional_coefficients = fill(NaN, qmax, length(factors))
+    anchor_expected_scores = Vector{Float64}(undef, length(factors))
+    cached_anchor_mean_z = Vector{Float64}(undef, length(factors))
+    cached_anchor_cov_z_delta = Vector{Float64}(undef, length(factors))
+    @inbounds for slot in eachindex(factors)
+        factor = factors[slot]
+        node = div(factor - 1, N) + 1
+        person = mod(factor - 1, N) + 1
+        cached_remainders[slot] = _omrf_direct_cached_remainder_at(
+            envelope, factor, person, node,
+            envelope.active_time)
+        point_bounds[slot] = _omrf_direct_factor_point_bound(
+            envelope, factor)
+        cell_bounds[slot] = envelope.signed_only_person_roof ? NaN :
+            PDMPSamplers.observation_residual_bound(envelope, factor)
+        displacement_ranges[slot] = _omrf_direct_cached_delta_range(
+            envelope, factor, node, envelope.active_time)
+        velocity_ranges[slot] = envelope.path_kind == UInt8(1) ?
+            envelope.path_zigzag_velocity_sum[factor] :
+            envelope.path_velocity_range[factor]
+        start = envelope.context.threshold_starts[node]
+        q = envelope.context.seen[node] - 1
+        for u in 1:q
+            anchor_probabilities[u, slot] =
+                envelope.context.anchor_probabilities[start + u - 1, person]
+            path_deltas[u, slot] = envelope.path_delta0[u, factor] +
+                envelope.active_time * envelope.path_z[u, factor]
+            path_directional_coefficients[u, slot] =
+                envelope.path_z[u, factor]
+        end
+        anchor_expected_scores[slot] =
+            envelope.context.anchor_expected_scores[node, person]
+        cached_anchor_mean_z[slot] = envelope.path_anchor_mean_z[factor]
+        cached_anchor_cov_z_delta[slot] =
+            envelope.path_anchor_cov_z_delta0[factor] +
+            envelope.active_time * envelope.path_anchor_var_z[factor]
+    end
+    return (selected_factors=factors, selected_times=times,
+        selected_cached_directional_remainders=cached_remainders,
+        selected_point_bounds=point_bounds,
+        selected_cell_bounds=cell_bounds,
+        selected_displacement_ranges=displacement_ranges,
+        selected_velocity_ranges=velocity_ranges,
+        selected_anchor_probabilities=anchor_probabilities,
+        selected_path_deltas=path_deltas,
+        selected_path_directional_coefficients=path_directional_coefficients,
+        selected_anchor_expected_scores=anchor_expected_scores,
+        selected_cached_anchor_mean_z=cached_anchor_mean_z,
+        selected_cached_anchor_cov_z_delta=cached_anchor_cov_z_delta,
+        exact_refinement_residual=copy(oracle.cached_residual),
+        current_touched_positions=copy(oracle.residual_context.touched_positions),
+        oracle_envelope_anchor_max_abs_difference=maximum(abs,
+            oracle.anchor .- envelope.anchor),
+        envelope_path_anchor_max_abs_difference=maximum(abs,
+            envelope.path_anchor .- envelope.anchor),
+        oracle_anchor_identity=objectid(oracle.anchor),
+        direct_envelope_anchor_identity=objectid(envelope.anchor),
+        direct_context_identity=objectid(envelope.context),
+        oracle_context_identity=objectid(oracle.residual_context),
+        direct_path_kind=Int(envelope.path_kind),
+        direct_active_cell=envelope.active_cell,
+        direct_active_time=envelope.active_time,
+        direct_hcv_active=oracle.residual_context.hcv_active)
+end
+
+@inline function _omrf_direct_factor_point_bound(
+        envelope::OMRFDirectPersonNodeHCVEnvelope, factor::Int)
+    context = envelope.context
+    N = envelope.n_persons
+    node0, person0 = divrem(factor - 1, N)
+    node = node0 + 1
+    q = context.seen[node] - 1
+    iszero(q) && return 0.0
+    t = envelope.active_time
+    minimum_displacement = 0.0
+    maximum_displacement = 0.0
+    minimum_velocity = 0.0
+    maximum_velocity = 0.0
+    if envelope.path_kind == UInt8(2)
+        sine, cosine = sincos(t)
+        @inbounds for u in 1:q
+            displacement = envelope.path_delta0[u, factor] +
+                envelope.path_z[u, factor] * cosine +
+                envelope.path_harmonic_sine[u, factor] * sine
+            velocity = -envelope.path_z[u, factor] * sine +
+                envelope.path_harmonic_sine[u, factor] * cosine
+            minimum_displacement = min(minimum_displacement, displacement)
+            maximum_displacement = max(maximum_displacement, displacement)
+            minimum_velocity = min(minimum_velocity, velocity)
+            maximum_velocity = max(maximum_velocity, velocity)
+        end
+    else
+        @inbounds for u in 1:q
+            displacement = envelope.path_delta0[u, factor] +
+                t * envelope.path_z[u, factor]
+            minimum_displacement = min(minimum_displacement, displacement)
+            maximum_displacement = max(maximum_displacement, displacement)
+        end
+    end
+    displacement_range = maximum_displacement - minimum_displacement
+    velocity_range = if envelope.path_kind == UInt8(2)
+        maximum_velocity - minimum_velocity
+    elseif envelope.path_kind == UInt8(1)
+        envelope.path_zigzag_velocity_sum[factor]
+    else
+        envelope.path_velocity_range[factor]
+    end
+    return context.hcv_active ? _omrf_categorical_hcv_bound(
+        velocity_range, displacement_range) :
+        velocity_range * displacement_range / 4
+end
+
+"""Size-biased direct-table draw with a cheap selected-factor point screen.
+
+The cell table still defines the exact proposal distribution.  The point
+bound only performs an additional valid thinning step before construction of
+the dense deterministic HCV gradient; it therefore does not alter the
+accepted marked-event law.
+"""
+function PDMPSamplers.draw_subset!(rng::Random.AbstractRNG,
+        cv::PDMPSamplers.SubsampledControlVariate{F,O,E},
+        D::Real, B::Real) where {F,O,
+            E<:OMRFDirectPersonNodeHCVEnvelope{OMRFDirectPersonSampling}}
+    envelope = cv.envelope
+    oracle = cv.residual_oracle
+    oracle isa PDMPSamplers.WithResidualStats && (oracle = oracle.f)
+    m = cv.m
+    isone(m) || throw(ArgumentError(
+        "factor-roof person HCV currently requires one selected person"))
+    total = D + B
+    residual_source = !(iszero(B) ||
+        (!iszero(D) && rand(rng) * total <= D))
+    if residual_source
+        cv.subset[1] = PDMPSamplers._draw_component(rng, envelope, B)
+    else
+        PDMPSamplers._draw_base_subset!(rng, cv, cv.subset_design)
+    end
+    PDMPSamplers.record_subsampling_mark_source!(
+        cv.residual_oracle, residual_source)
+    person = cv.subset[1]
+    cell_weight = _omrf_direct_person_cell_bound(envelope, person)
+    point_weight = 0.0
+    if envelope.signed_only_person_roof
+        @inbounds for node in 1:envelope.n_nodes
+            factor = (node - 1) * envelope.n_persons + person
+            point_weight = nextfloat(point_weight +
+                _omrf_direct_factor_point_bound(envelope, factor))
+        end
+        point_weight = min(cell_weight, point_weight)
+    else
+        @inbounds for node in 1:envelope.n_nodes
+            factor = (node - 1) * envelope.n_persons + person
+            factor_cell_weight = PDMPSamplers.observation_residual_bound(
+                envelope, factor)
+            point_weight += min(factor_cell_weight,
+                _omrf_direct_factor_point_bound(envelope, factor))
+        end
+    end
+    scale = envelope.n_persons
+    oracle isa OMRFAnalyticSubsamplingOracle &&
+        (oracle.lazy_residual_subset_bound = scale * point_weight)
+    return D + scale * cell_weight
+end
+
+function PDMPSamplers.draw_subset!(rng::Random.AbstractRNG,
+        cv::PDMPSamplers.SubsampledControlVariate{F,O,E},
+        D::Real, B::Real) where {F,O,
+            E<:OMRFDirectPersonNodeHCVEnvelope{OMRFDirectFactorSampling}}
+    envelope = cv.envelope
+    oracle = cv.residual_oracle
+    oracle isa PDMPSamplers.WithResidualStats && (oracle = oracle.f)
+    N = PDMPSamplers.n_observations(envelope)
+    m = cv.m
+    total = D + B
+    residual_source = !(iszero(B) ||
+        (!iszero(D) && rand(rng) * total <= D))
+    if residual_source
+        component = PDMPSamplers._draw_component(rng, envelope, B)
+        distinguished = PDMPSamplers._draw_distinguished(
+            rng, envelope, component)
+        PDMPSamplers._draw_base_subset_conditional!(
+            rng, cv, cv.subset_design, distinguished)
+    else
+        PDMPSamplers._draw_base_subset!(rng, cv, cv.subset_design)
+    end
+    PDMPSamplers.record_subsampling_mark_source!(
+        cv.residual_oracle, residual_source)
+
+    cell_weight = 0.0
+    point_weight = 0.0
+    @inbounds for factor in cv.subset
+        cell_bound = PDMPSamplers.observation_residual_bound(
+            envelope, factor)
+        point_bound = _omrf_direct_factor_point_bound(envelope, factor)
+        cell_weight += cell_bound
+        point_weight += min(cell_bound, point_bound)
+    end
+    scale = N / m
+    oracle isa OMRFAnalyticSubsamplingOracle &&
+        (oracle.lazy_residual_subset_bound = scale * point_weight)
+    return D + scale * cell_weight
+end
 
 """
 Certified empirical-covariate expansion of the scalar OMRF residual rate.
@@ -6329,13 +8313,12 @@ function _omrf_prepare_exact_selected_residual!(
     oracle.ctx.counts.selected_refinement_calls += 1
     fill!(oracle.cached_residual, 0.0)
     oracle(oracle.cached_residual, state.ξ.x, subset, oracle.anchor)
-    # Keep this workspace private to the bound calculation.  Passing it back
-    # through the generic candidate-evaluation cache is unsafe when the
-    # provider is wrapped with statistics and/or an anchor-bank adapter: the
-    # live subset/touched-position state can be changed before the handoff is
-    # consumed.  The ordinary candidate path recomputes the selected residual
-    # below, preserving the certified bound without sharing mutable state.
-    oracle.cached_residual_valid = false
+    # The generic event loop consumes this value before drawing another mark
+    # or changing an anchor.  draw_subset! invalidates it at mark ownership,
+    # and anchor/source installation invalidates it separately.  This avoids
+    # evaluating the same selected residual once for refinement and again for
+    # the final thinning test.
+    oracle.cached_residual_valid = true
     return nothing
 end
 
@@ -6348,12 +8331,15 @@ function PDMPSamplers.subsampling_subset_bound(
         PDMPSamplers.AnyBoomerang,PDMPSamplers.PreconditionedDynamics}
     supported_flow || return PDMPSamplers._signed_subset_bound(
         state, gradient, flow, D, M)
-    _omrf_prepare_exact_selected_residual!(oracle, state, subset)
+    oracle.cached_residual_valid ||
+        _omrf_prepare_exact_selected_residual!(oracle, state, subset)
     residual_rate_bound = scale *
         _omrf_exact_selected_residual_abs_rate(
             state, oracle.cached_residual, flow,
             oracle.residual_context.touched_positions)
-    deterministic_actual = λ(state, gradient, flow)
+    deterministic_actual = gradient === nothing ?
+        max(0.0, oracle.cached_deterministic_signed_rate) :
+        λ(state, gradient, flow)
     return min(M, deterministic_actual + residual_rate_bound)
 end
 
@@ -6448,7 +8434,8 @@ end
 
 PDMPSamplers.needs_subsampling_residual_gradient(
     oracle::OMRFAnalyticSubsamplingOracle) =
-    oracle.residual_context.zigzag_sign_aware
+    oracle.residual_context.zigzag_sign_aware &&
+    !oracle.residual_context.use_hcv
 
 function PDMPSamplers.subsampling_residual_subset_bound(
         oracle::OMRFAnalyticSubsamplingOracle, state, flow,
@@ -7684,7 +9671,7 @@ function _omrf_pattern_hcv_scale_cached(
     displacement_range = maximum_logit - minimum_logit
     velocity_range = maximum_velocity - minimum_velocity
     return scales.context.hcv_active ?
-        velocity_range * displacement_range^2 / 8 :
+        _omrf_categorical_hcv_bound(velocity_range, displacement_range) :
         velocity_range * displacement_range / 4
 end
 
@@ -7725,7 +9712,7 @@ function _omrf_pattern_hcv_scale_at(scales::OMRFPatternLocalHCVScales,
     displacement_range = maximum_logit - minimum_logit
     velocity_range = maximum_velocity - minimum_velocity
     return context.hcv_active ?
-        velocity_range * displacement_range^2 / 8 :
+        _omrf_categorical_hcv_bound(velocity_range, displacement_range) :
         velocity_range * displacement_range / 4
 end
 
@@ -7777,7 +9764,7 @@ function _omrf_pattern_hcv_cell_scale_at(scales::OMRFPatternLocalHCVScales,
                 midpoint_sine, midpoint_cosine, half_width))
     end
     return context.hcv_active ?
-        velocity_range * displacement_range^2 / 8 :
+        _omrf_categorical_hcv_bound(velocity_range, displacement_range) :
         velocity_range * displacement_range / 4
 end
 
@@ -7827,7 +9814,7 @@ function _omrf_pattern_hcv_cell_scale_cached(
                 midpoint_sine, midpoint_cosine, half_width))
     end
     return context.hcv_active ?
-        velocity_range * displacement_range^2 / 8 :
+        _omrf_categorical_hcv_bound(velocity_range, displacement_range) :
         velocity_range * displacement_range / 4
 end
 
@@ -7939,7 +9926,8 @@ function (scales::OMRFPatternLocalHCVScales)(out, state,
                     midpoint_sine, midpoint_cosine, half_width))
         end
         out[component] = scales.context.hcv_active ?
-            velocity_range * displacement_range^2 / 8 :
+            _omrf_categorical_hcv_bound(
+                velocity_range, displacement_range) :
             velocity_range * displacement_range / 4
     end
     scales.context.counts.envelope_cell_calls += 1
@@ -8053,7 +10041,7 @@ function _omrf_grouped_box_node_bound_at_impl(
             abs(velocity_center) + velocity_uncertainty)
     end
     return context.hcv_active ?
-        velocity_range * displacement_range^2 / 8 :
+        _omrf_categorical_hcv_bound(velocity_range, displacement_range) :
         velocity_range * displacement_range / 4
 end
 
@@ -8121,7 +10109,7 @@ function _omrf_grouped_box_node_cell_bound(
                 0.0, sine, -cosine, left, right) + velocity_uncertainty)
     end
     return context.hcv_active ?
-        velocity_range * displacement_range^2 / 8 :
+        _omrf_categorical_hcv_bound(velocity_range, displacement_range) :
         velocity_range * displacement_range / 4
 end
 
@@ -8245,6 +10233,17 @@ function _cache_omrf_node_grouped_point_node!(
     return scales
 end
 
+# Anchor-bank selection is called through the installed preconditioned flow,
+# whereas the node geometry is expressed in physical BPS/Zig-Zag/Boomerang
+# coordinates.  Mirror the existing whole-envelope forwarding methods so the
+# research whole-person HCV bank uses the same physical flow as its event
+# certificate.
+_cache_omrf_node_grouped_point_node!(
+    scales::OMRFNodeGroupedPersonHCVBoxScales, state,
+    flow::PDMPSamplers.PreconditionedDynamics, node::Int, anchor) =
+    _cache_omrf_node_grouped_point_node!(
+        scales, state, flow.dynamics, node, anchor)
+
 @inline function _omrf_node_grouped_point_bound(
         scales::OMRFNodeGroupedPersonHCVBoxScales,
         component::Int, node::Int)
@@ -8281,7 +10280,8 @@ end
             abs(velocity_center) + velocity_uncertainty)
         pair_destination += 1
     end
-    return velocity_range * displacement_range^2 / 8
+    return _omrf_categorical_hcv_bound(
+        velocity_range, displacement_range)
 end
 
 """
@@ -8322,7 +10322,8 @@ The shared trajectory geometry must already have been populated by
         velocity_range = max(velocity_range, abs(velocity))
         pair_destination += 1
     end
-    return velocity_range * displacement_range^2 / 8
+    return _omrf_categorical_hcv_bound(
+        velocity_range, displacement_range)
 end
 
 @inline function _omrf_node_grouped_zigzag_point_bound(
@@ -8333,7 +10334,7 @@ end
     q == 0 && return 0.0
     edges = context.incident_edges[node]
     neighbours = context.incident_neighbours[node]
-    logit_norm_squared = 0.0
+    maximum_logit_abs = 0.0
     start = context.threshold_starts[node]
     @inbounds for u in 1:q
         index = context.threshold_indices[start + u - 1]
@@ -8354,7 +10355,7 @@ end
         end
         logit_abs = abs(displacement + u * field_center) +
             u * field_uncertainty
-        logit_norm_squared += logit_abs * logit_abs
+        maximum_logit_abs = max(maximum_logit_abs, logit_abs)
     end
     weighted_velocity = 0.0
     @inbounds for u in 1:q
@@ -8363,15 +10364,18 @@ end
             state, flow, anchor, index, 0.0)
         weighted_velocity += abs(velocity)
     end
-    category_square_sum = q * (q + 1) * (2q + 1) / 6
     @inbounds for k in eachindex(edges)
         edge_index = context.interaction_indices[edges[k]]
         _, velocity = _omrf_coordinate_at(
             state, flow, anchor, edge_index, 0.0)
+        lower = scales.minima[component, neighbours[k]]
         upper = scales.maxima[component, neighbours[k]]
-        weighted_velocity += abs(velocity) * upper * sqrt(category_square_sum)
+        weighted_velocity += q * abs(velocity) * max(abs(lower), abs(upper))
     end
-    return 0.75 * logit_norm_squared * weighted_velocity
+    # Every represented logit lies in [-maximum_logit_abs,
+    # maximum_logit_abs], so twice that value encloses the categorical range.
+    return _omrf_categorical_hcv_bound(
+        weighted_velocity, 2maximum_logit_abs)
 end
 
 @inline function _omrf_node_grouped_person_zigzag_point_bound(
@@ -8382,7 +10386,8 @@ end
     q == 0 && return 0.0
     edges = context.incident_edges[node]
     neighbours = context.incident_neighbours[node]
-    logit_norm_squared = 0.0
+    minimum_logit = 0.0
+    maximum_logit = 0.0
     start = context.threshold_starts[node]
     @inbounds for u in 1:q
         index = context.threshold_indices[start + u - 1]
@@ -8396,7 +10401,8 @@ end
             field += context.X[person, neighbours[k]] * edge_displacement
         end
         logit = displacement + u * field
-        logit_norm_squared += logit * logit
+        minimum_logit = min(minimum_logit, logit)
+        maximum_logit = max(maximum_logit, logit)
     end
     weighted_velocity = 0.0
     @inbounds for u in 1:q
@@ -8405,15 +10411,15 @@ end
             state, flow, anchor, index, 0.0)
         weighted_velocity += abs(velocity)
     end
-    category_square_sum = q * (q + 1) * (2q + 1) / 6
     @inbounds for k in eachindex(edges)
         edge_index = context.interaction_indices[edges[k]]
         _, velocity = _omrf_coordinate_at(
             state, flow, anchor, edge_index, 0.0)
-        weighted_velocity += abs(velocity) *
-            context.X[person, neighbours[k]] * sqrt(category_square_sum)
+        weighted_velocity += q * abs(velocity) *
+            abs(context.X[person, neighbours[k]])
     end
-    return 0.75 * logit_norm_squared * weighted_velocity
+    return _omrf_categorical_hcv_bound(
+        weighted_velocity, maximum_logit - minimum_logit)
 end
 
 @inline function _omrf_node_grouped_zigzag_cell_bound(
@@ -8425,7 +10431,7 @@ end
     q == 0 && return 0.0
     edges = context.incident_edges[node]
     neighbours = context.incident_neighbours[node]
-    logit_norm_squared = 0.0
+    maximum_logit_abs = 0.0
     start = context.threshold_starts[node]
     @inbounds for u in 1:q
         index = context.threshold_indices[start + u - 1]
@@ -8454,7 +10460,7 @@ end
             u * field_uncertainty
         right_abs = abs(right_displacement + u * right_field) +
             u * field_uncertainty
-        logit_norm_squared += max(left_abs, right_abs)^2
+        maximum_logit_abs = max(maximum_logit_abs, left_abs, right_abs)
     end
     weighted_velocity = 0.0
     @inbounds for u in 1:q
@@ -8463,15 +10469,16 @@ end
             state, flow, anchor, index, left)
         weighted_velocity += abs(velocity)
     end
-    category_square_sum = q * (q + 1) * (2q + 1) / 6
     @inbounds for k in eachindex(edges)
         edge_index = context.interaction_indices[edges[k]]
         _, velocity = _omrf_coordinate_at(
             state, flow, anchor, edge_index, left)
+        lower = scales.minima[component, neighbours[k]]
         upper = scales.maxima[component, neighbours[k]]
-        weighted_velocity += abs(velocity) * upper * sqrt(category_square_sum)
+        weighted_velocity += q * abs(velocity) * max(abs(lower), abs(upper))
     end
-    return 0.75 * logit_norm_squared * weighted_velocity
+    return _omrf_categorical_hcv_bound(
+        weighted_velocity, 2maximum_logit_abs)
 end
 
 @inline function _omrf_node_grouped_person_point_bound(
@@ -8620,7 +10627,8 @@ end
                 half_width) + velocity_uncertainty)
         pair_destination += 1
     end
-    return velocity_range * displacement_range^2 / 8
+    return _omrf_categorical_hcv_bound(
+        velocity_range, displacement_range)
 end
 
 function (scales::OMRFNodeGroupedPersonHCVBoxScales)(out, state,
@@ -8706,7 +10714,8 @@ function _omrf_node_grouped_linear_cell_bound(
         velocity_range = max(velocity_range,
             abs(pair_velocity) + velocity_uncertainty)
     end
-    return velocity_range * displacement_range^2 / 8
+    return _omrf_categorical_hcv_bound(
+        velocity_range, displacement_range)
 end
 
 function (scales::OMRFNodeGroupedPersonHCVBoxScales)(out, state,
@@ -8728,8 +10737,10 @@ function (scales::OMRFNodeGroupedPersonHCVBoxScales)(out, state,
     started = time_ns()
     @inbounds for component in eachindex(out)
         node = scales.component_nodes[component]
-        out[component] = _omrf_node_grouped_linear_cell_bound(
-            scales, component, node, state, flow, left, right)
+        anchor = scales.node_anchors === nothing ? scales.anchor :
+            view(scales.node_anchors, :, scales.node_sources[node])
+        out[component] = _omrf_node_grouped_zigzag_cell_bound(
+            scales, component, node, state, flow, anchor, left, right)
     end
     scales.context.counts.envelope_cell_calls += 1
     scales.context.counts.envelope_cell_seconds +=
@@ -9057,6 +11068,7 @@ function _cache_omrf_batched_harmonic_fields!(
     fill!(scales.interaction_offsets, 0.0)
     fill!(scales.interaction_cosines, 0.0)
     fill!(scales.interaction_sines, 0.0)
+    fill!(scales.interaction_sines, 0.0)
     P = length(context.seen)
     edge = 1
     @inbounds for left in 1:(P - 1), right in (left + 1):P
@@ -9088,6 +11100,115 @@ function _cache_omrf_batched_harmonic_fields!(
     mul!(scales.field_cosines, X, scales.interaction_cosines)
     mul!(scales.field_sines, X, scales.interaction_sines)
     return nothing
+end
+
+function _cache_omrf_batched_linear_fields!(
+        scales::OMRFBatchedFactorHCVScales, state, flow::ZigZag)
+    context = scales.context
+    fill!(scales.interaction_offsets, 0.0)
+    fill!(scales.interaction_cosines, 0.0)
+    P = length(context.seen)
+    edge = 1
+    @inbounds for left in 1:(P - 1), right in (left + 1):P
+        index = context.interaction_indices[edge]
+        left_anchor = _omrf_factor_anchor(scales, index, left)
+        right_anchor = _omrf_factor_anchor(scales, index, right)
+        left_delta, velocity = _omrf_coordinate_at_anchor_value(
+            state, flow, left_anchor, index, 0.0)
+        right_delta, _ = _omrf_coordinate_at_anchor_value(
+            state, flow, right_anchor, index, 0.0)
+        scales.interaction_offsets[right, left] = left_delta
+        scales.interaction_offsets[left, right] = right_delta
+        scales.interaction_cosines[left, right] = velocity
+        scales.interaction_cosines[right, left] = velocity
+        # Reuse the otherwise harmonic-only sine buffers to cache the
+        # coordinatewise Zig-Zag absolute edge-velocity contribution.  This
+        # removes an O(N P^2) incident-edge traversal from every point/cell
+        # certificate without changing the bound or summation over factors.
+        scales.interaction_sines[left, right] = abs(velocity)
+        scales.interaction_sines[right, left] = abs(velocity)
+        edge += 1
+    end
+    mul!(scales.field_offsets, context.X_float,
+        scales.interaction_offsets)
+    mul!(scales.field_cosines, context.X_float,
+        scales.interaction_cosines)
+    mul!(scales.field_sines, context.X_float,
+        scales.interaction_sines)
+    return nothing
+end
+
+@inline function _omrf_batched_zigzag_hcv_scale(
+        scales::OMRFBatchedFactorHCVScales, state, flow::ZigZag,
+        person::Int, node::Int, t::Float64)
+    context = scales.context
+    q = context.seen[node] - 1
+    iszero(q) && return 0.0
+    field_delta = scales.field_offsets[person, node] +
+        t * scales.field_cosines[person, node]
+    minimum_delta = 0.0
+    maximum_delta = 0.0
+    coordinate_velocity_range_sum = 0.0
+    start = context.threshold_starts[node]
+    @inbounds for u in 1:q
+        index = context.threshold_indices[start + u - 1]
+        anchor = _omrf_factor_anchor(scales, index, node)
+        delta, velocity = _omrf_coordinate_at_anchor_value(
+            state, flow, anchor, index, t)
+        logit_delta = delta + u * field_delta
+        minimum_delta = min(minimum_delta, logit_delta)
+        maximum_delta = max(maximum_delta, logit_delta)
+        # Coordinatewise Zig-Zag rates cannot use cancellation in B*v.
+        # Sum the range of each coordinate's induced logit direction.
+        coordinate_velocity_range_sum += abs(velocity)
+    end
+    coordinate_velocity_range_sum += q * scales.field_sines[person, node]
+    return context.hcv_active ? _omrf_categorical_hcv_bound(
+        coordinate_velocity_range_sum, maximum_delta - minimum_delta) :
+        coordinate_velocity_range_sum * (maximum_delta - minimum_delta) / 4
+end
+
+function (scales::OMRFBatchedFactorHCVScales)(out, state,
+        flow::ZigZag, t)
+    started = time_ns()
+    _cache_omrf_batched_linear_fields!(scales, state, flow)
+    destination = 1
+    N, P = size(scales.context.X)
+    @inbounds for node in 1:P, person in 1:N
+        out[destination] = _omrf_batched_zigzag_hcv_scale(
+            scales, state, flow, person, node, Float64(t))
+        destination += 1
+    end
+    scales.context.counts.event_bound_observation_visits += N * P
+    scales.context.counts.envelope_point_calls += 1
+    scales.context.counts.envelope_point_seconds +=
+        (time_ns() - started) * 1e-9
+    return out
+end
+
+function (scales::OMRFBatchedFactorHCVScales)(out, state,
+        flow::ZigZag, left, right)
+    started = time_ns()
+    _cache_omrf_batched_linear_fields!(scales, state, flow)
+    destination = 1
+    N, P = size(scales.context.X)
+    @inbounds for node in 1:P, person in 1:N
+        left_scale = _omrf_batched_zigzag_hcv_scale(
+            scales, state, flow, person, node, Float64(left))
+        right_scale = _omrf_batched_zigzag_hcv_scale(
+            scales, state, flow, person, node, Float64(right))
+        # Along a linear stratum every pairwise logit displacement is affine;
+        # its absolute maximum, and hence Delta, occurs at a cell endpoint.
+        # V_ZZ is constant on the stratum.  The capped bound is monotone in
+        # Delta, so the larger endpoint certificate encloses the whole cell.
+        out[destination] = max(left_scale, right_scale)
+        destination += 1
+    end
+    scales.context.counts.event_bound_observation_visits += 2N * P
+    scales.context.counts.envelope_cell_calls += 1
+    scales.context.counts.envelope_cell_seconds +=
+        (time_ns() - started) * 1e-9
+    return out
 end
 
 function (scales::OMRFBatchedFactorHCVScales)(out, state,
@@ -9134,7 +11255,8 @@ function (scales::OMRFBatchedFactorHCVScales)(out, state,
             displacement_range = maximum_displacement - minimum_displacement
             velocity_range = maximum_velocity - minimum_velocity
             out[destination] = context.hcv_active ?
-                velocity_range * displacement_range^2 / 8 :
+                _omrf_categorical_hcv_bound(
+                    velocity_range, displacement_range) :
                 velocity_range * displacement_range / 4
             destination += 1
         end
@@ -9206,7 +11328,8 @@ function (scales::OMRFBatchedFactorHCVScales)(out, state,
                 end
             end
             out[destination] = context.hcv_active ?
-                velocity_range * displacement_range^2 / 8 :
+                _omrf_categorical_hcv_bound(
+                    velocity_range, displacement_range) :
                 velocity_range * displacement_range / 4
             destination += 1
         end
@@ -9885,16 +12008,45 @@ function _build_omrf_residual_envelope(envelope_spec, anchor,
             return _new_omrf_compact_envelope(anchor, residual_context;
                 signed_bps=signed_bps, signed_harmonic=signed_harmonic)
         end
-        if bound_type == "direct_person_node_hcv"
-            residual_context.factorization === :person_node ||
-                throw(ArgumentError(
-                    "direct HCV geometry requires person-node factorization"))
+        if bound_type in ("direct_person_node_hcv",
+                "direct_factor_roof_person_hcv")
+            expected_factorization = bound_type == "direct_person_node_hcv" ?
+                :person_node : :person
+            residual_context.factorization === expected_factorization ||
+                throw(ArgumentError("$bound_type requires " *
+                    "$(String(expected_factorization)) factorization"))
             residual_context.use_hcv && residual_context.hcv_active &&
                 isinf(residual_context.hcv_damping) || throw(ArgumentError(
                     "direct HCV geometry requires active undamped HCV"))
             residual_context.hcv_nodewise && throw(ArgumentError(
                 "direct HCV geometry requires a global HCV"))
-            return _new_omrf_direct_hcv_envelope(anchor, residual_context)
+            person_signed_roof = _haskey(envelope_spec,
+                :person_signed_roof) &&
+                Bool(_rget(envelope_spec, :person_signed_roof))
+            signed_only_person_roof = _haskey(envelope_spec,
+                :signed_only_person_roof) &&
+                Bool(_rget(envelope_spec, :signed_only_person_roof))
+            person_signed_roof && expected_factorization !== :person &&
+                throw(ArgumentError(
+                    "signed person roofs require person factorization"))
+            cell_scope = _haskey(envelope_spec, :direct_cv_cell_scope) ?
+                String(_rget(envelope_spec, :direct_cv_cell_scope)) : "cell"
+            cell_scope in ("cell", "event_horizon") || throw(ArgumentError(
+                "direct HCV cell scope must be cell or event_horizon"))
+            cell_scope == "event_horizon" &&
+                bound_type != "direct_factor_roof_person_hcv" &&
+                throw(ArgumentError(
+                    "HCV event-horizon cells require whole-person sampling"))
+            return _new_omrf_direct_hcv_envelope(anchor, residual_context;
+                person_signed_roof=person_signed_roof,
+                signed_only_person_roof=signed_only_person_roof,
+                joint_group_size=_haskey(envelope_spec,
+                    :joint_signed_group_size) ?
+                    Int(_rget(envelope_spec, :joint_signed_group_size)) : 0,
+                shared_current=_haskey(envelope_spec,
+                    :shared_current_categorical) &&
+                    Bool(_rget(envelope_spec, :shared_current_categorical)),
+                event_horizon_scope=cell_scope == "event_horizon")
         end
         if bound_type == "direct_person_node_cv"
             residual_context.factorization === :person_node ||
@@ -10138,6 +12290,18 @@ mutable struct OMRFAnchorManager
     pending_boundary_generation::UInt64
     selection_boundaries::Int
     node_position_policy_version::Int
+    warmup_bank_learning_policy::Symbol
+    warmup_bank_candidate_count::Int
+    warmup_bank_training_state_count::Int
+    warmup_bank_objective_single::Float64
+    warmup_bank_objective_selected::Float64
+    warmup_bank_learning_seconds::Float64
+    # Position-policy scores, see `_omrf_position_score`.
+    position_center::Vector{Float64}
+    position_weights::Matrix{Float64}
+    position_offsets::Vector{Float64}
+    position_metric::Symbol
+    position_valid::Bool
 end
 
 @inline function _omrf_window_counter(stats, name::Symbol)
@@ -10410,14 +12574,26 @@ function _prepare_omrf_anchor_envelope(manager::OMRFAnchorManager,
     spec = manager.envelope_spec
     bound_type = _haskey(spec, :bound_type) ?
         String(_rget(spec, :bound_type)) : ""
-    if bound_type in ("direct_person_node_hcv", "direct_person_node_cv") &&
-            (bound_type == "direct_person_node_hcv") == residual_context.use_hcv
-        event_horizon_scope = bound_type == "direct_person_node_cv" &&
+    if bound_type in ("direct_person_node_hcv",
+            "direct_factor_roof_person_hcv", "direct_person_node_cv") &&
+            (bound_type != "direct_person_node_cv") == residual_context.use_hcv
+        event_horizon_scope =
+            bound_type in ("direct_person_node_cv",
+                           "direct_factor_roof_person_hcv") &&
             _haskey(spec, :direct_cv_cell_scope) &&
             String(_rget(spec, :direct_cv_cell_scope)) == "event_horizon"
         return _new_omrf_direct_hcv_envelope(requested, residual_context;
-            hcv_remainder=bound_type == "direct_person_node_hcv",
-            event_horizon_scope=event_horizon_scope)
+            hcv_remainder=bound_type != "direct_person_node_cv",
+            event_horizon_scope=event_horizon_scope,
+            person_signed_roof=_haskey(spec, :person_signed_roof) &&
+                Bool(_rget(spec, :person_signed_roof)),
+            signed_only_person_roof=
+                _haskey(spec, :signed_only_person_roof) &&
+                Bool(_rget(spec, :signed_only_person_roof)),
+            joint_group_size=_haskey(spec, :joint_signed_group_size) ?
+                Int(_rget(spec, :joint_signed_group_size)) : 0,
+            shared_current=_haskey(spec, :shared_current_categorical) &&
+                Bool(_rget(spec, :shared_current_categorical)))
     end
     if bound_type == "norm_local_hcv_compact" &&
             residual_context.use_hcv && !isempty(manager.entries)
@@ -10587,7 +12763,8 @@ function _install_omrf_anchor!(manager::OMRFAnchorManager,
     oracle.full_anchor = state.full_anchor
     oracle.prior_anchor = state.prior_anchor
     oracle.residual_context = state.residual_context
-    if state.residual_context.active_pattern_compression
+    if state.residual_context.active_pattern_compression ||
+            state.residual_context.direct_person_node_hcv
         copyto!(state.residual_context.active_free, oracle.active_free)
         state.residual_context.active_generation = oracle.active_generation
     end
@@ -10597,6 +12774,7 @@ end
 
 function _insert_omrf_anchor!(manager::OMRFAnchorManager,
         state::OMRFPreparedAnchorState)
+    manager.position_valid = false
     idx = if length(manager.entries) < manager.capacity
         push!(manager.entries, OMRFAnchorEntry(state, 0))
         length(manager.entries)
@@ -10623,6 +12801,11 @@ end
 function _new_omrf_anchor_manager(oracle::OMRFAnalyticSubsamplingOracle,
         envelope_spec, unc_names, initial_envelope, capacity::Integer)
     capacity >= 1 || throw(ArgumentError("OMRF anchor-bank capacity must be positive"))
+    bank_learning = _haskey(envelope_spec, :hcv_bank_learning) ?
+        Symbol(String(_rget(envelope_spec, :hcv_bank_learning))) : :geometric
+    bank_learning in (:geometric, :exact_variance,
+            :selector_coupled_variance) || throw(ArgumentError(
+        "unknown OMRF HCV warmup-bank learning policy: $bank_learning"))
     manager = OMRFAnchorManager(oracle, envelope_spec, String.(unc_names),
         OMRFAnchorEntry[], 0, Int(capacity), zeros(length(oracle.full_anchor)),
         ones(length(oracle.full_anchor)),
@@ -10631,7 +12814,9 @@ function _new_omrf_anchor_manager(oracle::OMRFAnalyticSubsamplingOracle,
         oracle.ctx.counts.native_full_data_scans,
         oracle.ctx.counts.event_bound_observation_visits, 0.0, 0,
         0.0, copy(oracle.anchor), 0, 0, 0, nothing,
-        :adaptive, 0, Inf, UInt64(0), UInt64(0), 0, 0)
+        :adaptive, 0, Inf, UInt64(0), UInt64(0), 0, 0,
+        bank_learning, 0, 0, NaN, NaN, 0.0,
+        Float64[], zeros(0, 0), Float64[], :scaled, false)
     initial = OMRFPreparedAnchorState(oracle.anchor, oracle.full_anchor,
         oracle.prior_anchor, oracle.residual_context, initial_envelope)
     manager.active_idx = _insert_omrf_anchor!(manager, initial)
@@ -10689,10 +12874,13 @@ end
 
 function _omrf_warmup_candidates(trace::PDMPSamplers.AbstractPDMPTrace,
         position::AbstractVector, capacity::Integer;
-        retained_fraction::Real=0.5)
+        retained_fraction::Real=0.5, n_grid::Union{Nothing,Integer}=nothing)
     0 < retained_fraction <= 1 || throw(ArgumentError(
         "warmup candidate retained fraction must lie in (0, 1]"))
-    n_grid = min(512, max(8 * Int(capacity), Int(capacity)))
+    n_grid = isnothing(n_grid) ?
+        min(512, max(8 * Int(capacity), Int(capacity))) : Int(n_grid)
+    n_grid >= 1 || throw(ArgumentError(
+        "warmup candidate grid size must be positive"))
     if trace isa PDMPSamplers.StreamingPDMPTrace
         grid_positions = PDMPSamplers.streaming_dense_time_uniform_states(
             trace, retained_fraction, n_grid)
@@ -10769,6 +12957,232 @@ function _omrf_representative_anchors(trace::PDMPSamplers.AbstractPDMPTrace,
                 minimum_distance2[column], distance2)
         end
     end
+    return selected, scales
+end
+
+@inline function _omrf_hcv_velocity_variance(flow, coordinate::Int)
+    sigma = PDMPSamplers._physical_velocity_sd(flow, coordinate)
+    isfinite(sigma) && sigma > 0 || throw(DomainError(sigma,
+        "HCV bank learning requires finite positive velocity scales"))
+    return sigma * sigma
+end
+
+"""Exact full-stratum HCV residual variance under the installed velocity law.
+
+The score is the trace of the finite-population residual covariance against
+the diagonal physical-velocity covariance.  Constants depending only on batch
+size and population size are omitted because they cannot change the selected
+bank.  This routine is warmup-only and intentionally enumerates the complete
+factor population.
+"""
+function _omrf_hcv_expected_directional_variance!(
+        context::OMRFResidualContext, anchor, x, velocity_variances,
+        work, residual_mean, singleton)
+    context.use_hcv && context.hcv_active && isinf(context.hcv_damping) ||
+        throw(ArgumentError(
+            "exact-variance bank learning requires active undamped HCV"))
+    N, P = size(context.X)
+    population = context.factorization === :person ? N : N * P
+    @. context.displacement = x - anchor
+    fill!(residual_mean, 0.0)
+    sum_metric_norm2 = 0.0
+    @inbounds for factor in 1:population
+        singleton[1] = factor
+        omrf_residual!(context, work, x, singleton)
+        for coordinate in eachindex(work, velocity_variances)
+            value = work[coordinate]
+            residual_mean[coordinate] += value
+            sum_metric_norm2 += velocity_variances[coordinate] * value * value
+        end
+    end
+    inverse_population = inv(Float64(population))
+    centered = sum_metric_norm2 * inverse_population
+    @inbounds for coordinate in eachindex(residual_mean, velocity_variances)
+        mean_value = residual_mean[coordinate] * inverse_population
+        centered -= velocity_variances[coordinate] * mean_value * mean_value
+    end
+    tolerance = 256eps(Float64) * max(sum_metric_norm2 * inverse_population, 1.0)
+    centered >= -tolerance || throw(ErrorException(
+        "negative HCV finite-population variance: $centered"))
+    return max(0.0, centered)
+end
+
+"""Choose a frozen HCV bank from this chain's own warmup trajectory.
+
+Candidate positions and training positions are the same bounded time-uniform
+warmup grid plus the authoritative endpoint.  Every candidate is scored with
+the exact factor residual covariance under the final adapted velocity metric.
+The endpoint is installed first; subsequent anchors greedily minimize the
+time-uniform total of the best available score.  No retained state is used.
+"""
+function _omrf_selector_assigned_objective(costs, candidates, scales,
+        selected)
+    total = 0.0
+    @inbounds for state_index in axes(candidates, 2)
+        best_slot = 1
+        best_distance = Inf
+        for slot in eachindex(selected)
+            candidate = selected[slot]
+            distance = 0.0
+            for coordinate in axes(candidates, 1)
+                delta = (candidates[coordinate, state_index] -
+                    candidates[coordinate, candidate]) / scales[coordinate]
+                distance += delta * delta
+            end
+            if distance < best_distance
+                best_slot = slot
+                best_distance = distance
+            end
+        end
+        total += costs[selected[best_slot], state_index]
+    end
+    return total / size(candidates, 2)
+end
+
+"""Exact subset search for a bank evaluated through the retained selector.
+
+Candidate one is the authoritative endpoint and is always retained. Candidate
+order is chronological, so the ordinary lowest-index tie convention is
+preserved. This is warmup-only work over at most twice the requested bank size.
+"""
+function _omrf_selector_coupled_indices(costs, candidates, scales,
+        capacity::Integer)
+    n = size(candidates, 2)
+    k = min(Int(capacity), n)
+    k == 1 && return [1], _omrf_selector_assigned_objective(
+        costs, candidates, scales, [1])
+    k == n && return collect(1:n), _omrf_selector_assigned_objective(
+        costs, candidates, scales, collect(1:n))
+    tail = collect(2:k)
+    selected = Vector{Int}(undef, k)
+    selected[1] = 1
+    best = zeros(Int, k)
+    best_objective = Inf
+    while true
+        copyto!(selected, 2, tail, 1, length(tail))
+        objective = _omrf_selector_assigned_objective(
+            costs, candidates, scales, selected)
+        if objective < best_objective
+            best_objective = objective
+            copyto!(best, selected)
+        end
+        position = length(tail)
+        while position >= 1 && tail[position] == n - length(tail) + position
+            position -= 1
+        end
+        position == 0 && break
+        tail[position] += 1
+        if position < length(tail)
+            for j in (position + 1):length(tail)
+                tail[j] = tail[j - 1] + 1
+            end
+        end
+    end
+    return best, best_objective
+end
+
+function _omrf_exact_variance_anchors!(manager::OMRFAnchorManager,
+        trace::PDMPSamplers.AbstractPDMPTrace, position::AbstractVector,
+        capacity::Integer, flow; selector_coupled::Bool=false)
+    started = time_ns()
+    # Twice the requested capacity is enough to expose dispersed warmup
+    # regions without turning finalization into a second simulation phase.
+    candidate_capacity = max(1, 2 * Int(capacity))
+    candidates = _omrf_warmup_candidates(
+        trace, position, candidate_capacity; retained_fraction=0.5,
+        n_grid=candidate_capacity)
+    d, n = size(candidates)
+    velocity_variances = [_omrf_hcv_velocity_variance(flow, coordinate)
+        for coordinate in 1:d]
+    costs = Matrix{Float64}(undef, n, n)
+    work = zeros(d)
+    residual_mean = zeros(d)
+    singleton = [1]
+
+    # Reuse one uninstalled prepared state while constructing the score
+    # matrix. Selected anchors are prepared afresh below and become the only
+    # durable bank entries.
+    manager.recycled_state = nothing
+    temporary = nothing
+    @inbounds for anchor_index in 1:n
+        temporary === nothing || (manager.recycled_state = temporary)
+        temporary = _prepare_omrf_anchor(
+            manager, view(candidates, :, anchor_index))
+        context = temporary.residual_context
+        context.hcv_active = true
+        for state_index in 1:n
+            costs[anchor_index, state_index] =
+                _omrf_hcv_expected_directional_variance!(context,
+                    temporary.anchor, view(candidates, :, state_index),
+                    velocity_variances,
+                    work, residual_mean, singleton)
+        end
+    end
+    manager.recycled_state = temporary
+
+    # Preserve the established positive distance scales for the retained
+    # position selector. Only bank learning changes in this policy.
+    means = vec(sum(candidates; dims=2)) ./ n
+    scales = zeros(d)
+    if n > 1
+        @inbounds for column in axes(candidates, 2), coordinate in 1:d
+            delta = candidates[coordinate, column] - means[coordinate]
+            scales[coordinate] += delta * delta
+        end
+        scales .= sqrt.(scales ./ (n - 1))
+    end
+    positive = filter(scale -> scale > sqrt(eps(Float64)), scales)
+    scale_floor = isempty(positive) ? 1.0 :
+        0.1 * Statistics.median(positive)
+    @. scales = max(scales, scale_floor)
+    objective_single = sum(view(costs, 1, :)) / n
+    k = min(Int(capacity), n)
+    selected_indices = Vector{Int}(undef, k)
+    selected_objective = NaN
+    if selector_coupled
+        selected_indices, selected_objective =
+            _omrf_selector_coupled_indices(
+                costs, candidates, scales, capacity)
+    else
+        # Historical research comparator: oracle assignment by minimum exact
+        # variance. This is deliberately distinct from retained selection.
+        selected_indices[1] = 1
+        minimum_cost = copy(view(costs, 1, :))
+        available = trues(n)
+        available[1] = false
+        @inbounds for selection in 2:k
+            best_candidate = 0
+            best_objective = Inf
+            for candidate in 1:n
+                available[candidate] || continue
+                objective = 0.0
+                for state_index in 1:n
+                    objective += min(minimum_cost[state_index],
+                        costs[candidate, state_index])
+                end
+                if objective < best_objective
+                    best_candidate = candidate
+                    best_objective = objective
+                end
+            end
+            best_candidate > 0 || throw(ErrorException(
+                "exact-variance HCV bank selection exhausted its candidates"))
+            selected_indices[selection] = best_candidate
+            available[best_candidate] = false
+            for state_index in 1:n
+                minimum_cost[state_index] = min(minimum_cost[state_index],
+                    costs[best_candidate, state_index])
+            end
+        end
+        selected_objective = sum(minimum_cost) / n
+    end
+    selected = candidates[:, selected_indices]
+
+    manager.warmup_bank_candidate_count = n
+    manager.warmup_bank_training_state_count = n
+    manager.warmup_bank_objective_single = objective_single
+    manager.warmup_bank_objective_selected = selected_objective
+    manager.warmup_bank_learning_seconds += (time_ns() - started) * 1e-9
     return selected, scales
 end
 
@@ -11014,8 +13428,20 @@ function _finish_omrf_warmup!(manager::OMRFAnchorManager,
         PDMPSamplers.get_warmup_trace(trace_manager)
     if frozen_bank && trace !== nothing &&
             PDMPSamplers._has_integrable_segment(trace)
-        representatives, scales = _omrf_representative_anchors(
-            trace, position, manager.capacity)
+        representatives, scales = if manager.warmup_bank_learning_policy in
+                (:exact_variance, :selector_coupled_variance)
+            manager.hcv_active || throw(ArgumentError(
+                "exact-variance HCV bank learning requires HCV during warmup"))
+            flow === nothing && throw(ArgumentError(
+                "exact-variance HCV bank learning requires the final warmup flow"))
+            _omrf_exact_variance_anchors!(
+                manager, trace, position, manager.capacity, flow;
+                selector_coupled=manager.warmup_bank_learning_policy ===
+                    :selector_coupled_variance)
+        else
+            _omrf_representative_anchors(
+                trace, position, manager.capacity)
+        end
         prepared = [_prepare_omrf_anchor(manager, view(representatives, :, idx))
             for idx in axes(representatives, 2)]
         empty!(manager.entries)
@@ -11025,6 +13451,7 @@ function _finish_omrf_warmup!(manager::OMRFAnchorManager,
         for state in prepared
             _insert_omrf_anchor!(manager, state)
         end
+        _omrf_prepare_position_metric!(manager, :scaled)
         if manager.selection_policy === :node_position
             manager.active_idx = 1
         else
@@ -11127,14 +13554,76 @@ end
     return distance
 end
 
+
+# Position-policy anchor scores.  For a shared positive definite metric M and
+# y = x - c (c the first anchor),
+#   (x - a_k)' M (x - a_k) = y'My - 2 y'w_k + s_k,
+# with w_k = M (a_k - c) and s_k = (a_k - c)' M (a_k - c).  The common y'My
+# term does not change the nearest anchor, so the score s_k - 2 y'w_k makes
+# every pairwise comparison affine in x: Voronoi boundaries are hyperplanes
+# for any M.  `distance_scales` gives M = diag(scales)^-2; the "hessian"
+# metric uses the mean anchor likelihood Hessian plus the identity.
+@inline function _omrf_position_score(manager::OMRFAnchorManager, x, k::Int)
+    weights = manager.position_weights
+    c = manager.position_center
+    acc = 0.0
+    @inbounds for j in eachindex(x, c)
+        acc += (x[j] - c[j]) * weights[j, k]
+    end
+    return manager.position_offsets[k] - 2acc
+end
+
+# Time derivative of the score along a linear path with velocity v.
+@inline function _omrf_position_score_rate(manager::OMRFAnchorManager, v,
+        k::Int)
+    weights = manager.position_weights
+    acc = 0.0
+    @inbounds for j in eachindex(v)
+        acc += v[j] * weights[j, k]
+    end
+    return -2acc
+end
+
+function _omrf_prepare_position_metric!(manager::OMRFAnchorManager,
+        metric::Symbol)
+    K = length(manager.entries)
+    d = length(manager.distance_scales)
+    c = copy(manager.entries[1].state.anchor)
+    offsets = zeros(d, K)
+    for k in 1:K
+        @. offsets[:, k] = manager.entries[k].state.anchor - c
+    end
+    weights = if metric === :scaled
+        offsets ./ manager.distance_scales .^ 2
+    elseif metric === :hessian
+        M = Matrix{Float64}(I, d, d)
+        for entry in manager.entries
+            H = entry.state.residual_context.likelihood_hessian
+            H === nothing && throw(ArgumentError(
+                "the hessian anchor metric requires global HCV anchors"))
+            M .+= H ./ K
+        end
+        M * offsets
+    else
+        throw(ArgumentError("unknown position-anchor metric: $metric"))
+    end
+    manager.position_center = c
+    manager.position_weights = weights
+    manager.position_offsets = [dot(view(offsets, :, k), view(weights, :, k))
+        for k in 1:K]
+    manager.position_metric = metric
+    manager.position_valid = true
+    return manager
+end
+
 function _omrf_position_anchor_index(manager::OMRFAnchorManager, x)
+    manager.position_valid ||
+        _omrf_prepare_position_metric!(manager, manager.position_metric)
     best = firstindex(manager.entries)
-    best_distance = _omrf_anchor_distance2(manager, x,
-        manager.entries[best].state)
+    best_distance = _omrf_position_score(manager, x, best)
     @inbounds for idx in eachindex(manager.entries)
         idx == best && continue
-        distance = _omrf_anchor_distance2(manager, x,
-            manager.entries[idx].state)
+        distance = _omrf_position_score(manager, x, idx)
         tolerance = 64eps(Float64) * max(1.0, abs(distance),
             abs(best_distance))
         # Numerically coincident Voronoi distances use deterministic
@@ -11185,6 +13674,9 @@ function _restore_omrf_position_bank!(manager::OMRFAnchorManager,
     for prepared_state in prepared
         _insert_omrf_anchor!(manager, prepared_state)
     end
+    metric = _haskey(spec, :distance_metric) ?
+        Symbol(String(_rget(spec, :distance_metric))) : :scaled
+    _omrf_prepare_position_metric!(manager, metric)
     if policy == "node_position"
         Int(_rget(spec, :policy_version)) == 1 || throw(ArgumentError(
             "unsupported node-position mathematical policy version"))
@@ -11215,25 +13707,31 @@ function _restore_omrf_position_bank!(manager::OMRFAnchorManager,
     return true
 end
 
+# Anchor nearest just after the current time: scores are compared at x + h v,
+# where h is a few ulps of the current time.  A boundary crossing closer than
+# h cannot be reached by advancing time, so it is resolved here instead;
+# otherwise the selector could switch anchors and immediately switch back
+# without time advancing.
+_omrf_position_lookahead(t) = 16 * eps(max(1.0, abs(Float64(t))))
+
 function _omrf_outgoing_position_anchor_index(manager::OMRFAnchorManager,
-        x, v)
-    positional = _omrf_position_anchor_index(manager, x)
-    minimum_distance = _omrf_anchor_distance2(manager, x,
-        manager.entries[positional].state)
-    best = positional
+        x, v, h::Float64=0.0)
+    manager.position_valid ||
+        _omrf_prepare_position_metric!(manager, manager.position_metric)
+    minimum_score = Inf
+    @inbounds for idx in eachindex(manager.entries)
+        minimum_score = min(minimum_score, _omrf_position_score(manager, x, idx) +
+            h * _omrf_position_score_rate(manager, v, idx))
+    end
+    best = firstindex(manager.entries)
     best_slope = Inf
     @inbounds for idx in eachindex(manager.entries)
-        distance = _omrf_anchor_distance2(manager, x,
-            manager.entries[idx].state)
-        tolerance = 64eps(Float64) * max(1.0, abs(distance),
-            abs(minimum_distance))
-        abs(distance - minimum_distance) <= tolerance || continue
-        anchor = manager.entries[idx].state.anchor
-        slope = 0.0
-        for j in eachindex(x, v, anchor)
-            scale = manager.distance_scales[j]
-            slope += 2v[j] * (x[j] - anchor[j]) / (scale * scale)
-        end
+        score = _omrf_position_score(manager, x, idx) +
+            h * _omrf_position_score_rate(manager, v, idx)
+        tolerance = 64eps(Float64) * max(1.0, abs(score),
+            abs(minimum_score))
+        abs(score - minimum_score) <= tolerance || continue
+        slope = _omrf_position_score_rate(manager, v, idx)
         if slope < best_slope || (slope == best_slope && idx < best)
             best = idx
             best_slope = slope
@@ -11257,30 +13755,23 @@ function _omrf_position_anchor_horizon_impl!(manager::OMRFAnchorManager,
     x = state.ξ.x
     v = state.ξ.θ
     current = manager.active_idx
-    outgoing = _omrf_outgoing_position_anchor_index(manager, x, v)
+    h = _omrf_position_lookahead(state.t[])
+    outgoing = _omrf_outgoing_position_anchor_index(manager, x, v, h)
     if outgoing != current
         manager.pending_boundary_idx = outgoing
         manager.pending_boundary_time = state.t[]
         return 0.0
     end
-    current_anchor = manager.entries[current].state.anchor
+    current_score = _omrf_position_score(manager, x, current)
+    current_rate = _omrf_position_score_rate(manager, v, current)
     earliest = Inf
     target = 0
     @inbounds for idx in eachindex(manager.entries)
         idx == current && continue
-        competitor = manager.entries[idx].state.anchor
-        difference = _omrf_anchor_distance2(manager, x,
-            manager.entries[idx].state) -
-            _omrf_anchor_distance2(manager, x,
-                manager.entries[current].state)
-        slope = 0.0
-        for j in eachindex(x, v, current_anchor, competitor)
-            scale = manager.distance_scales[j]
-            slope += 2v[j] * (current_anchor[j] - competitor[j]) /
-                (scale * scale)
-        end
+        difference = _omrf_position_score(manager, x, idx) - current_score
+        slope = _omrf_position_score_rate(manager, v, idx) - current_rate
         if slope < 0.0
-            crossing = max(0.0, difference / -slope)
+            crossing = max(h, difference / -slope)
             if crossing < earliest || (crossing == earliest && idx < target)
                 earliest = crossing
                 target = idx
@@ -11292,35 +13783,37 @@ function _omrf_position_anchor_horizon_impl!(manager::OMRFAnchorManager,
     return earliest
 end
 
+# Score of anchor `anchor_index` along a sticky harmonic path and its first
+# three time derivatives (the common y'My term is omitted, see
+# `_omrf_position_score`).
 @inline function _omrf_harmonic_anchor_jet(manager::OMRFAnchorManager,
         state, flow::PDMPSamplers.AnyBoomerang, anchor_index::Int,
         t::Float64)
-    anchor = manager.entries[anchor_index].state.anchor
+    weights = manager.position_weights
+    c = manager.position_center
     cosine, sine = cos(t), sin(t)
     value = 0.0
     first = 0.0
     second = 0.0
     third = 0.0
-    @inbounds for j in eachindex(anchor, state.ξ.x, state.ξ.θ, flow.μ)
-        scale = manager.distance_scales[j]
-        weight = inv(scale * scale)
+    @inbounds for j in eachindex(c, state.ξ.x, state.ξ.θ, flow.μ)
+        weight = weights[j, anchor_index]
         if _omrf_is_free(state, j)
             u = state.ξ.x[j] - flow.μ[j]
             w = state.ξ.θ[j]
-            y = flow.μ[j] + u * cosine + w * sine - anchor[j]
+            y = flow.μ[j] + u * cosine + w * sine - c[j]
             y1 = -u * sine + w * cosine
             y2 = -u * cosine - w * sine
-            y3 = -y1
-            value += weight * y * y
-            first += 2weight * y * y1
-            second += 2weight * (y1 * y1 + y * y2)
-            third += 2weight * (3y1 * y2 + y * y3)
+            value += y * weight
+            first += y1 * weight
+            second += y2 * weight
+            third -= y1 * weight
         else
-            y = state.ξ.x[j] - anchor[j]
-            value += weight * y * y
+            value += (state.ξ.x[j] - c[j]) * weight
         end
     end
-    return value, first, second, third
+    return manager.position_offsets[anchor_index] - 2value, -2first,
+        -2second, -2third
 end
 
 @inline function _omrf_harmonic_jet_precedes(candidate, incumbent,
@@ -11337,6 +13830,8 @@ end
 function _omrf_harmonic_outgoing_position_anchor_index(
         manager::OMRFAnchorManager, state,
         flow::PDMPSamplers.AnyBoomerang, t::Float64)
+    manager.position_valid ||
+        _omrf_prepare_position_metric!(manager, manager.position_metric)
     best = firstindex(manager.entries)
     best_jet = _omrf_harmonic_anchor_jet(manager, state, flow, best, t)
     @inbounds for idx in eachindex(manager.entries)
@@ -11350,32 +13845,28 @@ function _omrf_harmonic_outgoing_position_anchor_index(
     return best
 end
 
+# Score difference (competitor minus current) along a harmonic path as
+# `constant + cosine*cos(t) + sine*sin(t)`.
 @inline function _omrf_harmonic_anchor_difference_coefficients(
         manager::OMRFAnchorManager, state,
         flow::PDMPSamplers.AnyBoomerang, current::Int, competitor::Int)
-    a = manager.entries[current].state.anchor
-    b = manager.entries[competitor].state.anchor
+    weights = manager.position_weights
+    c = manager.position_center
     constant = 0.0
     cosine = 0.0
     sine = 0.0
-    @inbounds for j in eachindex(a, b, state.ξ.x, state.ξ.θ, flow.μ)
-        scale = manager.distance_scales[j]
-        weight = inv(scale * scale)
-        delta = b[j] - a[j]
+    @inbounds for j in eachindex(c, state.ξ.x, state.ξ.θ, flow.μ)
+        delta = weights[j, competitor] - weights[j, current]
         if _omrf_is_free(state, j)
-            centre = flow.μ[j]
-            u = state.ξ.x[j] - centre
-            w = state.ξ.θ[j]
-            constant += weight * (b[j] * b[j] - a[j] * a[j] -
-                2centre * delta)
-            cosine -= 2weight * u * delta
-            sine -= 2weight * w * delta
+            constant -= 2(flow.μ[j] - c[j]) * delta
+            cosine -= 2(state.ξ.x[j] - flow.μ[j]) * delta
+            sine -= 2state.ξ.θ[j] * delta
         else
-            x = state.ξ.x[j]
-            constant += weight * (b[j] * b[j] - a[j] * a[j] -
-                2x * delta)
+            constant -= 2(state.ξ.x[j] - c[j]) * delta
         end
     end
+    constant += manager.position_offsets[competitor] -
+        manager.position_offsets[current]
     return constant, cosine, sine
 end
 
@@ -11398,6 +13889,7 @@ function _omrf_harmonic_position_anchor_horizon_impl!(
     manager.pending_boundary_idx = 0
     manager.pending_boundary_time = Inf
     manager.pending_boundary_generation = manager.boundary_generation
+    h = _omrf_position_lookahead(state.t[])
     current = manager.active_idx
     outgoing = _omrf_harmonic_outgoing_position_anchor_index(
         manager, state, flow, 0.0)
@@ -11421,6 +13913,7 @@ function _omrf_harmonic_position_anchor_horizon_impl!(
         offset = acos(clamp(-constant / radius, -1.0, 1.0))
         for base in (phase_angle - offset, phase_angle + offset)
             crossing = _omrf_positive_periodic_root(base)
+            crossing = max(crossing, h)
             crossing > 2pi + tolerance && continue
             selected = _omrf_harmonic_outgoing_position_anchor_index(
                 manager, state, flow, crossing)
@@ -11609,11 +14102,25 @@ It changes counter ownership only; certificate values and caches are untouched.
 """
 function _attach_omrf_live_envelope_context!(manager::OMRFAnchorManager,
         cv::SubsampledControlVariate)
+    authoritative = manager.oracle.residual_context
+    if cv.envelope isa OMRFDirectPersonNodeHCVEnvelope
+        if cv.envelope.context !== authoritative
+            cv.envelope.context = authoritative
+            return true
+        end
+        return false
+    end
     scales = cv.envelope.component_scales!
     base = scales isa OMRFCellMarkedNodeBoxFirstOrderScales ? scales.base :
         (scales isa OMRFNodeBoxFirstOrderScales ? scales : nothing)
-    if base !== nothing && base.context !== manager.oracle.residual_context
-        base.context = manager.oracle.residual_context
+    if base !== nothing && base.context !== authoritative
+        base.context = authoritative
+        return true
+    end
+    if scales isa Union{OMRFBatchedFactorHCVScales,
+            OMRFPatternLocalHCVScales} &&
+            scales.context !== authoritative
+        scales.context = authoritative
         return true
     end
     return false
@@ -11834,14 +14341,13 @@ function PDMPSamplers.deterministic_rate_cell_bound(
             <:OMRFAnalyticSubsamplingOracle,<:LogLinearGaussianScaleSlab},
         state::PDMPSamplers.AbstractPDMPState,
         flow::PDMPSamplers.ContinuousDynamics, left::Real, right::Real)
-    target.oracle.residual_context.use_hcv && return nothing
     return _omrf_direct_deterministic_cell_bound(
         target.oracle, target.oracle.active_free, state, flow, left, right)
 end
 PDMPSamplers.has_direct_deterministic_rate_cell_bound(
     target::StanSubsamplingSlabDeterministic{
         <:OMRFAnalyticSubsamplingOracle,<:LogLinearGaussianScaleSlab}) =
-    !target.oracle.residual_context.use_hcv
+    true
 
 function _new_stan_subsampling_context(lib_path::String, full_data::String,
         prior_data::String, m::Int)
@@ -11915,6 +14421,15 @@ function _build_stan_subsampling_model(ctx::StanSubsamplingContext,
         oracle.anchor : anchor
     envelope = _build_stan_residual_envelope(
         envelope_spec, envelope_anchor, oracle)
+    if envelope isa OMRFDirectPersonNodeHCVEnvelope &&
+            envelope.joint_group_size >= 16
+        m == envelope.joint_group_size || throw(ArgumentError(
+            "grouped joint signed bounds require subsample_size equal to the group size"))
+        oracle isa OMRFAnalyticSubsamplingOracle &&
+            oracle.analytic_prior isa OMRFIndependentAnalyticPrior ||
+            throw(ArgumentError(
+                "research JS16 requires an independent analytic prior"))
+    end
     staged_hcv = oracle isa OMRFAnalyticSubsamplingOracle &&
         oracle.residual_context.use_hcv && !oracle.residual_context.hcv_active
     manager = (anchor_capacity > 0 || staged_hcv) &&
@@ -12469,6 +14984,7 @@ function r_pdmp_stan_subsampling(prepared, subsampling, x0, flow_type::String,
         diagnostic_window_width::Float64=0.0,
         streaming_trace_directory::Union{Nothing,String}=nothing,
         streaming_trace_buffer_events::Int=4096)
+    bridge_profile_start_ns = time_ns()
     algorithm_type in ("GridThinningStrategy", "ThinningStrategy") ||
         throw(ArgumentError("subsampling custom-Stan sampling requires GridThinningStrategy or ThinningStrategy"))
     warmup_mode in ("subsampled", "full") || throw(ArgumentError(
@@ -12476,6 +14992,16 @@ function r_pdmp_stan_subsampling(prepared, subsampling, x0, flow_type::String,
     warmup_mode == "full" && t_warmup <= 0 && throw(ArgumentError(
         "full-gradient warmup requires positive t_warmup"))
     x0_vec = _as_float_vector(x0)
+    envelope_specification = _rget(subsampling, :residual_envelope)
+    hcv_bank_learning = _haskey(envelope_specification,
+            :hcv_bank_learning) ?
+        Symbol(String(_rget(envelope_specification, :hcv_bank_learning))) :
+        :geometric
+    hcv_bank_learning in (:exact_variance, :selector_coupled_variance) &&
+        t_warmup > 0 &&
+        warmup_mode != "full" &&
+        throw(ArgumentError(
+            "exact-variance HCV bank learning requires full-gradient warmup"))
     subsampling_anchor = _rget(subsampling, :anchor)
     anchor = isnothing(subsampling_anchor) ? copy(x0_vec) :
         _as_float_vector(subsampling_anchor)
@@ -12651,6 +15177,7 @@ function r_pdmp_stan_subsampling(prepared, subsampling, x0, flow_type::String,
     # substitute for the full-gradient warmup target.
     warmup_adaptation_gradient(i) = isnothing(warmup_models) ? models[i].grad :
         warmup_models[i].grad
+    bridge_profile_before_sample_ns = time_ns()
     chains = if all(isnothing, anchor_managers)
         adaptation_grad = warmup_adaptation_gradient(1)
         adapter = PDMPSamplers.default_warmup_adapter(
@@ -12670,9 +15197,8 @@ function r_pdmp_stan_subsampling(prepared, subsampling, x0, flow_type::String,
             initial_stored_velocity=isnothing(stored_velocity0) ? nothing :
                 _as_float_vector(stored_velocity0),
             trace_storage=isnothing(streaming_trace_directory) ? nothing :
-                PDMPSamplers.StreamingTraceStorage(
-                    streaming_trace_directory;
-                    buffer_events=streaming_trace_buffer_events))
+                _bridge_trace_storage(streaming_trace_directory,
+                    streaming_trace_buffer_events, T))
     else
         run_chain = function(i)
             seed_i = isnothing(seed) ? nothing : seed + i - 1
@@ -12699,10 +15225,10 @@ function r_pdmp_stan_subsampling(prepared, subsampling, x0, flow_type::String,
                 initial_stored_velocity=isnothing(stored_velocity0) ? nothing :
                     _as_float_vector(stored_velocity0),
                 trace_storage=isnothing(streaming_trace_directory) ? nothing :
-                    PDMPSamplers.StreamingTraceStorage(joinpath(
+                    _bridge_trace_storage(joinpath(
                         streaming_trace_directory,
-                        "chain_" * lpad(string(i), 4, '0'));
-                        buffer_events=streaming_trace_buffer_events))
+                        "chain_" * lpad(string(i), 4, '0')),
+                        streaming_trace_buffer_events, T))
             return chain.traces[1], chain.stats[1], chain.initial_states[1],
                 chain.retained_initial_states[1], chain.terminal_states[1]
         end
@@ -12732,6 +15258,7 @@ function r_pdmp_stan_subsampling(prepared, subsampling, x0, flow_type::String,
         end
     end
     initial_refresh_rate = try Float64(PDMPSamplers.refresh_rate(flow)) catch; NaN end
+    bridge_profile_after_sample_ns = time_ns()
     result = _pack_result(chains; requested_flow=flow_type,
         adaptive_scheme=adaptive_scheme, initial_refresh_rate=initial_refresh_rate,
         warmup_adaptation_interval=warmup_adaptation_interval, t_warmup=t_warmup)
@@ -12937,6 +15464,28 @@ function r_pdmp_stan_subsampling(prepared, subsampling, x0, flow_type::String,
             ctx.counts.direct_horizon_table_hits,
         "direct_internal_cell_uses" =>
             ctx.counts.direct_internal_cell_uses,
+        "shared_current_pattern_evaluations" =>
+            ctx.counts.shared_current_pattern_evaluations,
+        "shared_current_cell_evaluations" =>
+            ctx.counts.shared_current_cell_evaluations,
+        "shared_current_rebuilt_nodes" =>
+            ctx.counts.shared_current_rebuilt_nodes,
+        "shared_current_rebuild_seconds" =>
+            ctx.counts.shared_current_rebuild_seconds,
+        "shared_current_dense_fallback_cells" =>
+            ctx.counts.shared_current_dense_fallback_cells,
+        "joint_cell_width_bins" =>
+            copy(ctx.counts.joint_cell_width_bins),
+        "direct_path_anchor_changes" =>
+            ctx.counts.direct_path_anchor_changes,
+        "direct_path_mask_changes" =>
+            ctx.counts.direct_path_mask_changes,
+        "direct_path_flow_changes" =>
+            ctx.counts.direct_path_flow_changes,
+        "direct_path_state_changes" =>
+            ctx.counts.direct_path_state_changes,
+        "direct_path_forced_rebuilds" =>
+            ctx.counts.direct_path_forced_rebuilds,
         "deterministic_hvp_calls" => ctx.counts.deterministic_hvp_calls,
         "deterministic_hvp_seconds" => ctx.counts.deterministic_hvp_seconds,
         "deterministic_source_proposals" =>
@@ -13102,6 +15651,23 @@ function r_pdmp_stan_subsampling(prepared, subsampling, x0, flow_type::String,
             manager.selection_boundaries,
         "node_position_policy_version" => manager === nothing ? 0 :
             manager.node_position_policy_version,
+        "warmup_bank_learning_policy" => manager === nothing ? "none" :
+            String(manager.warmup_bank_learning_policy),
+        "warmup_bank_candidate_count" => manager === nothing ? 0 :
+            manager.warmup_bank_candidate_count,
+        "warmup_bank_training_state_count" => manager === nothing ? 0 :
+            manager.warmup_bank_training_state_count,
+        "warmup_bank_objective_single" => manager === nothing ? NaN :
+            manager.warmup_bank_objective_single,
+        "warmup_bank_objective_selected" => manager === nothing ? NaN :
+            manager.warmup_bank_objective_selected,
+        "warmup_bank_objective_reduction" => manager === nothing ||
+                !isfinite(manager.warmup_bank_objective_single) ||
+                iszero(manager.warmup_bank_objective_selected) ? NaN :
+            manager.warmup_bank_objective_single /
+                manager.warmup_bank_objective_selected,
+        "warmup_bank_learning_seconds" => manager === nothing ? 0.0 :
+            manager.warmup_bank_learning_seconds,
         "node_position_sources" => manager === nothing ||
             manager.oracle.node_position_cv === nothing ? Int[] :
             copy(manager.oracle.node_position_cv.sources),
@@ -13233,6 +15799,15 @@ function r_pdmp_stan_subsampling(prepared, subsampling, x0, flow_type::String,
         result["stats"]["main_full_gradient_calls"],
         subsampling_context_counters)
     result["subsampling"] = true
+    if get(ENV, "OMRF_PROFILE_EXCLUSIVE", "") == "1"
+        result["bridge_profile"] = Dict(
+            "julia_construction_seconds" =>
+                (bridge_profile_before_sample_ns - bridge_profile_start_ns) / 1e9,
+            "julia_sample_seconds" =>
+                (bridge_profile_after_sample_ns - bridge_profile_before_sample_ns) / 1e9,
+            "julia_pack_and_counters_seconds" =>
+                (time_ns() - bridge_profile_after_sample_ns) / 1e9)
+    end
     return result
 end
 

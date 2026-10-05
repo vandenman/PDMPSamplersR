@@ -776,7 +776,8 @@ end
 # through the environment, so research runners need no new arguments:
 # PDMPSAMPLERS_ONLINE_BATCHES (0 = off), PDMPSAMPLERS_ONLINE_GRID_SPACING
 # (physical time; NaN = no snapshots) and PDMPSAMPLERS_STREAM_EVENTS ("0" =
-# write no retained-phase event chunks). `T` is the absolute end time.
+# write no retained-phase event chunks), PDMPSAMPLERS_ONLINE_WARMUP_BATCHES
+# (0 = no warmup summaries). `T` is the absolute end time.
 function _bridge_trace_storage(directory, buffer_events, T)
     batches = parse(Int, get(ENV, "PDMPSAMPLERS_ONLINE_BATCHES", "0"))
     return PDMPSamplers.StreamingTraceStorage(directory; buffer_events,
@@ -784,7 +785,9 @@ function _bridge_trace_storage(directory, buffer_events, T)
         online_batches=batches,
         online_end_time=batches > 0 ? Float64(T) : NaN,
         online_grid_spacing=parse(Float64,
-            get(ENV, "PDMPSAMPLERS_ONLINE_GRID_SPACING", "NaN")))
+            get(ENV, "PDMPSAMPLERS_ONLINE_GRID_SPACING", "NaN")),
+        online_warmup_batches=parse(Int,
+            get(ENV, "PDMPSAMPLERS_ONLINE_WARMUP_BATCHES", "0")))
 end
 
 function _pack_result(chains::PDMPChains; requested_flow::String="",
@@ -1456,8 +1459,17 @@ end
 
 function _r_factorized_trace(events, flow, initial_state)
     bounds_cache = Dict{Int, Tuple{Float64, Float64}}()
+    # Current constructor: the last state is marked invalid, so the trace replays
+    # the events to find it when it is first needed.
     if applicable(PDMPSamplers.FactorizedTrace,
-                  events, flow, initial_state, initial_state, false, bounds_cache)
+                  events, flow, initial_state, initial_state, 0.0, false,
+                  bounds_cache, Ref(length(events)))
+        return PDMPSamplers.FactorizedTrace(
+            events, flow, initial_state, deepcopy(initial_state), 0.0, false,
+            bounds_cache, Ref(length(events))
+        )
+    elseif applicable(PDMPSamplers.FactorizedTrace,
+                      events, flow, initial_state, initial_state, false, bounds_cache)
         return PDMPSamplers.FactorizedTrace(
             events, flow, initial_state, initial_state, false, bounds_cache
         )

@@ -191,11 +191,22 @@ stan_subsampling <- function(n_observations, subsample_size,
   } else if (!is.null(standata$slab_base_scale) &&
              !is.null(standata$prior_global_scale_sd) &&
              !is.null(standata$prior_node_scale_sd)) {
+    # Half-normal global and node scales (omrf_node_shared.stan).
     list(
       type = "node_scale_gaussian",
       scale = standata$slab_base_scale,
       global_scale_sd = standata$prior_global_scale_sd,
-      node_scale_sd = standata$prior_node_scale_sd
+      node_scale_sd = standata$prior_node_scale_sd,
+      node_scale_prior = "halfnormal"
+    )
+  } else if (!is.null(standata$slab_base_scale) &&
+             !is.null(standata$prior_node_scale_sd)) {
+    # No global scale and lognormal(0, prior_node_scale_sd) node scales.
+    list(
+      type = "node_scale_gaussian",
+      scale = standata$slab_base_scale,
+      node_scale_sd = standata$prior_node_scale_sd,
+      node_scale_prior = "lognormal"
     )
   } else if (!is.null(standata$prior_interaction_sd)) {
     list(type = "gaussian", scale = standata$prior_interaction_sd)
@@ -216,12 +227,13 @@ stan_subsampling <- function(n_observations, subsample_size,
     threshold_alpha = standata$prior_threshold_alpha,
     threshold_beta = standata$prior_threshold_beta,
     interaction_scale = interaction$scale,
-    global_scale = if (identical(interaction$type, "node_scale_gaussian"))
+    global_scale = if (!is.null(interaction$global_scale_sd))
       "global_scale" else NULL,
     node_scale = if (identical(interaction$type, "node_scale_gaussian"))
       "node_scale" else NULL,
     global_scale_sd = interaction$global_scale_sd,
-    node_scale_sd = interaction$node_scale_sd)
+    node_scale_sd = interaction$node_scale_sd,
+    node_scale_prior = interaction$node_scale_prior)
   spec
 }
 

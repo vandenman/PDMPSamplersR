@@ -676,10 +676,19 @@ mutable struct OMRFNodeScaleAnalyticPrior
     node_scale_sd::Float64
     node_sums::Vector{Float64}
     node_scales::Vector{Float64}
+    # Two variants of the node-shared slab, sd = scale * global * sqrt(node_j node_k):
+    #   half-normal global and node scales (`global_scale_index > 0`,
+    #   `lognormal_nodes = false`; inst/stan/omrf/omrf_node_shared.stan), or
+    #   no global scale and lognormal(0, node_scale_sd) node scales
+    #   (`global_scale_index == 0`, `lognormal_nodes = true`).
+    lognormal_nodes::Bool
 end
 
 const OMRFAnalyticPrior = Union{OMRFIndependentAnalyticPrior,
     OMRFNodeScaleAnalyticPrior}
+
+# A field that is present and not R's NULL.
+_has_value(x, key::Symbol) = _haskey(x, key) && _rget(x, key) !== nothing
 
 function _omrf_analytic_prior(envelope_spec, context::OMRFResidualContext)
     _haskey(envelope_spec, :analytic_prior) || return nothing
@@ -695,7 +704,12 @@ function _omrf_analytic_prior(envelope_spec, context::OMRFResidualContext)
             context.threshold_indices, context.interaction_indices,
             α, β, interaction_type, scale)
     elseif interaction_type === :node_scale_gaussian
-        global_scale_sd = Float64(_rget(spec, :global_scale_sd))
+        lognormal_nodes = _has_value(spec, :node_scale_prior) &&
+            String(_rget(spec, :node_scale_prior)) == "lognormal"
+        lognormal_nodes == (context.global_scale_index == 0) || throw(ArgumentError(
+            "node-scale OMRF prior: lognormal node scales require no global scale, " *
+            "half-normal node scales require one"))
+        global_scale_sd = lognormal_nodes ? 1.0 : Float64(_rget(spec, :global_scale_sd))
         node_scale_sd = Float64(_rget(spec, :node_scale_sd))
         all(isfinite, (global_scale_sd, node_scale_sd)) &&
             global_scale_sd > 0 && node_scale_sd > 0 ||
@@ -706,7 +720,7 @@ function _omrf_analytic_prior(envelope_spec, context::OMRFResidualContext)
             context.global_scale_index, context.node_scale_indices,
             α, β, scale, global_scale_sd, node_scale_sd,
             zeros(length(context.node_scale_indices)),
-            zeros(length(context.node_scale_indices)))
+            zeros(length(context.node_scale_indices)), lognormal_nodes)
     end
     throw(ArgumentError("unsupported analytic OMRF interaction prior: $interaction_type"))
 end
@@ -740,8 +754,8 @@ function _omrf_prior_gradient!(out, prior::OMRFNodeScaleAnalyticPrior, x)
     end
 
     global_index = prior.global_scale_index
-    global_scale = exp(x[global_index])
-    global_sum = global_scale^2 / prior.global_scale_sd^2 - 1.0
+    global_scale = global_index > 0 ? exp(x[global_index]) : 1.0
+    global_sum = global_index > 0 ? global_scale^2 / prior.global_scale_sd^2 - 1.0 : 0.0
     node_sums = prior.node_sums
     node_scales = prior.node_scales
     @inbounds for node in eachindex(node_scales)
@@ -760,11 +774,14 @@ function _omrf_prior_gradient!(out, prior::OMRFNodeScaleAnalyticPrior, x)
         node_sums[right] += 0.5 * (1.0 - ratio)
         edge += 1
     end
-    out[global_index] = global_sum
+    global_index > 0 && (out[global_index] = global_sum)
     @inbounds for node in eachindex(node_sums)
         scale = node_scales[node]
-        out[prior.node_scale_indices[node]] = node_sums[node] +
-            scale^2 / prior.node_scale_sd^2 - 1.0
+        node_index = prior.node_scale_indices[node]
+        # -d log p / d log(scale): lognormal, or half-normal with its Jacobian.
+        out[node_index] = node_sums[node] + (prior.lognormal_nodes ?
+            x[node_index] / prior.node_scale_sd^2 :
+            scale^2 / prior.node_scale_sd^2 - 1.0)
     end
     return out
 end
@@ -1173,17 +1190,17 @@ function _omrf_prior_hvp!(out, prior::OMRFNodeScaleAnalyticPrior, x, direction)
     end
 
     global_index = prior.global_scale_index
-    global_scale = exp(x[global_index])
-    global_direction = direction[global_index]
-    out[global_index] = 2 * global_scale^2 /
-        prior.global_scale_sd^2 * global_direction
+    global_scale = global_index > 0 ? exp(x[global_index]) : 1.0
+    global_direction = global_index > 0 ? direction[global_index] : 0.0
+    global_index > 0 && (out[global_index] = 2 * global_scale^2 /
+        prior.global_scale_sd^2 * global_direction)
 
     node_scales = prior.node_scales
     @inbounds for node in eachindex(node_scales)
         node_scales[node] = exp(x[prior.node_scale_indices[node]])
         node_index = prior.node_scale_indices[node]
-        out[node_index] = 2 * node_scales[node]^2 /
-            prior.node_scale_sd^2 * direction[node_index]
+        out[node_index] = (prior.lognormal_nodes ? 1.0 :
+            2 * node_scales[node]^2) / prior.node_scale_sd^2 * direction[node_index]
     end
 
     edge = 1
@@ -1206,7 +1223,7 @@ function _omrf_prior_hvp!(out, prior::OMRFNodeScaleAnalyticPrior, x, direction)
             interaction * inv_scale2 * log_variance_direction
         dc = -2 * interaction * inv_scale2 * direction[interaction_index] +
             ratio * log_variance_direction
-        out[global_index] += dc
+        global_index > 0 && (out[global_index] += dc)
         out[prior.node_scale_indices[left]] += 0.5 * dc
         out[prior.node_scale_indices[right]] += 0.5 * dc
         edge += 1
@@ -1450,23 +1467,30 @@ function _omrf_prior_intervals!(glo, ghi, prior::OMRFNodeScaleAnalyticPrior,
         ghi[i] = _omrf_up((α + β) * _omrf_logistic(xhi[i]) - α)
     end
     gi = prior.global_scale_index
-    hglo, hghi = _omrf_iexp(2xlo[gi] - 2log(prior.global_scale_sd),
-                             2xhi[gi] - 2log(prior.global_scale_sd))
-    glo[gi], ghi[gi] = _omrf_down(hglo - 1), _omrf_up(hghi - 1)
+    if gi > 0
+        hglo, hghi = _omrf_iexp(2xlo[gi] - 2log(prior.global_scale_sd),
+                                 2xhi[gi] - 2log(prior.global_scale_sd))
+        glo[gi], ghi[gi] = _omrf_down(hglo - 1), _omrf_up(hghi - 1)
+    end
     @inbounds for (node, ni) in pairs(prior.node_scale_indices)
-        hlo, hhi = _omrf_iexp(2xlo[ni] - 2log(prior.node_scale_sd),
-                               2xhi[ni] - 2log(prior.node_scale_sd))
-        glo[ni], ghi[ni] = _omrf_down(hlo - 1), _omrf_up(hhi - 1)
+        if prior.lognormal_nodes
+            s2 = prior.node_scale_sd^2
+            glo[ni], ghi[ni] = _omrf_down(xlo[ni] / s2), _omrf_up(xhi[ni] / s2)
+        else
+            hlo, hhi = _omrf_iexp(2xlo[ni] - 2log(prior.node_scale_sd),
+                                   2xhi[ni] - 2log(prior.node_scale_sd))
+            glo[ni], ghi[ni] = _omrf_down(hlo - 1), _omrf_up(hhi - 1)
+        end
     end
     edge = 1
     @inbounds for u in 1:(length(prior.node_scale_indices) - 1),
             v in (u + 1):length(prior.node_scale_indices)
         bi = prior.interaction_indices[edge]
         if active === nothing || active[bi]
-            eta_lo = log(prior.interaction_scale) + xlo[gi] +
+            eta_lo = log(prior.interaction_scale) + (gi > 0 ? xlo[gi] : 0.0) +
                 0.5xlo[prior.node_scale_indices[u]] +
                 0.5xlo[prior.node_scale_indices[v]]
-            eta_hi = log(prior.interaction_scale) + xhi[gi] +
+            eta_hi = log(prior.interaction_scale) + (gi > 0 ? xhi[gi] : 0.0) +
                 0.5xhi[prior.node_scale_indices[u]] +
                 0.5xhi[prior.node_scale_indices[v]]
             wlo, whi = _omrf_iexp(-2eta_hi, -2eta_lo)
@@ -1474,7 +1498,7 @@ function _omrf_prior_intervals!(glo, ghi, prior::OMRFNodeScaleAnalyticPrior,
             b2lo, b2hi = _omrf_isquare(xlo[bi], xhi[bi])
             rlo, rhi = _omrf_imul(b2lo, b2hi, wlo, whi)
             elo, ehi = _omrf_down(1 - rhi), _omrf_up(1 - rlo)
-            glo[gi], ghi[gi] = _omrf_iadd(glo[gi], ghi[gi], elo, ehi)
+            gi > 0 && ((glo[gi], ghi[gi]) = _omrf_iadd(glo[gi], ghi[gi], elo, ehi))
             for node in (u, v)
                 ni = prior.node_scale_indices[node]
                 sl, sh = _omrf_iscale(elo, ehi, 0.5)
@@ -1797,9 +1821,11 @@ function _omrf_residual_context(envelope_spec, unc_names, anchor,
     if _haskey(envelope_spec, :analytic_prior)
         prior_spec = _rget(envelope_spec, :analytic_prior)
         if String(_rget(prior_spec, :type)) == "node_scale_gaussian"
-            global_scale_index = only(_resolve_unc_spec(
-                _rget(prior_spec, :global_scale), unc_names,
-                "OMRF global scale"))
+            if _has_value(prior_spec, :global_scale)
+                global_scale_index = only(_resolve_unc_spec(
+                    _rget(prior_spec, :global_scale), unc_names,
+                    "OMRF global scale"))
+            end
             node_scale_indices = _resolve_unc_spec(
                 _rget(prior_spec, :node_scale), unc_names,
                 "OMRF node scales")
@@ -1807,7 +1833,7 @@ function _omrf_residual_context(envelope_spec, unc_names, anchor,
                 "resolved OMRF node-scale block has $(length(node_scale_indices)) " *
                 "coordinates; expected $P"))
             isempty(intersect(node_scale_indices,
-                [global_scale_index; threshold_indices; interaction_indices])) ||
+                [filter(>(0), [global_scale_index]); threshold_indices; interaction_indices])) ||
                 throw(ArgumentError("resolved OMRF node-scale coordinates overlap another block"))
         end
     end
@@ -4744,7 +4770,12 @@ function PDMPSamplers.deterministic_gradient!(out,
         PDMPSamplers._inc_gradient_purpose!(
             provider.stats, Val(:deterministic_gradient))
     end
-    oracle = _omrf_base_oracle(provider)
+    # A dependent slab (node-scale prior) wraps the oracle in a slab correction;
+    # the fast path below then adds the same correction, so that the
+    # precomputed control-variate path is used for every slab.
+    slab = _omrf_slab_wrapper(provider)
+    oracle = slab === nothing ? _omrf_base_oracle(provider) :
+        _omrf_base_oracle(slab.oracle)
     oracle isa OMRFAnalyticSubsamplingOracle ||
         return cv.deterministic_gradient!(out, state.ξ.x)
     context = oracle.residual_context
@@ -4755,6 +4786,33 @@ function PDMPSamplers.deterministic_gradient!(out,
     end
     _omrf_deterministic_gradient!(out, oracle,
         something(oracle.analytic_prior), state.ξ.x)
+    _omrf_add_path_terms!(out, envelope, state, flow)
+    if slab !== nothing
+        x = state.ξ.x
+        PDMPSamplers.active_prior_grad!(slab.slab, slab.all_buf, x, slab.all_active)
+        PDMPSamplers.active_prior_grad!(slab.slab, slab.active_buf, x, slab.active)
+        @. out = out - slab.all_buf + slab.active_buf
+    end
+    _OMRF_CHECK_FAST_DETERMINISTIC[] && _omrf_check_fast_deterministic(out, cv, state)
+    return out
+end
+
+# Verification switch: compare the fast deterministic gradient with the
+# generic (full Hessian-product) evaluation at every call.
+const _OMRF_CHECK_FAST_DETERMINISTIC = Ref(
+    get(ENV, "PDMPSAMPLERSR_CHECK_FAST_DETERMINISTIC", "0") == "1")
+const _OMRF_FAST_DETERMINISTIC_MAXERR = Ref(0.0)
+function _omrf_check_fast_deterministic(out, cv, state)
+    reference = similar(out)
+    cv.deterministic_gradient!(reference, state.ξ.x)
+    err = maximum(abs.(reference .- out)) / max(1.0, maximum(abs.(reference)))
+    _OMRF_FAST_DETERMINISTIC_MAXERR[] = max(_OMRF_FAST_DETERMINISTIC_MAXERR[], err)
+    return nothing
+end
+
+# The control-variate Hessian term along the current path, from the vectors
+# precomputed by the envelope at the start of the cell.
+function _omrf_add_path_terms!(out, envelope, state, flow)
     elapsed = Float64(state.t[] - envelope.origin_time)
     actual = _omrf_actual_flow(flow)
     if actual isa PDMPSamplers.AnyBoomerang
@@ -14283,6 +14341,16 @@ function StanSubsamplingSlabDeterministic(oracle, slab, d)
     return StanSubsamplingSlabDeterministic(oracle, slab, trues(p), trues(p),
         zeros(d), zeros(d))
 end
+
+# The slab wrapper inside a statistics wrapper, or nothing (used by the fast
+# OMRF deterministic gradient).
+@inline _omrf_slab_wrapper(provider) = nothing
+@inline _omrf_slab_wrapper(provider::PDMPSamplers.WithStats) =
+    _omrf_slab_wrapper(provider.f)
+@inline _omrf_slab_wrapper(provider::PDMPSamplers.WithResidualStats) =
+    _omrf_slab_wrapper(provider.f)
+@inline _omrf_slab_wrapper(provider::StanSubsamplingSlabDeterministic) = provider
+
 
 function (target::StanSubsamplingSlabDeterministic)(out, x)
     target.oracle(out, x)

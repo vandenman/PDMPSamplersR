@@ -1413,9 +1413,10 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
     if (identical(envelope_spec$analytic_prior$type,
                   "node_scale_gaussian")) {
       prior_idx <- c(
-        .resolve_unconstrained_spec(
-          envelope_spec$analytic_prior$global_scale, unc_names,
-          "global_scale"),
+        if (!is.null(envelope_spec$analytic_prior$global_scale))
+          .resolve_unconstrained_spec(
+            envelope_spec$analytic_prior$global_scale, unc_names,
+            "global_scale"),
         .resolve_unconstrained_spec(
           envelope_spec$analytic_prior$node_scale, unc_names,
           "node_scale"))

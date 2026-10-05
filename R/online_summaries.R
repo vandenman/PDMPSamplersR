@@ -17,10 +17,17 @@
 #' @param grid_spacing Physical time between state snapshots, or `NA` for none.
 #' @param write_events If `FALSE` (default), no retained-phase events are
 #'   written; the online summaries are the only retained output.
+#' @param warmup_batches Number of equal physical-time batches of the warmup
+#'   phase with the same integrals (no snapshots), or 0 (default) for none.
+#'   They are read with `read_online_summaries(path, phase = "warmup")`.
 #' @return A list of class `pdmp_online_summaries`.
 #' @export
 online_summary_options <- function(batches = 400L, grid_spacing = NA_real_,
-                                   write_events = FALSE) {
+                                   write_events = FALSE, warmup_batches = 0L) {
+  if (!rlang::is_integerish(warmup_batches, n = 1L, finite = TRUE) ||
+      warmup_batches < 0L) {
+    cli::cli_abort("{.arg warmup_batches} must be a nonnegative integer.")
+  }
   if (!rlang::is_integerish(batches, n = 1L, finite = TRUE) || batches < 1L) {
     cli::cli_abort("{.arg batches} must be a positive integer.")
   }
@@ -30,7 +37,8 @@ online_summary_options <- function(batches = 400L, grid_spacing = NA_real_,
   }
   structure(list(batches = as.integer(batches),
                  grid_spacing = as.numeric(grid_spacing),
-                 write_events = isTRUE(write_events)),
+                 write_events = isTRUE(write_events),
+                 warmup_batches = as.integer(warmup_batches)),
             class = "pdmp_online_summaries")
 }
 
@@ -38,7 +46,7 @@ online_summary_options <- function(batches = 400L, grid_spacing = NA_real_,
 # the streaming trace storage; set them for the duration of one sampler call.
 .set_online_summary_env <- function(online_summaries, trace_storage) {
   vars <- c("PDMPSAMPLERS_ONLINE_BATCHES", "PDMPSAMPLERS_ONLINE_GRID_SPACING",
-            "PDMPSAMPLERS_STREAM_EVENTS")
+            "PDMPSAMPLERS_STREAM_EVENTS", "PDMPSAMPLERS_ONLINE_WARMUP_BATCHES")
   old <- Sys.getenv(vars, unset = NA_character_, names = TRUE)
   restore <- function() {
     for (v in vars) {
@@ -62,24 +70,29 @@ online_summary_options <- function(batches = 400L, grid_spacing = NA_real_,
     PDMPSAMPLERS_ONLINE_BATCHES = online_summaries$batches,
     PDMPSAMPLERS_ONLINE_GRID_SPACING = if (is.na(online_summaries$grid_spacing))
       "NaN" else format(online_summaries$grid_spacing, digits = 17),
-    PDMPSAMPLERS_STREAM_EVENTS = if (online_summaries$write_events) "1" else "0")
+    PDMPSAMPLERS_STREAM_EVENTS = if (online_summaries$write_events) "1" else "0",
+    PDMPSAMPLERS_ONLINE_WARMUP_BATCHES = online_summaries$warmup_batches %||% 0L)
   restore
 }
 
 #' Read online summaries written by a streaming chain
 #'
 #' @param path Either the `online_summaries.bin` file or a streaming trace
-#'   directory, which is searched for exactly one such file.
+#'   directory, which is searched for exactly one such file of `phase`.
+#' @param phase `"main"` (default) for the retained phase or `"warmup"`;
+#'   only used when `path` is a directory.
 #' @return A list with the batch integrals (`x`, `x2`, `x4`, `free`: one column
 #'   per batch), `batch_time`, `size`, `size2` (integrals of the number of free
 #'   coordinates and its square), `transitions` (per coordinate and batch),
 #'   the snapshot grid (`grid_times`, `grid_x`, `grid_free`), and
 #'   `start_time`, `width` and `end_time` of the retained phase.
 #' @export
-read_online_summaries <- function(path) {
+read_online_summaries <- function(path, phase = c("main", "warmup")) {
+  phase <- match.arg(phase)
   if (dir.exists(path)) {
     found <- list.files(path, "^online_summaries\\.bin$", recursive = TRUE,
                         full.names = TRUE)
+    found <- found[basename(dirname(found)) == phase]
     if (length(found) != 1L) {
       cli::cli_abort("Expected one online_summaries.bin under {.path {path}}, found {length(found)}.")
     }

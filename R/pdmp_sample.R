@@ -422,18 +422,6 @@ validate_pdmp_params <- function(d, flow, algorithm, T, t0 = 0.0, t_warmup = 0.0
     if (any(can_stick[logscale_idx])) {
       cli::cli_abort("Slab {.arg logscale} coordinates must be non-stickable.")
     }
-  } else if (slab_prior$type == "global_logscale_exchangeable_gaussian") {
-    logscale_idx <- .slab_state_indices(slab_prior$logscale, d, unc_names, arg = "logscale")
-    if (length(logscale_idx) != 1L) {
-      cli::cli_abort("Argument {.arg logscale} must have length 1.")
-    }
-    beta_idx <- if (is.null(coef_idx)) which(can_stick) else coef_idx
-    if (logscale_idx %in% beta_idx) {
-      cli::cli_abort("Slab {.arg logscale} coordinate must be disjoint from slab {.arg coef} coordinates.")
-    }
-    if (can_stick[logscale_idx]) {
-      cli::cli_abort("Slab {.arg logscale} coordinate must be non-stickable.")
-    }
   }
   invisible(TRUE)
 }

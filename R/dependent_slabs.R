@@ -158,30 +158,6 @@ loglinear_gaussian_scale_slab <- function(log_base_sd, logscale,
 }
 
 #' @rdname independent_slab_density
-#' @param logscale_offset Fixed additive offset for a global log-scale.
-#' @export
-global_logscale_exchangeable_gaussian_slab <- function(logscale, u, v, mean = 0, logscale_offset = 0, coef = NULL) {
-  validate_type(u, type = "double", n = 1, positive = TRUE)
-  validate_type(v, type = "double", n = 1)
-  validate_type(mean, type = "double", n = 1)
-  validate_type(logscale_offset, type = "double", n = 1)
-  if (!(is.character(logscale) || rlang::is_integerish(logscale))) {
-    cli::cli_abort("Argument {.arg logscale} must be a character or integer scalar.")
-  }
-  if (length(logscale) != 1) {
-    cli::cli_abort("Argument {.arg logscale} must have length 1.")
-  }
-  if (!is.character(logscale)) {
-    logscale <- as.integer(logscale)
-  }
-  .new_slab_prior(
-    "global_logscale_exchangeable_gaussian",
-    list(logscale = logscale, u = u, v = v, mean = mean, logscale_offset = logscale_offset),
-    coef = coef
-  )
-}
-
-#' @rdname independent_slab_density
 #' @param log_q_zero R function returning a boundary log-density at zero. It is
 #'   called as \code{log_q_zero(x, active, j)}, where \code{j} is a 1-based slab
 #'   coefficient index.

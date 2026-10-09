@@ -14,9 +14,6 @@ test_that("dependent slab constructors create validated specs", {
 
   logscale <- independent_logscale_gaussian_slab(log_base_scales = c(0, 1), logscale = "log_tau", coef = c("b.x1", "b.x2"))
   expect_equal(logscale$type, "independent_logscale_gaussian")
-
-  global_exch <- global_logscale_exchangeable_gaussian_slab(logscale = "log_tau", u = 1, v = 0.2)
-  expect_equal(global_exch$type, "global_logscale_exchangeable_gaussian")
 })
 
 test_that("dependent slab constructors reject invalid inputs", {
@@ -26,7 +23,6 @@ test_that("dependent slab constructors reject invalid inputs", {
   expect_error(exchangeable_gaussian_slab(mean = 1, u = 1, v = 0), "mean")
   expect_error(exchangeable_gaussian_slab(u = 1, v = 0, coef = list(a = 1)), "coef")
   expect_error(independent_logscale_gaussian_slab(0, list(a = 1)), "logscale")
-  expect_error(global_logscale_exchangeable_gaussian_slab(1:2, u = 1, v = 0), "length 1")
 })
 
 test_that("validate_pdmp_params separates legacy and dependent sticky modes", {
@@ -102,16 +98,6 @@ test_that("slab_prior requires sticky and reconciles coef with can_stick", {
       slab_prior = independent_logscale_gaussian_slab(0, logscale = 1, coef = 1)
     ),
     "disjoint"
-  )
-
-  expect_error(
-    PDMPSamplersR:::validate_pdmp_params(
-      d, "ZigZag", "GridThinningStrategy", 10,
-      sticky = TRUE, can_stick = c(TRUE, FALSE, TRUE, FALSE),
-      model_prior = bernoulli(0.5),
-      slab_prior = global_logscale_exchangeable_gaussian_slab(logscale = 3, u = 1, v = 0, coef = 1)
-    ),
-    "non-stickable"
   )
 
   expect_error(
@@ -318,18 +304,6 @@ test_that("Julia bridge builds dependent slab concrete types", {
     "))
   }
 
-  global_exch <- global_logscale_exchangeable_gaussian_slab(logscale = "b.Intercept", u = 1, v = 0.1, coef = c("b.x1", "b.x2"))
-  JuliaCall::julia_assign("r_global_exch_slab", global_exch)
-  global_provider_type <- JuliaCall::julia_eval("string(typeof(build_slab_provider(r_global_exch_slab, r_unc_names, r_can_stick, 3)))")
-  expect_match(global_provider_type, "GlobalLogscaleExchangeableGaussianSlab")
-  global_clock_type <- JuliaCall::julia_eval("
-    string(typeof(default_aggregate_unstick_clock(
-      build_slab_provider(r_global_exch_slab, r_unc_names, r_can_stick, 3),
-      build_model_prior_odds(r_model_prior, [2, 3], 3)
-    )))
-  ")
-  expect_match(global_clock_type, "ChebyshevResidualAggregateClock")
-
   alg_type <- JuliaCall::julia_eval("
     string(typeof(wrap_dependent_sticky(
       GridThinningStrategy(), true, r_model_prior, r_dense_slab,
@@ -340,25 +314,27 @@ test_that("Julia bridge builds dependent slab concrete types", {
   ")
   expect_match(alg_type, "AggregateSticky")
 
+  loglinear <- loglinear_gaussian_scale_slab(
+    0, logscale = "b.Intercept", logscale_design = matrix(1, 2, 1),
+    coef = c("b.x1", "b.x2"))
+  JuliaCall::julia_assign("r_loglinear_slab", loglinear)
   adaptive_bridge <- JuliaCall::julia_eval("
     begin
       flow = build_flow(\"AdaptiveBoomerang\", Matrix{Float64}(I, 3, 3),
         zeros(3); adaptive_scheme=\"diagonal\")
       alg = wrap_dependent_sticky(GridThinningStrategy(), true,
-        r_model_prior, r_global_exch_slab, r_can_stick, flow, r_unc_names)
+        r_model_prior, r_loglinear_slab, r_can_stick, flow, r_unc_names)
       flow_copy = PDMPSamplers._copy_flow(flow)
       alg_copy = PDMPSamplers._copy_algorithm(alg)
-      (string(typeof(flow)), string(typeof(alg.clock)),
-       alg.clock.allow_slow_fallback, flow !== flow_copy,
+      (string(typeof(flow)), string(typeof(alg.clock)), flow !== flow_copy,
        alg.clock !== alg_copy.clock &&
          alg.clock.workspace !== alg_copy.clock.workspace)
     end
   ")
   expect_match(adaptive_bridge[[1]], "MutableBoomerang")
-  expect_match(adaptive_bridge[[2]], "FourierResidualAggregateClock")
+  expect_match(adaptive_bridge[[2]], "HarmonicLogLinearAggregateClock")
   expect_true(adaptive_bridge[[3]])
   expect_true(adaptive_bridge[[4]])
-  expect_true(adaptive_bridge[[5]])
 })
 
 test_that("Julia bridge executes R callback slab provider contracts", {
@@ -441,76 +417,3 @@ test_that("Julia bridge executes R callback slab provider contracts", {
   )
 })
 
-test_that("R Bernoulli endpoints preserve Boomerang extended-rate semantics", {
-  skip_on_cran()
-  skip_if_no_pdmp_julia_backend()
-
-  slab <- global_logscale_exchangeable_gaussian_slab(
-    logscale = "log_tau", u = 1, v = 1, logscale_offset = -10,
-    coef = c("b.x1", "b.x2")
-  )
-  JuliaCall::julia_assign("r_endpoint_slab", slab)
-  JuliaCall::julia_assign(
-    "r_endpoint_names", c("b.x1", "b.x2", "log_tau"))
-  JuliaCall::julia_assign("r_endpoint_mask", c(TRUE, TRUE, FALSE))
-
-  for (endpoint in c(0, 1)) {
-    JuliaCall::julia_assign("r_endpoint_prior", bernoulli(endpoint))
-    for (logscale_velocity in c(0, 1)) {
-      JuliaCall::julia_assign("r_endpoint_velocity", logscale_velocity)
-      result <- JuliaCall::julia_eval("
-        begin
-          provider = build_slab_provider(r_endpoint_slab,
-            r_endpoint_names, r_endpoint_mask, 3)
-          odds = build_model_prior_odds(r_endpoint_prior, [1, 2], 3)
-          flow = Boomerang(3)
-          state = StickyPDMPState(Ref(0.0),
-            SkeletonPoint([-2.0, 0.0, 0.0],
-              [2.0, 0.0, r_endpoint_velocity]),
-            BitVector([true, false, true]))
-          mask = BitVector([true, true, false])
-          clock = PDMPSamplers.FourierResidualAggregateClock(provider, odds;
-            allow_slow_fallback=false)
-          (PDMPSamplers.rate(clock, flow, state, 0.0, mask),
-           PDMPSamplers.sample_time(Random.Xoshiro(1), clock, flow,
-             state, 2.0, mask),
-           PDMPSamplers.sample_time(Random.Xoshiro(1), clock, flow,
-             state, Inf, mask))
-        end
-      ")
-      if (endpoint == 0) {
-        expect_equal(unlist(result), c(0, Inf, Inf))
-      } else {
-        expect_equal(unlist(result), c(Inf, 0, 0))
-      }
-    }
-  }
-
-  extreme_prior <- exchangeable_model_size_prior(c(5e-324, 5e-324, 1))
-  JuliaCall::julia_assign("r_extreme_size_prior", extreme_prior)
-  extreme_result <- JuliaCall::julia_eval("
-    begin
-      provider = build_slab_provider(r_endpoint_slab,
-        r_endpoint_names, r_endpoint_mask, 3)
-      odds = build_model_prior_odds(r_extreme_size_prior, [1, 2], 3)
-      flow = Boomerang(3)
-      state = StickyPDMPState(Ref(0.0),
-        SkeletonPoint([-2.0, 0.0, 0.0], [2.0, 0.0, 0.0]),
-        BitVector([true, false, true]))
-      mask = BitVector([true, true, false])
-      clock = PDMPSamplers.FourierResidualAggregateClock(provider, odds;
-        allow_slow_fallback=false)
-      peak = PDMPSamplers._boomerang_narrow_peak_segment(
-        clock, flow, state, mask)
-      event_time = PDMPSamplers.sample_time(Random.Xoshiro(1), clock,
-        flow, state, Inf, mask)
-      (string(typeof(odds)), all(isfinite, odds.log_omega),
-       peak.log_total_weight, event_time)
-    end
-  ")
-  expect_match(extreme_result[[1]], "ExchangeableModelSizePrior")
-  expect_true(extreme_result[[2]])
-  expect_true(is.finite(extreme_result[[3]]))
-  expect_true(is.finite(extreme_result[[4]]))
-  expect_gt(extreme_result[[4]], 0)
-})

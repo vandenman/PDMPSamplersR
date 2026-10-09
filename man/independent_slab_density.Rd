@@ -7,7 +7,6 @@
 \alias{gaussian_scale_mixture_slab}
 \alias{independent_logscale_gaussian_slab}
 \alias{loglinear_gaussian_scale_slab}
-\alias{global_logscale_exchangeable_gaussian_slab}
 \alias{arbitrary_slab_boundary}
 \title{Dependent slab prior constructors}
 \usage{
@@ -25,15 +24,6 @@ loglinear_gaussian_scale_slab(
   log_base_sd,
   logscale,
   logscale_design,
-  coef = NULL
-)
-
-global_logscale_exchangeable_gaussian_slab(
-  logscale,
-  u,
-  v,
-  mean = 0,
-  logscale_offset = 0,
   coef = NULL
 )
 
@@ -80,8 +70,6 @@ recycled over the selected coefficients.}
 
 \item{logscale_design}{Numeric coefficient-by-logscale design matrix. Sparse
 matrices are accepted and retained as a compact specification.}
-
-\item{logscale_offset}{Fixed additive offset for a global log-scale.}
 
 \item{log_q_zero}{R function returning a boundary log-density at zero. It is
 called as \code{log_q_zero(x, active, j)}, where \code{j} is a 1-based slab

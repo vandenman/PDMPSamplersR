@@ -472,18 +472,6 @@ function build_slab_provider(slab_prior, unc_names::AbstractVector{<:AbstractStr
                 log_base_scales, rowptr, colidx, nzval)
         end
         throw(ArgumentError("unknown logscale_design storage $storage"))
-    elseif t == "global_logscale_exchangeable_gaussian"
-        logscale_idx = _state_indices(_rget(slab_prior, :logscale), unc_names, d, "logscale")
-        length(logscale_idx) == 1 ||
-            throw(DimensionMismatch("global_logscale_exchangeable_gaussian_slab logscale length must be 1"))
-        logscale_idx[1] in beta_idx &&
-            throw(ArgumentError("global_logscale_exchangeable_gaussian_slab logscale coordinate must be disjoint from slab coef coordinates"))
-        can_stick[logscale_idx[1]] &&
-            throw(ArgumentError("global_logscale_exchangeable_gaussian_slab logscale coordinate must be non-stickable"))
-        return GlobalLogscaleExchangeableGaussianSlab(beta_idx, logscale_idx[1],
-            Float64(_rget(slab_prior, :u)), Float64(_rget(slab_prior, :v));
-            mean=Float64(_rget(slab_prior, :mean)),
-            logscale_offset=Float64(_rget(slab_prior, :logscale_offset)))
     elseif t == "callback_gaussian"
         mean_cov_r = _rget(slab_prior, :mean_cov)
         active_prior_neggrad_r = _rget(slab_prior, :active_prior_neggrad)
@@ -519,8 +507,8 @@ end
 Wrap a dependent-slab sampler using the concrete constructed dynamics.
 
 Clock selection is flow-aware: in particular, Boomerang-family dynamics with
-global-logscale slabs require the Fourier residual clock. Passing an R flow
-name here would discard preconditioning and adaptive-dynamics information.
+log-linear Gaussian scale slabs use the harmonic clock. Passing an R flow name
+here would discard preconditioning and adaptive-dynamics information.
 """
 function wrap_dependent_sticky(alg::PDMPSamplers.PoissonTimeStrategy, sticky::Bool,
         model_prior, slab_prior, can_stick,

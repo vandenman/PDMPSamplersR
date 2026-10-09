@@ -9,9 +9,7 @@ pdmp_sample(
   d,
   flow = c("ZigZag", "BouncyParticle", "Boomerang", "AdaptiveBoomerang",
     "PreconditionedZigZag", "PreconditionedBPS"),
-  algorithm = c("ThinningStrategy", "GridThinningStrategy",
-    "PositiveVariationGridThinningStrategy", "VectorVariationThinningStrategy",
-    "RootsPoissonStrategy"),
+  algorithm = c("ThinningStrategy", "GridThinningStrategy", "RootsPoissonStrategy"),
   T = 50000,
   t0 = 0,
   t_warmup = 0,
@@ -64,9 +62,7 @@ diagonal preconditioner during warmup and also require
 a grid-like algorithm.}
 
 \item{algorithm}{Character string specifying the algorithm. One of
-"ThinningStrategy", "GridThinningStrategy",
-"PositiveVariationGridThinningStrategy", "VectorVariationThinningStrategy",
-or "RootsPoissonStrategy".}
+"ThinningStrategy", "GridThinningStrategy", or "RootsPoissonStrategy".}
 
 \item{T}{Numeric, total sampling time (default: 50000).}
 

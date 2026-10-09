@@ -245,60 +245,6 @@ function build_algorithm(algorithm_type::String; c0::Float64, d::Integer, grid_n
             lazy_low_tightness_threshold = lazy_low_tightness_threshold,
             lazy_max_low_tightness_rejections = lazy_max_low_tightness_rejections,
             lazy_max_rejections = lazy_max_rejections)
-    elseif algorithm_type == "PositiveVariationGridThinningStrategy"
-        pv_max_skip_width = parse(Float64, get(ENV, "PDMP_POSITIVE_VARIATION_MAX_SKIP_WIDTH", "0.25"))
-        pv_dense_cell_width = parse(Float64, get(ENV, "PDMP_POSITIVE_VARIATION_DENSE_CELL_WIDTH", "0.0"))
-        pv_skip_slope_safety = parse(Float64, get(ENV, "PDMP_POSITIVE_VARIATION_SKIP_SLOPE_SAFETY", "0.0"))
-        pv_use_derivative_hermite = parse(Bool, get(ENV, "PDMP_POSITIVE_VARIATION_USE_DERIVATIVE_HERMITE", "false"))
-        pv_derivative_hermite_on_demand = parse(Bool, get(ENV, "PDMP_POSITIVE_VARIATION_DERIVATIVE_HERMITE_ON_DEMAND", "false"))
-        pv_derivative_hermite_trigger_scale = parse(Float64, get(ENV, "PDMP_POSITIVE_VARIATION_DERIVATIVE_HERMITE_TRIGGER_SCALE", "10.0"))
-        pv_validation_rtol = parse(Float64, get(ENV, "PDMP_POSITIVE_VARIATION_VALIDATION_RTOL", "0.05"))
-        pv_approximate = parse(Bool, get(ENV, "PDMP_POSITIVE_VARIATION_APPROXIMATE", "false"))
-        return PositiveVariationGridThinningStrategy(; N = grid_n, t_max = grid_t_max,
-            validation_rtol = pv_validation_rtol,
-            max_skip_width = pv_max_skip_width,
-            dense_cell_width = pv_dense_cell_width,
-            skip_slope_safety = pv_skip_slope_safety,
-            use_derivative_hermite = pv_use_derivative_hermite,
-            derivative_hermite_on_demand = pv_derivative_hermite_on_demand,
-            derivative_hermite_trigger_scale = pv_derivative_hermite_trigger_scale,
-            approximate = pv_approximate,
-            fallback = GridThinningStrategy(; N = grid_n, t_max = grid_t_max,
-                use_fd_hvp = use_fd_hvp, curvature_backend = Symbol(curvature_backend),
-                post_warmup_simplify = post_warmup_simplify,
-                bound = Symbol(grid_bound),
-                curvature_bound = grid_curvature_bound,
-                linear_area_threshold = linear_area_threshold,
-                linear_min_area_gain = linear_min_area_gain,
-                lazy_low_tightness_threshold = lazy_low_tightness_threshold,
-                lazy_max_low_tightness_rejections = lazy_max_low_tightness_rejections,
-                lazy_max_rejections = lazy_max_rejections))
-    elseif algorithm_type == "VectorVariationThinningStrategy"
-        vv_max_skip_width = parse(Float64, get(ENV, "PDMP_VECTOR_VARIATION_MAX_SKIP_WIDTH", "0.25"))
-        vv_validation_rtol = parse(Float64, get(ENV, "PDMP_VECTOR_VARIATION_VALIDATION_RTOL", "0.05"))
-        vv_max_refinement_depth = parse(Int, get(ENV, "PDMP_VECTOR_VARIATION_MAX_REFINEMENT_DEPTH", "8"))
-        vv_n_min = parse(Int, get(ENV, "PDMP_VECTOR_VARIATION_N_MIN", "5"))
-        vv_use_derivative_hermite = parse(Bool, get(ENV, "PDMP_VECTOR_VARIATION_USE_DERIVATIVE_HERMITE", "false"))
-        vv_derivative_hermite_on_demand = parse(Bool, get(ENV, "PDMP_VECTOR_VARIATION_DERIVATIVE_HERMITE_ON_DEMAND", "false"))
-        vv_derivative_hermite_trigger_scale = parse(Float64, get(ENV, "PDMP_VECTOR_VARIATION_DERIVATIVE_HERMITE_TRIGGER_SCALE", "10.0"))
-        return VectorVariationThinningStrategy(; N = grid_n, t_max = grid_t_max,
-            N_min = vv_n_min,
-            validation_rtol = vv_validation_rtol,
-            max_skip_width = vv_max_skip_width,
-            max_refinement_depth = vv_max_refinement_depth,
-            use_derivative_hermite = vv_use_derivative_hermite,
-            derivative_hermite_on_demand = vv_derivative_hermite_on_demand,
-            derivative_hermite_trigger_scale = vv_derivative_hermite_trigger_scale,
-            fallback = GridThinningStrategy(; N = grid_n, t_max = grid_t_max,
-                use_fd_hvp = use_fd_hvp, curvature_backend = Symbol(curvature_backend),
-                post_warmup_simplify = post_warmup_simplify,
-                bound = Symbol(grid_bound),
-                curvature_bound = grid_curvature_bound,
-                linear_area_threshold = linear_area_threshold,
-                linear_min_area_gain = linear_min_area_gain,
-                lazy_low_tightness_threshold = lazy_low_tightness_threshold,
-                lazy_max_low_tightness_rejections = lazy_max_low_tightness_rejections,
-                lazy_max_rejections = lazy_max_rejections))
     elseif algorithm_type == "RootsPoissonStrategy"
         return RootsPoissonTimeStrategy()
     else

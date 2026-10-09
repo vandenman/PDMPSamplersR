@@ -136,8 +136,7 @@ validate_pdmp_params <- function(d, flow, algorithm, T, t0 = 0.0, t_warmup = 0.0
     cli::cli_abort("Argument {.arg t_warmup} ({t_warmup}) must be less than {.code T - t0} ({T - t0}).")
 
   flow <- match.arg(flow, c("ZigZag", "BouncyParticle", "Boomerang", "AdaptiveBoomerang", "PreconditionedZigZag", "PreconditionedBPS"))
-  grid_like_algorithms <- c("GridThinningStrategy", "PositiveVariationGridThinningStrategy",
-                            "VectorVariationThinningStrategy")
+  grid_like_algorithms <- "GridThinningStrategy"
   algorithm <- match.arg(algorithm, c("ThinningStrategy", grid_like_algorithms, "RootsPoissonStrategy"))
   adaptive_scheme <- match.arg(adaptive_scheme, c("diagonal", "fullrank"))
   grid_bound <- match.arg(grid_bound, c("constant", "flat", "linear", "auto", "value_quadratic", "shared_node"))
@@ -596,9 +595,7 @@ validate_support_boundary_control <- function(support_boundary) {
 #'   diagonal preconditioner during warmup and also require
 #'   a grid-like algorithm.
 #' @param algorithm Character string specifying the algorithm. One of
-#'   "ThinningStrategy", "GridThinningStrategy",
-#'   "PositiveVariationGridThinningStrategy", "VectorVariationThinningStrategy",
-#'   or "RootsPoissonStrategy".
+#'   "ThinningStrategy", "GridThinningStrategy", or "RootsPoissonStrategy".
 #' @param T Numeric, total sampling time (default: 50000).
 #' @param t0 Numeric, initial time (default: 0.0).
 #' @param t_warmup Numeric, warmup time (default: 0.0). Events during warmup are discarded.
@@ -676,7 +673,6 @@ validate_support_boundary_control <- function(support_boundary) {
 pdmp_sample <- function(f, d,
                         flow = c("ZigZag", "BouncyParticle", "Boomerang", "AdaptiveBoomerang", "PreconditionedZigZag", "PreconditionedBPS"),
                         algorithm = c("ThinningStrategy", "GridThinningStrategy",
-                                      "PositiveVariationGridThinningStrategy", "VectorVariationThinningStrategy",
                                       "RootsPoissonStrategy"),
                         T = 50000, t0 = 0.0, t_warmup = 0.0,
                         flow_mean = NULL, flow_cov = NULL, c0 = 1e-2,
@@ -953,7 +949,6 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
                         subsampling_diagnostic_window = 0,
                         flow = c("ZigZag", "BouncyParticle", "Boomerang", "AdaptiveBoomerang", "PreconditionedZigZag", "PreconditionedBPS"),
                         algorithm = c("ThinningStrategy", "GridThinningStrategy",
-                                      "PositiveVariationGridThinningStrategy", "VectorVariationThinningStrategy",
                                       "RootsPoissonStrategy"),
                         T = 50000, t0 = 0.0, t_warmup = 0.0,
                         warmup_adaptation_interval = NULL,

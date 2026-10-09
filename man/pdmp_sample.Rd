@@ -148,7 +148,9 @@ Julia's sampler RNG and any generated default initial position when
 
 \item{adaptive_scheme}{Character string, adaptation scheme for AdaptiveBoomerang.
 One of "diagonal" (default, O(d) per update) or "fullrank" (O(d^3) per update,
-better for correlated targets). Ignored for other flow types.}
+better for correlated targets). Ignored for other flow types. With sticky
+sampling, "fullrank" releases frozen coordinates with the experimental
+boundary-proposal law; "diagonal" uses the stored-velocity law.}
 
 \item{materialize}{Logical. If \code{TRUE} (default), the chain skeleton is
 immediately extracted from Julia into R so that \code{saveRDS()} /

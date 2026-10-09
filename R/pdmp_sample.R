@@ -571,7 +571,9 @@ validate_support_boundary_control <- function(support_boundary) {
 #'   \code{x0 = NULL}.
 #' @param adaptive_scheme Character string, adaptation scheme for AdaptiveBoomerang.
 #'   One of "diagonal" (default, O(d) per update) or "fullrank" (O(d^3) per update,
-#'   better for correlated targets). Ignored for other flow types.
+#'   better for correlated targets). Ignored for other flow types. With sticky
+#'   sampling, "fullrank" releases frozen coordinates with the experimental
+#'   boundary-proposal law; "diagonal" uses the stored-velocity law.
 #' @param materialize Logical. If \code{TRUE} (default), the chain skeleton is
 #'   immediately extracted from Julia into R so that \code{saveRDS()} /
 #'   \code{readRDS()} work without any extra steps. Set to \code{FALSE} to skip

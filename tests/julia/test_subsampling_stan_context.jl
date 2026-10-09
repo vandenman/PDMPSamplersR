@@ -93,9 +93,10 @@ using .PDMPSamplersRBridge
         2 * counter["selected_gradient_calls"], two_counts)
 
     slab = Dict{String,Any}(
-        "type" => "independent_slab_density",
+        "type" => "dense_gaussian",
         "coef" => ["beta"],
-        "kappa" => [inv(2sqrt(2pi))])
+        "mean" => [0.0],
+        "cov" => fill(4.0, 1, 1))
     prepared_sticky = PDMPSamplersRBridge.prepare_stan_subsampling(
         lib, full, prior, subsampling, 1)
     sticky_subsampling = PDMPSamplersRBridge.r_pdmp_stan_subsampling(

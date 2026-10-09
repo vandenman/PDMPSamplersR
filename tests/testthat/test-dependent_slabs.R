@@ -1,28 +1,24 @@
 test_that("dependent slab constructors create validated specs", {
-  indep <- independent_slab_density(c(0.5, 1), coef = c("b.x1", "b.x2"))
-  expect_s3_class(indep, "dependent_slab_prior")
-  expect_equal(indep$type, "independent_slab_density")
-  expect_equal(indep$coef, c("b.x1", "b.x2"))
-
-  dense <- dense_gaussian_slab(c(0, 1), diag(2), coef = 2:3)
+  dense <- dense_gaussian_slab(c(0, 1), diag(2), coef = c("b.x1", "b.x2"))
   expect_s3_class(dense, "dependent_slab_prior")
   expect_equal(dense$type, "dense_gaussian")
+  expect_equal(dense$coef, c("b.x1", "b.x2"))
 
   exch <- exchangeable_gaussian_slab(u = 2, v = 0.1)
   expect_equal(exch$type, "exchangeable_gaussian")
   expect_true(exch$zero_mean)
 
-  logscale <- independent_logscale_gaussian_slab(log_base_scales = c(0, 1), logscale = "log_tau", coef = c("b.x1", "b.x2"))
-  expect_equal(logscale$type, "independent_logscale_gaussian")
+  logscale <- loglinear_gaussian_scale_slab(c(0, 1), logscale = "log_tau",
+    logscale_design = matrix(1, 2, 1), coef = c("b.x1", "b.x2"))
+  expect_equal(logscale$type, "loglinear_gaussian_scale")
 })
 
 test_that("dependent slab constructors reject invalid inputs", {
-  expect_error(independent_slab_density(0), "positive")
   expect_error(dense_gaussian_slab(0, matrix(1, 2, 2)), "dimensions|dim")
   expect_error(dense_gaussian_slab(c(0, 0), matrix(c(1, 2, 0, 1), 2)), "symmetric")
   expect_error(exchangeable_gaussian_slab(mean = 1, u = 1, v = 0), "mean")
   expect_error(exchangeable_gaussian_slab(u = 1, v = 0, coef = list(a = 1)), "coef")
-  expect_error(independent_logscale_gaussian_slab(0, list(a = 1)), "logscale")
+  expect_error(loglinear_gaussian_scale_slab(0, list(a = 1), matrix(1, 1, 1)), "logscale")
 })
 
 test_that("validate_pdmp_params separates legacy and dependent sticky modes", {
@@ -33,7 +29,7 @@ test_that("validate_pdmp_params separates legacy and dependent sticky modes", {
       sticky = TRUE, can_stick = c(TRUE, TRUE, FALSE),
       model_prior = bernoulli(0.5),
       parameter_prior = rep(1, d),
-      slab_prior = independent_slab_density(1)
+      slab_prior = exchangeable_gaussian_slab(u = 1, v = 0)
     ),
     "either"
   )
@@ -41,7 +37,7 @@ test_that("validate_pdmp_params separates legacy and dependent sticky modes", {
   params <- PDMPSamplersR:::validate_pdmp_params(
     d, "ZigZag", "GridThinningStrategy", 10,
     sticky = TRUE, can_stick = c(TRUE, TRUE, FALSE),
-    model_prior = exchangeable_model_size_prior(c(1, 1, 1)),
+    model_prior = betabernoulli(1, 1),
     slab_prior = exchangeable_gaussian_slab(u = 1, v = 0)
   )
   expect_true(PDMPSamplersR:::is.slab_prior(params$slab_prior))
@@ -51,7 +47,7 @@ test_that("validate_pdmp_params separates legacy and dependent sticky modes", {
     d, "AdaptiveBoomerang", "GridThinningStrategy", 10,
     sticky = TRUE, can_stick = c(TRUE, TRUE, FALSE),
     model_prior = bernoulli(0.5),
-    slab_prior = independent_slab_density(1)
+    slab_prior = exchangeable_gaussian_slab(u = 1, v = 0)
   )
   expect_identical(adaptive$flow, "AdaptiveBoomerang")
   expect_silent(PDMPSamplersR:::.validate_dependent_slab_early(
@@ -95,7 +91,8 @@ test_that("slab_prior requires sticky and reconciles coef with can_stick", {
       d, "ZigZag", "GridThinningStrategy", 10,
       sticky = TRUE, can_stick = c(TRUE, TRUE, FALSE, FALSE),
       model_prior = bernoulli(0.5),
-      slab_prior = independent_logscale_gaussian_slab(0, logscale = 1, coef = 1)
+      slab_prior = loglinear_gaussian_scale_slab(0, logscale = 1,
+        logscale_design = matrix(1, 1, 1), coef = 1)
     ),
     "disjoint"
   )
@@ -118,47 +115,6 @@ test_that("slab_prior requires sticky and reconciles coef with can_stick", {
       slab_prior = dense_gaussian_slab(0, matrix(1, 1, 1), coef = "b.x")
     ),
     "unconstrained parameter names"
-  )
-
-  expect_error(
-    PDMPSamplersR:::validate_pdmp_params(
-      d, "ZigZag", "GridThinningStrategy", 10,
-      sticky = TRUE, can_stick = NULL,
-      model_prior = exchangeable_model_size_prior(c(1, 1)),
-      slab_prior = slab
-    ),
-    "beta dimension"
-  )
-})
-
-test_that("callback Gaussian slabs require active negative gradient for sampling", {
-  callback_slab <- gaussian_scale_mixture_slab(function(x) {
-    list(mean = rep(0, 2), cov = diag(2))
-  })
-
-  expect_error(
-    PDMPSamplersR:::validate_pdmp_params(
-      2, "ZigZag", "GridThinningStrategy", 10,
-      sticky = TRUE,
-      can_stick = c(TRUE, TRUE),
-      model_prior = bernoulli(0.5),
-      slab_prior = callback_slab
-    ),
-    "active_prior_neggrad"
-  )
-
-  expect_error(
-    pdmp_sample(
-      function(x) x,
-      d = 2,
-      flow = "ZigZag",
-      algorithm = "GridThinningStrategy",
-      sticky = TRUE,
-      can_stick = c(TRUE, TRUE),
-      model_prior = bernoulli(0.5),
-      slab_prior = callback_slab
-    ),
-    "active_prior_neggrad"
   )
 })
 
@@ -264,15 +220,11 @@ test_that("Julia bridge builds dependent slab concrete types", {
   provider_type <- JuliaCall::julia_eval("string(typeof(build_slab_provider(r_dense_slab, r_unc_names, r_can_stick, 3)))")
   expect_match(provider_type, "DenseGaussianSlab")
 
-  indep <- independent_slab_density(1, coef = c("b.x1", "b.x2"))
-  JuliaCall::julia_assign("r_indep_slab", indep)
-  indep_provider_type <- JuliaCall::julia_eval("string(typeof(build_slab_provider(r_indep_slab, r_unc_names, r_can_stick, 3)))")
-  expect_match(indep_provider_type, "IndependentZeroMeanGaussianSlab")
-
-  logscale <- independent_logscale_gaussian_slab(0, logscale = "b.Intercept", coef = c("b.x1", "b.x2"))
+  logscale <- loglinear_gaussian_scale_slab(0, logscale = "b.Intercept",
+    logscale_design = matrix(1, 2, 1), coef = c("b.x1", "b.x2"))
   JuliaCall::julia_assign("r_logscale_slab", logscale)
   logscale_provider_type <- JuliaCall::julia_eval("string(typeof(build_slab_provider(r_logscale_slab, r_unc_names, r_can_stick, 3)))")
-  expect_match(logscale_provider_type, "IndependentZeroMeanLogscaleGaussianSlab")
+  expect_match(logscale_provider_type, "LogLinearGaussianScaleSlab")
   logscale_clock_type <- JuliaCall::julia_eval("
     string(typeof(default_aggregate_unstick_clock(
       build_slab_provider(r_logscale_slab, r_unc_names, r_can_stick, 3),
@@ -335,85 +287,5 @@ test_that("Julia bridge builds dependent slab concrete types", {
   expect_match(adaptive_bridge[[2]], "HarmonicLogLinearAggregateClock")
   expect_true(adaptive_bridge[[3]])
   expect_true(adaptive_bridge[[4]])
-})
-
-test_that("Julia bridge executes R callback slab provider contracts", {
-  skip_on_cran()
-  skip_if_no_pdmp_julia_backend()
-
-  callback_slab <- gaussian_scale_mixture_slab(
-    mean_cov = function(x) {
-      list(
-        mean = c(0.25 + x[[2]], -0.5),
-        cov = matrix(c(2.0, 0.3, 0.3, 1.5), 2, 2)
-      )
-    },
-    active_prior_neggrad = function(x, active) {
-      out <- numeric(length(x))
-      if (active[[1]]) out[[1]] <- x[[1]] - 0.25
-      if (active[[2]]) out[[3]] <- 2 * x[[3]]
-      out
-    },
-    coef = c("b.one", "b.three")
-  )
-  arbitrary_slab <- arbitrary_slab_boundary(
-    log_q_zero = function(x, active, j) {
-      -0.5 * j + sum(active) + x[[2]]
-    },
-    active_prior_neggrad = function(x, active) {
-      out <- numeric(length(x))
-      if (active[[1]]) out[[1]] <- 3 * x[[1]]
-      if (active[[2]]) out[[3]] <- 4 * x[[3]]
-      out
-    },
-    coef = c("b.one", "b.three")
-  )
-
-  JuliaCall::julia_assign("r_callback_slab", callback_slab)
-  JuliaCall::julia_assign("r_arbitrary_slab", arbitrary_slab)
-  JuliaCall::julia_assign("r_callback_can_stick", c(TRUE, FALSE, TRUE))
-  JuliaCall::julia_assign("r_callback_names", c("b.one", "b.two", "b.three"))
-  JuliaCall::julia_assign("r_callback_missing_grad", gaussian_scale_mixture_slab(
-    mean_cov = function(x) list(mean = c(0, 0), cov = diag(2)),
-    coef = c("b.one", "b.three")
-  ))
-
-  expect_true(JuliaCall::julia_eval("
-    begin
-      provider = build_slab_provider(r_callback_slab, r_callback_names, r_callback_can_stick, 3)
-      mean, cov = PDMPSamplers.gaussian_slab(provider, [1.0, 2.0, -1.0])
-      mean ≈ [2.25, -0.5] && cov ≈ [2.0 0.3; 0.3 1.5]
-    end
-  "))
-  expect_true(JuliaCall::julia_eval("
-    begin
-      provider = build_slab_provider(r_callback_slab, r_callback_names, r_callback_can_stick, 3)
-      out = fill(NaN, 3)
-      PDMPSamplers.active_prior_neggrad!(provider, out,
-        [1.0, 2.0, -1.0], BitVector([true, true]))
-      out ≈ [0.75, 0.0, -2.0]
-    end
-  "))
-  expect_true(JuliaCall::julia_eval("
-    begin
-      provider = build_slab_provider(r_arbitrary_slab, r_callback_names, r_callback_can_stick, 3)
-      active = BitVector([true, false])
-      PDMPSamplers.log_boundary_density_zero(
-        provider, [1.0, 2.0, -1.0], active, 2) ≈ 2.0
-    end
-  "))
-  expect_true(JuliaCall::julia_eval("
-    begin
-      provider = build_slab_provider(r_arbitrary_slab, r_callback_names, r_callback_can_stick, 3)
-      out = fill(NaN, 3)
-      PDMPSamplers.active_prior_neggrad!(provider, out,
-        [1.0, 2.0, -1.0], BitVector([true, true]))
-      out ≈ [3.0, 0.0, -4.0]
-    end
-  "))
-  expect_error(
-    JuliaCall::julia_eval("PDMPSamplersRBridge._validate_sampling_slab_prior(r_callback_missing_grad)"),
-    "active_prior_neggrad"
-  )
 })
 

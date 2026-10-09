@@ -159,8 +159,7 @@ must match the number of supported coefficients. If omitted, all
 non-intercept population-level coefficients are candidates.}
 
 \item{model_prior}{A [bernoulli()] or [betabernoulli()] object specifying
-the prior on model space. Dependent slabs also accept
-[exchangeable_model_size_prior()].}
+the prior on model space.}
 
 \item{kappa}{Optional numeric vector of slab densities at zero for each
 stickable coordinate (kappa in the sticky PDMP literature). If omitted,
@@ -169,9 +168,8 @@ derived automatically from the brms prior specification (only
 derivation).}
 
 \item{slab_prior}{Optional dependent slab prior created by
-[dense_gaussian_slab()], [exchangeable_gaussian_slab()],
-[independent_slab_density()], [gaussian_scale_mixture_slab()], or
-[arbitrary_slab_boundary()]. Mutually exclusive with `kappa`. Full-data
+[dense_gaussian_slab()], [exchangeable_gaussian_slab()], or
+[loglinear_gaussian_scale_slab()]. Mutually exclusive with `kappa`. Full-data
 dependent slabs use the brms prior-only data as the base prior target;
 subsampled brms dependent slabs are not yet supported. Adaptive Boomerang
 is supported with `GridThinningStrategy` and requires positive warmup

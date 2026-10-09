@@ -259,9 +259,6 @@ validate_pdmp_params <- function(d, flow, algorithm, T, t0 = 0.0, t_warmup = 0.0
     }
 
     if (is.null(slab_prior)) {
-      if (is.exchangeable_model_size_prior(model_prior)) {
-        cli::cli_abort("{.fn exchangeable_model_size_prior} requires dependent {.arg slab_prior}; it is not supported by legacy sticky sampling.")
-      }
       if (is.null(parameter_prior))
         cli::cli_abort("Argument {.arg parameter_prior} must be provided for legacy sticky sampling. Use {.arg slab_prior} for the dependent aggregate sticky path.")
 
@@ -360,7 +357,6 @@ validate_pdmp_params <- function(d, flow, algorithm, T, t0 = 0.0, t_warmup = 0.0
 
 .validate_slab_prior_dimensions <- function(slab_prior, d, can_stick, unc_names = NULL, model_prior = NULL) {
   if (is.null(slab_prior)) return(invisible(TRUE))
-  .validate_slab_prior_sampling_contract(slab_prior)
   coef_idx <- .slab_coef_indices(slab_prior, d, unc_names = unc_names)
   p <- if (is.null(coef_idx)) sum(can_stick) else length(coef_idx)
   if (p == 0L) {
@@ -369,9 +365,6 @@ validate_pdmp_params <- function(d, flow, algorithm, T, t0 = 0.0, t_warmup = 0.0
   if (!is.null(coef_idx) && !all(can_stick[coef_idx])) {
     cli::cli_abort("Explicit slab {.arg coef} must be a subset of coordinates enabled by {.arg can_stick}.")
   }
-  if (!is.null(model_prior) && is.exchangeable_model_size_prior(model_prior) && length(model_prior$omega) != p + 1L) {
-    cli::cli_abort("For {.fn exchangeable_model_size_prior}, {.arg omega} must have length slab beta dimension + 1 ({p + 1L}).")
-  }
   if (slab_prior$type == "dense_gaussian") {
     if (length(slab_prior$mean) != p) {
       cli::cli_abort("Length of {.arg mean} must match the number of slab coefficients.")
@@ -379,29 +372,9 @@ validate_pdmp_params <- function(d, flow, algorithm, T, t0 = 0.0, t_warmup = 0.0
     if (!all(dim(slab_prior$cov) == c(p, p))) {
       cli::cli_abort("Dimensions of {.arg cov} must match the number of slab coefficients.")
     }
-  } else if (slab_prior$type == "independent_slab_density") {
-    if (!(length(slab_prior$kappa) %in% c(1L, p))) {
-      cli::cli_abort("Argument {.arg kappa} must be length 1 or match the number of slab coefficients.")
-    }
   } else if (slab_prior$type == "exchangeable_gaussian") {
     if (slab_prior$u + p * slab_prior$v <= 0) {
       cli::cli_abort("Exchangeable slab covariance requires {.code u + p * v > 0}.")
-    }
-  } else if (slab_prior$type == "independent_logscale_gaussian") {
-    logscale_idx <- .slab_state_indices(slab_prior$logscale, d, unc_names, arg = "logscale")
-    if (length(logscale_idx) == 1L) logscale_idx <- rep(logscale_idx, p)
-    if (length(logscale_idx) != p) {
-      cli::cli_abort("Argument {.arg logscale} must have length 1 or match the number of slab coefficients.")
-    }
-    beta_idx <- if (is.null(coef_idx)) which(can_stick) else coef_idx
-    if (length(slab_prior$log_base_scales) != 1L && length(slab_prior$log_base_scales) != p) {
-      cli::cli_abort("Argument {.arg log_base_scales} must have length 1 or match the number of slab coefficients.")
-    }
-    if (length(intersect(beta_idx, logscale_idx)) > 0L) {
-      cli::cli_abort("Slab {.arg logscale} coordinates must be disjoint from slab {.arg coef} coordinates.")
-    }
-    if (any(can_stick[unique(logscale_idx)])) {
-      cli::cli_abort("Slab {.arg logscale} coordinates must be non-stickable.")
     }
   } else if (slab_prior$type == "loglinear_gaussian_scale") {
     logscale_idx <- .slab_state_indices(slab_prior$logscale, d, unc_names, arg = "logscale")
@@ -426,21 +399,9 @@ validate_pdmp_params <- function(d, flow, algorithm, T, t0 = 0.0, t_warmup = 0.0
   invisible(TRUE)
 }
 
-.validate_slab_prior_sampling_contract <- function(slab_prior) {
-  if (is.null(slab_prior)) return(invisible(TRUE))
-  if (identical(slab_prior$type, "callback_gaussian") &&
-      !rlang::is_function(slab_prior$active_prior_neggrad)) {
-    cli::cli_abort(
-      "{.fn gaussian_scale_mixture_slab} requires {.arg active_prior_neggrad} when used for dependent-slab sampling."
-    )
-  }
-  invisible(TRUE)
-}
-
 .validate_dependent_slab_early <- function(slab_prior, sticky, flow, algorithm,
                                            model_prior, parameter_prior) {
   if (is.null(slab_prior)) return(invisible(TRUE))
-  .validate_slab_prior_sampling_contract(slab_prior)
   if (!isTRUE(sticky)) {
     cli::cli_abort("Argument {.arg slab_prior} requires {.arg sticky} to be {.code TRUE}.")
   }
@@ -598,14 +559,12 @@ validate_support_boundary_control <- function(support_boundary) {
 #'   curvature when no exact Hessian-vector product is used.
 #' @param sticky Logical, whether to use sticky sampling (default: FALSE).
 #' @param can_stick Logical vector of length d, which coordinates can stick (default: all FALSE).
-#' @param model_prior Prior distribution object for model selection. Legacy
-#'   sticky sampling accepts \code{bernoulli()} or \code{betabernoulli()}.
-#'   Dependent-slab sampling also accepts \code{exchangeable_model_size_prior()}.
+#' @param model_prior Prior distribution object for model selection:
+#'   \code{bernoulli()} or \code{betabernoulli()}.
 #' @param parameter_prior Numeric vector of length d, prior parameters for sticky sampling (default: NULL).
 #' @param slab_prior Optional dependent slab prior created by
 #'   \code{dense_gaussian_slab()}, \code{exchangeable_gaussian_slab()},
-#'   \code{independent_slab_density()}, \code{gaussian_scale_mixture_slab()},
-#'   or \code{arbitrary_slab_boundary()}. Mutually exclusive with
+#'   or \code{loglinear_gaussian_scale_slab()}. Mutually exclusive with
 #'   \code{parameter_prior}. The full target supplied through \code{f} must
 #'   contain the complete coherent slab represented by \code{slab_prior}; the
 #'   package replaces that slab by its active-face restriction internally.

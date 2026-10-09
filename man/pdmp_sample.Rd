@@ -87,16 +87,14 @@ Only used with GridThinningStrategy to compute the Hessian-vector product.}
 
 \item{can_stick}{Logical vector of length d, which coordinates can stick (default: all FALSE).}
 
-\item{model_prior}{Prior distribution object for model selection. Legacy
-sticky sampling accepts \code{bernoulli()} or \code{betabernoulli()}.
-Dependent-slab sampling also accepts \code{exchangeable_model_size_prior()}.}
+\item{model_prior}{Prior distribution object for model selection:
+\code{bernoulli()} or \code{betabernoulli()}.}
 
 \item{parameter_prior}{Numeric vector of length d, prior parameters for sticky sampling (default: NULL).}
 
 \item{slab_prior}{Optional dependent slab prior created by
 \code{dense_gaussian_slab()}, \code{exchangeable_gaussian_slab()},
-\code{independent_slab_density()}, \code{gaussian_scale_mixture_slab()},
-or \code{arbitrary_slab_boundary()}. Mutually exclusive with
+or \code{loglinear_gaussian_scale_slab()}. Mutually exclusive with
 \code{parameter_prior}. The full target supplied through \code{f} must
 contain the complete coherent slab represented by \code{slab_prior}; the
 package replaces that slab by its active-face restriction internally.}

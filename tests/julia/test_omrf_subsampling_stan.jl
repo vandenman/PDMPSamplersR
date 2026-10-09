@@ -3811,9 +3811,10 @@ end
             "weights" => fill(2.0, 1, 4),
             "growth_rates" => [0.0]))
     slab = Dict{String,Any}(
-        "type" => "independent_slab_density",
+        "type" => "dense_gaussian",
         "coef" => ["beta"],
-        "kappa" => [inv(2sqrt(2pi))])
+        "mean" => [0.0],
+        "cov" => fill(4.0, 1, 1))
     prepared = PDMPSamplersRBridge.prepare_stan_subsampling(
         lib, full, prior, subsampling, 1)
     model, ctx, _ = PDMPSamplersRBridge._build_stan_subsampling_model(
@@ -3889,9 +3890,10 @@ end
             "weights" => weights, "growth_rates" => [0.0]))
     prior_sd = 1.25
     slab = Dict{String,Any}(
-        "type" => "independent_slab_density",
+        "type" => "dense_gaussian",
         "coef" => ["interaction"],
-        "kappa" => [inv(sqrt(2pi) * prior_sd)])
+        "mean" => [0.0],
+        "cov" => fill(prior_sd^2, 1, 1))
     prepared = PDMPSamplersRBridge.prepare_stan_subsampling(
         lib, full, prior, subsampling, 1)
     sampled = PDMPSamplersRBridge.r_pdmp_stan_subsampling(

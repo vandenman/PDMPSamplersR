@@ -398,11 +398,6 @@ function build_model_prior_odds(model_prior, beta_indices::AbstractVector{Int}, 
         else
             throw(DimensionMismatch("Bernoulli model prior length must be 1, beta dimension, or full dimension"))
         end
-    elseif _haskey(model_prior, :omega)
-        omega = _as_float_vector(_rget(model_prior, :omega))
-        length(omega) == m + 1 ||
-            throw(DimensionMismatch("exchangeable model-size prior must have length beta dimension + 1"))
-        return ExchangeableModelSizePrior(log.(omega); normalize=true)
     elseif _haskey(model_prior, :a) && _haskey(model_prior, :b)
         return PDMPSamplers.BetaBernoulliModelPrior(
             m, Float64(_rget(model_prior, :a)), Float64(_rget(model_prior, :b)))
@@ -426,26 +421,6 @@ function build_slab_provider(slab_prior, unc_names::AbstractVector{<:AbstractStr
             return ExchangeableGaussianSlab(beta_idx, Float64(_rget(slab_prior, :mean)),
                 Float64(_rget(slab_prior, :u)), Float64(_rget(slab_prior, :v)))
         end
-    elseif t == "independent_slab_density"
-        κ = _as_float_vector(_rget(slab_prior, :kappa))
-        length(κ) == 1 && (κ = fill(κ[1], length(beta_idx)))
-        length(κ) == length(beta_idx) ||
-            throw(DimensionMismatch("independent_slab_density kappa length must be 1 or beta dimension"))
-        return IndependentZeroMeanGaussianSlab(κ, beta_idx)
-    elseif t == "independent_logscale_gaussian"
-        log_base_scales = _as_float_vector(_rget(slab_prior, :log_base_scales))
-        length(log_base_scales) == 1 && (log_base_scales = fill(log_base_scales[1], length(beta_idx)))
-        length(log_base_scales) == length(beta_idx) ||
-            throw(DimensionMismatch("independent_logscale_gaussian_slab log_base_scales length must be 1 or beta dimension"))
-        logscale_idx = _state_indices(_rget(slab_prior, :logscale), unc_names, d, "logscale")
-        length(logscale_idx) == 1 && (logscale_idx = fill(logscale_idx[1], length(beta_idx)))
-        length(logscale_idx) == length(beta_idx) ||
-            throw(DimensionMismatch("independent_logscale_gaussian_slab logscale length must be 1 or beta dimension"))
-        isempty(intersect(beta_idx, logscale_idx)) ||
-            throw(ArgumentError("independent_logscale_gaussian_slab logscale coordinates must be disjoint from slab coef coordinates"))
-        any(i -> can_stick[i], unique(logscale_idx)) &&
-            throw(ArgumentError("independent_logscale_gaussian_slab logscale coordinates must be non-stickable"))
-        return IndependentZeroMeanLogscaleGaussianSlab(beta_idx, logscale_idx, log_base_scales)
     elseif t == "loglinear_gaussian_scale"
         log_base_scales = _as_float_vector(_rget(slab_prior, :log_base_scales))
         length(log_base_scales) == 1 &&
@@ -472,32 +447,6 @@ function build_slab_provider(slab_prior, unc_names::AbstractVector{<:AbstractStr
                 log_base_scales, rowptr, colidx, nzval)
         end
         throw(ArgumentError("unknown logscale_design storage $storage"))
-    elseif t == "callback_gaussian"
-        mean_cov_r = _rget(slab_prior, :mean_cov)
-        active_prior_neggrad_r = _rget(slab_prior, :active_prior_neggrad)
-        mean_cov! = (mean_out, cov_out, x) -> begin
-            spec = mean_cov_r(Vector{Float64}(x))
-            copyto!(mean_out, _as_float_vector(_rget(spec, :mean)))
-            copyto!(cov_out, _as_float_matrix(_rget(spec, :cov)))
-            return nothing
-        end
-        active_prior_grad! = isnothing(active_prior_neggrad_r) ? nothing :
-            (out, x, active) -> begin
-                values = _as_float_vector(active_prior_neggrad_r(Vector{Float64}(x), Vector{Bool}(active)))
-                copyto!(out, values)
-                return out
-            end
-        return CallbackGaussianSlab(beta_idx; mean_cov!, active_prior_grad!)
-    elseif t == "arbitrary_boundary"
-        log_q_zero_r = _rget(slab_prior, :log_q_zero)
-        active_prior_neggrad_r = _rget(slab_prior, :active_prior_neggrad)
-        active_prior_neggrad! = (out, x, active) -> begin
-            values = _as_float_vector(active_prior_neggrad_r(Vector{Float64}(x), Vector{Bool}(active)))
-            copyto!(out, values)
-            return out
-        end
-        log_q_zero! = (x, active, j) -> Float64(log_q_zero_r(Vector{Float64}(x), Vector{Bool}(active), Int(j)))
-        return ArbitrarySlabBoundary(beta_idx; active_prior_neggrad!, log_q_zero!)
     else
         throw(ArgumentError("unknown slab_prior type: $t"))
     end
@@ -523,21 +472,12 @@ function wrap_dependent_sticky(alg::PDMPSamplers.PoissonTimeStrategy, sticky::Bo
     return AggregateSticky(alg, clock, BitVector(can_stick))
 end
 
-function _validate_sampling_slab_prior(slab_prior)
-    isnothing(slab_prior) && return nothing
-    if _slab_type(slab_prior) == "callback_gaussian" && isnothing(_rget(slab_prior, :active_prior_neggrad))
-        throw(ArgumentError("gaussian_scale_mixture_slab requires active_prior_neggrad when used for dependent-slab sampling"))
-    end
-    return nothing
-end
-
 function _build_dependent_slab_model(
         posterior_model::PDMPModel,
         model_prior,
         slab_prior,
         can_stick,
         unc_names::AbstractVector{<:AbstractString}=String[])
-    _validate_sampling_slab_prior(slab_prior)
     d = posterior_model.d
     provider = build_slab_provider(slab_prior, unc_names, can_stick, d)
     odds = build_model_prior_odds(model_prior, PDMPSamplers.beta_indices(provider), d)
@@ -2068,7 +2008,6 @@ function r_pdmp_custom(
     model = if isnothing(slab_prior)
         PDMPModel(d, FullGradient(grad!), hvp)
     else
-        _validate_sampling_slab_prior(slab_prior)
         provider = build_slab_provider(slab_prior, String[], can_stick_vec, d)
         odds = build_model_prior_odds(model_prior, PDMPSamplers.beta_indices(provider), d)
         target = DependentSlabTarget(d, grad!, provider, odds;

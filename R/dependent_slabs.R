@@ -6,8 +6,8 @@
 #' boundary-density convention in which outgoing boundary velocities are drawn
 #' by the aggregate sticky kernel.
 #'
-#' @param kappa Positive slab density at zero. A scalar is recycled by the
-#'   Julia bridge over the selected sticky coefficients.
+#' @param mean Numeric mean vector for a fixed Gaussian slab.
+#' @param cov Positive-definite covariance matrix for a fixed Gaussian slab.
 #' @param coef Optional character vector of unconstrained coefficient names, or
 #'   integer vector of 1-based unconstrained parameter indices, controlled by
 #'   this slab. If omitted, the bridge uses \code{can_stick}.
@@ -15,15 +15,7 @@
 #' @returns A slab prior specification for the dependent aggregate sticky
 #'   bridge.
 #'
-#' @export
-independent_slab_density <- function(kappa, coef = NULL) {
-  validate_type(kappa, type = "double", positive = TRUE)
-  .new_slab_prior("independent_slab_density", list(kappa = kappa), coef = coef)
-}
-
-#' @rdname independent_slab_density
-#' @param mean Numeric mean vector for a fixed Gaussian slab.
-#' @param cov Positive-definite covariance matrix for a fixed Gaussian slab.
+#' @rdname dependent_slab_priors
 #' @export
 dense_gaussian_slab <- function(mean, cov, coef = NULL) {
   validate_type(mean, type = "double")
@@ -37,7 +29,7 @@ dense_gaussian_slab <- function(mean, cov, coef = NULL) {
   .new_slab_prior("dense_gaussian", list(mean = mean, cov = cov), coef = coef)
 }
 
-#' @rdname independent_slab_density
+#' @rdname dependent_slab_priors
 #' @param mean Common mean for an exchangeable Gaussian slab.
 #' @param u Diagonal covariance component in \eqn{u I + v 11'}.
 #' @param v Rank-one covariance component in \eqn{u I + v 11'}.
@@ -59,55 +51,11 @@ exchangeable_gaussian_slab <- function(mean = 0, u, v, zero_mean = TRUE, coef = 
   )
 }
 
-#' @rdname independent_slab_density
-#' @param mean_cov R function for state-dependent Gaussian slab callbacks.
-#'   It is called as \code{mean_cov(x)} and should return a list with numeric
-#'   fields \code{mean} and \code{cov}.
-#' @param active_prior_neggrad R function for the active slab
-#'   negative-gradient contribution. It is called as
-#'   \code{active_prior_neggrad(x, active)}, where \code{active} is a logical
-#'   vector over the slab coefficients, and should return a full unconstrained
-#'   negative-gradient vector. This callback is required when a callback
-#'   Gaussian slab is used for dependent-slab sampling.
-#' @export
-gaussian_scale_mixture_slab <- function(mean_cov, active_prior_neggrad = NULL, coef = NULL) {
-  if (!rlang::is_function(mean_cov)) {
-    cli::cli_abort("Argument {.arg mean_cov} must be a function.")
-  }
-  if (!is.null(active_prior_neggrad) && !rlang::is_function(active_prior_neggrad)) {
-    cli::cli_abort("Argument {.arg active_prior_neggrad} must be NULL or a function.")
-  }
-  .new_slab_prior(
-    "callback_gaussian",
-    list(mean_cov = mean_cov, active_prior_neggrad = active_prior_neggrad),
-    coef = coef
-  )
-}
-
-#' @rdname independent_slab_density
-#' @param log_base_scales Numeric log base standard deviations for structured
-#'   independent log-scale Gaussian slabs.
-#' @param logscale Integer or character vector of unconstrained log-scale
-#'   coordinate indices/names. A scalar is recycled over selected coefficients.
-#' @export
-independent_logscale_gaussian_slab <- function(log_base_scales, logscale, coef = NULL) {
-  validate_type(log_base_scales, type = "double")
-  if (!(is.character(logscale) || rlang::is_integerish(logscale))) {
-    cli::cli_abort("Argument {.arg logscale} must be a character or integer vector.")
-  }
-  if (!is.character(logscale)) {
-    logscale <- as.integer(logscale)
-  }
-  .new_slab_prior(
-    "independent_logscale_gaussian",
-    list(log_base_scales = log_base_scales, logscale = logscale),
-    coef = coef
-  )
-}
-
-#' @rdname independent_slab_density
+#' @rdname dependent_slab_priors
 #' @param log_base_sd Numeric log base standard deviations. A scalar is
 #'   recycled over the selected coefficients.
+#' @param logscale Integer or character vector of unconstrained log-scale
+#'   coordinate indices/names.
 #' @param logscale_design Numeric coefficient-by-logscale design matrix. Sparse
 #'   matrices are accepted and retained as a compact specification.
 #' @export
@@ -153,25 +101,6 @@ loglinear_gaussian_scale_slab <- function(log_base_sd, logscale,
     "loglinear_gaussian_scale",
     list(log_base_scales = log_base_sd, logscale = logscale,
          logscale_design = design),
-    coef = coef
-  )
-}
-
-#' @rdname independent_slab_density
-#' @param log_q_zero R function returning a boundary log-density at zero. It is
-#'   called as \code{log_q_zero(x, active, j)}, where \code{j} is a 1-based slab
-#'   coefficient index.
-#' @export
-arbitrary_slab_boundary <- function(log_q_zero, active_prior_neggrad, coef = NULL) {
-  if (!rlang::is_function(log_q_zero)) {
-    cli::cli_abort("Argument {.arg log_q_zero} must be a function.")
-  }
-  if (!rlang::is_function(active_prior_neggrad)) {
-    cli::cli_abort("Argument {.arg active_prior_neggrad} must be a function.")
-  }
-  .new_slab_prior(
-    "arbitrary_boundary",
-    list(log_q_zero = log_q_zero, active_prior_neggrad = active_prior_neggrad),
     coef = coef
   )
 }

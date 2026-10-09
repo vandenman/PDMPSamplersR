@@ -170,7 +170,7 @@ test_that("pdmp_sample_from_stanmodel runs one-dimensional named independent sla
       sticky = TRUE,
       can_stick = TRUE,
       model_prior = bernoulli(0.5),
-      slab_prior = independent_slab_density(1, coef = "beta"),
+      slab_prior = dense_gaussian_slab(0, matrix(1 / (2 * pi), 1, 1), coef = "beta"),
       show_progress = FALSE,
       materialize = FALSE
     )

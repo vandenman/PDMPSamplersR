@@ -188,8 +188,8 @@ stopifnot(isTRUE(all.equal(
   tolerance = 1e-10
 )))
 
-slab <- independent_slab_density(
-  1 / (sqrt(2 * pi) * stan_data$prior_interaction_sd),
+slab <- dense_gaussian_slab(
+  0, matrix(stan_data$prior_interaction_sd^2, 1, 1),
   coef = "interactions_0"
 )
 common <- list(

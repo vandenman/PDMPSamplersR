@@ -19,20 +19,14 @@ a categorical-logit conditional whose non-reference logits are affine in the
 threshold and interaction parameters. The subsampling observation is therefore one
 person, including all node conditionals for that person.
 
-Let (B_n) vertically stack all node-specific affine logit maps for person
-(n). The block-diagonal categorical covariance has operator norm at most
-(1/2), so
-
-\[
-w_n = \frac12 \lVert B_n\rVert_{op}^2
-\]
-
-is a global nonnegative curvature coefficient. `omrf_residual_envelope()`
-computes these coefficients once from the ordinal scores and parameter-block
-names. Julia combines them with flow-specific displacement and velocity bounds
-inside its typed `SeparableResidualEnvelope`; no R callback runs in the event
-loop. Finite diagnostics below exercise the implementation, while the global
-categorical-logit curvature inequality is the guarantee.
+`omrf_residual_envelope()` specifies the analytic residual of a person's
+gradient relative to a Hessian control variate at the anchor. For every grid
+cell, Julia bounds the residual rate of each person-node conditional along the
+trajectory with the categorical remainder bound, and sums these bounds per
+person. A person is drawn with probability proportional to its bound and
+accepted by thinning against its exact rate; no R callback runs in the event
+loop. Finite diagnostics below exercise the implementation, while the
+certified cell bounds are the guarantee.
 
 ## Deterministic example and subset hook
 
@@ -83,7 +77,7 @@ envelope <- omrf_residual_envelope(
 anchor <- rep(0, 9L)
 subsampling <- stan_subsampling(
   n_observations = stan_data$N,
-  subsample_size = 3L,
+  subsample_size = 1L,
   prior_standata = prior_data,
   residual_envelope = envelope,
   anchor = anchor
@@ -143,7 +137,7 @@ stopifnot(isTRUE(all.equal(
   sum(vapply(seq_len(N), function(n) person_loglik(q, X[n, ]), numeric(1)))
 )))
 
-subset <- c(2L, 5L, 9L)
+subset <- 5L
 diagnostic <- stan_subsampling_diagnostics(
   compiled, stan_data, subsampling, position = q, subset = subset,
   velocity = seq(0.4, 1.2, length.out = 9L), flow = "ZigZag"
@@ -236,7 +230,7 @@ for (subsampling_fit in subsampling_fits) {
   if (is.environment(counters)) counters <- as.list(counters)
   stopifnot(
     counters$persons_evaluated ==
-      subsampling$subsample_size * counters$selected_gradient_calls,
+      subsampling$subsample_size * counters$analytic_residual_calls,
     counters$sampling_full_gradient_calls == 0L,
     counters$sampling_model_constructions == 0L,
     counters$sampling_data_constructions == 0L
@@ -244,9 +238,8 @@ for (subsampling_fit in subsampling_fits) {
 }
 ```
 
-The fixed-anchor observation-gradient cache removes the repeated anchor Stan
-evaluation, so each residual call performs one current-position selected
-gradient. `persons_evaluated` is exactly `m * selected_gradient_calls`.
+The analytic backend evaluates the selected person's residual natively, so
+`persons_evaluated` is exactly `m * analytic_residual_calls`.
 `initialization_full_gradient_calls` records the
 anchor preparation; `sampling_full_gradient_calls` must remain zero. Likewise,
 the initialization model/data construction counts are fixed before sampling,

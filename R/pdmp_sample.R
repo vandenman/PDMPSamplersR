@@ -35,8 +35,7 @@ with_seed <- function(code, seed = NULL) {
 }
 
 .position_bank_result_spec <- function(counters, supplied, endpoint,
-    selection_policy, unc_names, dataset_hash, envelope_hash, envelope,
-    node_support_order) {
+    unc_names, dataset_hash, envelope_hash, envelope) {
   counters <- if (is.list(counters)) counters else list()
   if (!is.null(supplied)) {
     # A supplied retained bank is immutable mathematical input. Counter
@@ -50,11 +49,6 @@ with_seed <- function(code, seed = NULL) {
         as.numeric(counters$anchor_distance_scales),
         as.numeric(supplied$distance_scales)))
       cli::cli_abort("The live position-bank distance scales differ from the supplied frozen scales.")
-    if (!is.null(supplied$warmup_bank_learning_policy) &&
-        !is.null(counters$warmup_bank_learning_policy) &&
-        !identical(as.character(counters$warmup_bank_learning_policy),
-                   as.character(supplied$warmup_bank_learning_policy)))
-      cli::cli_abort("The live HCV bank-learning policy differs from the supplied frozen bank.")
     spec <- supplied
     spec$immutable_envelope_grouping_spec <- envelope
   } else {
@@ -74,32 +68,9 @@ with_seed <- function(code, seed = NULL) {
       dataset_identity = list(hash = dataset_hash),
       envelope_identity = list(hash = envelope_hash),
       immutable_envelope_grouping_spec = envelope)
-    spec$warmup_bank_learning_policy <- as.character(
-      counters$warmup_bank_learning_policy %||% "geometric")
-    spec$warmup_bank_candidate_count <- as.integer(
-      counters$warmup_bank_candidate_count %||% 0L)
-    spec$warmup_bank_training_state_count <- as.integer(
-      counters$warmup_bank_training_state_count %||% 0L)
-    spec$warmup_bank_objective_single <- as.numeric(
-      counters$warmup_bank_objective_single %||% NA_real_)
-    spec$warmup_bank_objective_selected <- as.numeric(
-      counters$warmup_bank_objective_selected %||% NA_real_)
-    spec$warmup_bank_learning_seconds <- as.numeric(
-      counters$warmup_bank_learning_seconds %||% 0)
   }
   spec$physical_endpoint <- endpoint
   spec$frozen_flow <- if (is.null(endpoint)) NULL else endpoint$flow
-  if (identical(selection_policy, "node_position")) {
-    spec$selection_policy <- "node_position"
-    if (!is.null(counters$node_position_metric_variances))
-      spec$physical_velocity_variances <-
-        as.numeric(counters$node_position_metric_variances)
-    spec$node_support_order <- node_support_order(envelope, unc_names)
-    if (!is.null(counters$node_position_sources))
-      spec$selected_sources <- as.integer(counters$node_position_sources)
-    if (!is.null(counters$node_position_policy_version))
-      spec$policy_version <- as.integer(counters$node_position_policy_version)
-  }
   spec
 }
 
@@ -816,32 +787,21 @@ pdmp_sample <- function(f, d,
 #' @param subsampling Optional exact subsampling custom-Stan specification
 #'   created by [stan_subsampling()]. The selected Stan branch must add
 #'   the unscaled sum of the installed observations; Julia applies `N / m`.
-#' @param full_gradient Optional non-factorized native full-gradient backend.
-#'   Currently [omrf_full_gradient()] supports independent-prior OMRF models
-#'   and provides an exact native Hessian-vector product for Boomerang-family
-#'   and other full samplers.
+#' @param full_gradient Must be `NULL`. The native OMRF full-gradient backend
+#'   was removed; full-data runs use the Stan model's gradient.
 #' @param theta0 Optional initial velocity forwarded to both full-gradient and
 #'   custom-Stan subsampling initialization.
-#' @param subsampling_warmup Warmup gradient backend for subsampling runs.
-#'   `"subsampled"` preserves the existing behavior. `"full"` uses the exact
-#'   native OMRF full gradient and HVP during warmup, then switches to the
-#'   configured subsampling model for retained sampling.
 #' @param subsampling_anchor_updates Number of prepared OMRF anchors added from
-#'   continuous-time warmup means. With full-gradient subsampling warmup, zero
-#'   prepares only the exact terminal warmup anchor.
+#'   continuous-time warmup means.
 #' @param subsampling_use_anchor_bank Retain prepared OMRF anchors and select
 #'   the nearest entry at event boundaries. If false, updates replace the
-#'   active anchor. Full-gradient subsampling warmup can enable the bank with
-#'   zero scheduled updates because it prepares a terminal anchor.
+#'   active anchor.
 #' @param subsampling_anchor_bank_capacity Maximum prepared OMRF anchors kept
 #'   per chain.
 #' @param subsampling_anchor_selection_policy Research anchor-bank policy.
 #'   `"adaptive"` preserves the existing event-history/envelope policy;
-#'   `"position"` selects one frozen finite bank source by weighted position;
-#'   research-only `"node_position"` selects a first-order source separately
-#'   for every node using the frozen weighted-logit Gram rule. Global
-#'   `"position"` supports linear Zig--Zag/BPS and harmonic Boomerang flows;
-#'   `"node_position"` remains available only for linear BPS flows.
+#'   `"position"` selects one frozen finite bank source by weighted position
+#'   and supports linear Zig--Zag/BPS and harmonic Boomerang flows.
 #' @param subsampling_position_anchor_bank_spec Optional version-1 mathematical
 #'   position-bank specification saved on a previous result. Restoration
 #'   rebuilds prepared provider quantities from its ordered positions and
@@ -850,10 +810,6 @@ pdmp_sample <- function(f, d,
 #' @param subsampling_main_anchor_refresh_distance Positive Euclidean distance
 #'   from the nearest prepared anchor that triggers a new exact OMRF anchor
 #'   during main sampling. The default `Inf` disables main-phase preparation.
-#' @param subsampling_node_source_check_distance Nonnegative scaled Euclidean
-#'   movement required before reconsidering node-local warmup-bank sources.
-#'   Zero preserves checking at every event boundary. Skipped checks retain
-#'   the previous certified node sources and do not change the target.
 #' @param subsampling_require_no_main_full_data If `TRUE`, fail the run when
 #'   retained sampling performs any full-gradient evaluation, prepares an
 #'   anchor, or traverses every OMRF person-node conditional in native Julia.
@@ -884,14 +840,12 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
                         prior_stanmodel = NULL, prior_standata = NULL,
                         subsampling = NULL,
                         full_gradient = NULL,
-                        subsampling_warmup = c("subsampled", "full"),
                         subsampling_anchor_updates = 0L,
                         subsampling_use_anchor_bank = FALSE,
                         subsampling_anchor_bank_capacity = 8L,
-                        subsampling_anchor_selection_policy = c("adaptive", "position", "node_position"),
+                        subsampling_anchor_selection_policy = c("adaptive", "position"),
                         subsampling_position_anchor_bank_spec = NULL,
                         subsampling_main_anchor_refresh_distance = Inf,
-                        subsampling_node_source_check_distance = 0,
                         subsampling_require_no_main_full_data = FALSE,
                         subsampling_diagnostic_window = 0,
                         flow = c("ZigZag", "BouncyParticle", "Boomerang", "AdaptiveBoomerang", "PreconditionedZigZag", "PreconditionedBPS"),
@@ -969,7 +923,6 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
   algorithm <- match.arg(algorithm)
   adaptive_scheme <- match.arg(adaptive_scheme)
   flow_specification <- match.arg(flow_specification)
-  subsampling_warmup <- match.arg(subsampling_warmup)
   supplied_flow_specification <- !is.null(flow_mean) || !is.null(flow_cov)
   resolved_flow_specification <- if (!supplied_flow_specification) "generated" else
     if (flow_specification != "auto") flow_specification else
@@ -1003,37 +956,8 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
       !inherits(subsampling, "stan_subsampling")) {
     cli::cli_abort("Argument {.arg subsampling} must be created by {.fn stan_subsampling}.")
   }
-  if (!is.null(full_gradient) &&
-      !inherits(full_gradient, "omrf_full_gradient")) {
-    cli::cli_abort("Argument {.arg full_gradient} must be created by {.fn omrf_full_gradient}.")
-  }
-  if (!is.null(full_gradient) && !is.null(subsampling)) {
-    cli::cli_abort("Arguments {.arg full_gradient} and {.arg subsampling} are mutually exclusive.")
-  }
-  if (subsampling_warmup == "full") {
-    if (is.null(subsampling)) {
-      cli::cli_abort("Argument {.arg subsampling_warmup = \"full\"} requires {.arg subsampling}.")
-    }
-    if (!inherits(subsampling$residual_envelope, "omrf_residual_envelope") ||
-        !identical(subsampling$residual_envelope$backend, "analytic") ||
-        !identical(subsampling$residual_envelope$prior_backend, "analytic")) {
-      cli::cli_abort(paste0(
-        "Full-gradient subsampling warmup requires an analytic OMRF residual ",
-        "envelope with {.arg prior_backend = \"analytic\"}."))
-    }
-    if (t_warmup <= 0) {
-      cli::cli_abort("Full-gradient subsampling warmup requires positive {.arg t_warmup}.")
-    }
-  }
   if (!is.null(full_gradient)) {
-    # Preserve an explicitly supplied prior-only specification. This is
-    # necessary for dependent OMRF data objects that contain both independent
-    # Cauchy and node-scale fields; inferring from the full data would select
-    # the wrong analytic branch.
-    if (is.null(full_gradient$spec$analytic_prior)) {
-      full_gradient$spec <- .attach_omrf_analytic_prior(
-        full_gradient$spec, standata, "standata")
-    }
+    cli::cli_abort("Argument {.arg full_gradient} must be NULL; the native OMRF full-gradient backend was removed.")
   }
   if (!rlang::is_integerish(subsampling_anchor_updates, n = 1L, finite = TRUE) ||
       subsampling_anchor_updates < 0L) {
@@ -1051,7 +975,7 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
   subsampling_anchor_bank_capacity <- as.integer(subsampling_anchor_bank_capacity)
   subsampling_anchor_selection_policy <- match.arg(
     subsampling_anchor_selection_policy)
-  if (subsampling_anchor_selection_policy %in% c("position", "node_position") &&
+  if (identical(subsampling_anchor_selection_policy, "position") &&
       !isTRUE(subsampling_use_anchor_bank)) {
     cli::cli_abort(paste0(
       "Argument {.arg subsampling_anchor_selection_policy = \"position\"} ",
@@ -1066,14 +990,8 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
       "Argument {.arg subsampling_anchor_selection_policy = \"position\"} ",
       "requires linear Zig--Zag/BPS or harmonic Boomerang dynamics."))
   }
-  if (identical(subsampling_anchor_selection_policy, "node_position") &&
-      !resolved_flow %in% c("BouncyParticle", "PreconditionedBPS")) {
-    cli::cli_abort(paste0(
-      "Argument {.arg subsampling_anchor_selection_policy = \"node_position\"} ",
-      "is available only for linear BPS flows."))
-  }
   if (!is.null(subsampling_position_anchor_bank_spec) &&
-      !(subsampling_anchor_selection_policy %in% c("position", "node_position"))) {
+      !identical(subsampling_anchor_selection_policy, "position")) {
     cli::cli_abort(paste0(
       "Argument {.arg subsampling_position_anchor_bank_spec} requires ",
       "{.arg subsampling_anchor_selection_policy = \"position\"}."))
@@ -1091,16 +1009,6 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
   }
   subsampling_main_anchor_refresh_distance <-
     as.numeric(subsampling_main_anchor_refresh_distance)
-  if (!is.numeric(subsampling_node_source_check_distance) ||
-      length(subsampling_node_source_check_distance) != 1L ||
-      !is.finite(subsampling_node_source_check_distance) ||
-      subsampling_node_source_check_distance < 0) {
-    cli::cli_abort(paste0(
-      "Argument {.arg subsampling_node_source_check_distance} must be ",
-      "finite and nonnegative."))
-  }
-  subsampling_node_source_check_distance <-
-    as.numeric(subsampling_node_source_check_distance)
   if (!is.numeric(subsampling_diagnostic_window) ||
       length(subsampling_diagnostic_window) != 1L ||
       is.na(subsampling_diagnostic_window) ||
@@ -1119,12 +1027,11 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
       "TRUE or FALSE."))
   }
   if (isTRUE(subsampling_use_anchor_bank) && subsampling_anchor_updates == 0L &&
-      subsampling_warmup != "full" &&
       is.null(subsampling_position_anchor_bank_spec)) {
     cli::cli_abort(paste0(
       "Argument {.arg subsampling_use_anchor_bank = TRUE} requires positive ",
-      "{.arg subsampling_anchor_updates}, unless {.arg subsampling_warmup = \"full\"} ",
-      "prepares the terminal warmup anchor."))
+      "{.arg subsampling_anchor_updates} or ",
+      "{.arg subsampling_position_anchor_bank_spec}."))
   }
   if (is.finite(subsampling_main_anchor_refresh_distance) &&
       !isTRUE(subsampling_use_anchor_bank)) {
@@ -1297,8 +1204,6 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
   JuliaCall::julia_assign("_path_to_stan_data",  standata_path)
   JuliaCall::julia_assign("_path_to_prior_stan_data_full", prior_standata_path)
   JuliaCall::julia_assign("_subsampling", subsampling)
-  JuliaCall::julia_assign("_full_gradient_spec",
-                          if (is.null(full_gradient)) NULL else full_gradient$spec)
   JuliaCall::julia_assign("_n_chains", as.integer(n_chains))
 
   # Initialize exactly the persistent contexts that sampling will reuse, and
@@ -1306,11 +1211,7 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
   JuliaCall::julia_assign("_curvature_backend", curvature_backend)
   if (is.null(subsampling)) {
     JuliaCall::julia_command("_stan_model = BridgeStan.StanModel(_path_to_stan_model, _path_to_stan_data; warn=false);")
-    if (is.null(full_gradient)) {
-      JuliaCall::julia_command("_pdmp_model = PDMPModel(_stan_model; hvp = _curvature_backend != \"finite_difference\");")
-    } else {
-      JuliaCall::julia_command("_pdmp_model = PDMPSamplersRBridge.build_omrf_full_model(_full_gradient_spec, BridgeStan.param_unc_names(_stan_model), Int(BridgeStan.param_unc_num(_stan_model)));")
-    }
+    JuliaCall::julia_command("_pdmp_model = PDMPModel(_stan_model; hvp = _curvature_backend != \"finite_difference\");")
     d <- JuliaCall::julia_eval("_pdmp_model.d")
     unc_names <- JuliaCall::julia_eval("BridgeStan.param_unc_names(_stan_model)")
   } else {
@@ -1343,32 +1244,6 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
       if (length(intersect(threshold_idx, interaction_idx))) {
         cli::cli_abort("Resolved OMRF threshold and interaction blocks overlap.")
       }
-    }
-  }
-  if (!is.null(full_gradient)) {
-    envelope_spec <- full_gradient$spec
-    threshold_idx <- .resolve_unconstrained_spec(
-      envelope_spec$thresholds, unc_names, "thresholds")
-    interaction_idx <- .resolve_unconstrained_spec(
-      envelope_spec$interactions, unc_names, "interactions")
-    prior_idx <- integer()
-    if (identical(envelope_spec$analytic_prior$type,
-                  "node_scale_gaussian")) {
-      prior_idx <- c(
-        if (!is.null(envelope_spec$analytic_prior$global_scale))
-          .resolve_unconstrained_spec(
-            envelope_spec$analytic_prior$global_scale, unc_names,
-            "global_scale"),
-        .resolve_unconstrained_spec(
-          envelope_spec$analytic_prior$node_scale, unc_names,
-          "node_scale"))
-    }
-    covered <- sort(c(threshold_idx, interaction_idx, prior_idx))
-    if (!identical(covered, seq_len(d))) {
-      cli::cli_abort(c(
-        "Native OMRF full gradients require threshold and interaction blocks to cover the complete unconstrained state.",
-        "i" = "Covered {length(covered)} of {d} coordinates."
-      ))
     }
   }
 
@@ -1439,12 +1314,6 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
           !identical(spec$selection_policy, subsampling_anchor_selection_policy) ||
           !identical(spec$tie_policy, "lowest_index_outgoing")) {
         cli::cli_abort("Unsupported position anchor bank specification.")
-      }
-      if (identical(spec$selection_policy, "node_position") &&
-          (!identical(as.integer(spec$policy_version), 1L) ||
-           is.null(spec$physical_velocity_variances) ||
-           is.null(spec$node_support_order))) {
-        cli::cli_abort("Incomplete node-position mathematical bank specification.")
       }
       dataset_ok <- identical(spec$dataset_identity$hash, dataset_hash)
       envelope_ok <- identical(spec$envelope_identity$hash, envelope_hash)
@@ -1522,7 +1391,6 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
   JuliaCall::julia_assign("free0", free0)
   JuliaCall::julia_assign("stored_velocity0", stored_velocity0)
   JuliaCall::julia_assign("subsampling_anchor_updates", subsampling_anchor_updates)
-  JuliaCall::julia_assign("subsampling_warmup", subsampling_warmup)
   JuliaCall::julia_assign("subsampling_use_anchor_bank", subsampling_use_anchor_bank)
   JuliaCall::julia_assign("subsampling_anchor_bank_capacity", subsampling_anchor_bank_capacity)
   JuliaCall::julia_assign("subsampling_anchor_selection_policy",
@@ -1531,8 +1399,6 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
                           subsampling_position_anchor_bank_spec)
   JuliaCall::julia_assign("subsampling_main_anchor_refresh_distance",
                           subsampling_main_anchor_refresh_distance)
-  JuliaCall::julia_assign("subsampling_node_source_check_distance",
-                          subsampling_node_source_check_distance)
   JuliaCall::julia_assign("subsampling_require_no_main_full_data",
                           subsampling_require_no_main_full_data)
   JuliaCall::julia_assign("subsampling_diagnostic_window",
@@ -1622,14 +1488,12 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
       threaded = threaded, seed = seed,
       adaptive_scheme = adaptive_scheme,
       refresh_rate = refresh_rate,
-      warmup_mode = subsampling_warmup,
       n_anchor_updates = subsampling_anchor_updates,
       use_anchor_bank = subsampling_use_anchor_bank,
       anchor_bank_capacity = subsampling_anchor_bank_capacity,
       anchor_selection_policy = subsampling_anchor_selection_policy,
       position_anchor_bank_spec = subsampling_position_anchor_bank_spec,
       main_anchor_refresh_distance = subsampling_main_anchor_refresh_distance,
-      node_source_check_distance = subsampling_node_source_check_distance,
       require_no_main_full_data = subsampling_require_no_main_full_data,
       diagnostic_window_width = subsampling_diagnostic_window,
       support_boundary_mode = support_boundary_mode,
@@ -1649,23 +1513,10 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
     result$bridge_profile else NULL
   if (is.environment(bridge_internal_profile))
     bridge_internal_profile <- as.list(bridge_internal_profile)
-  backend_provenance <- if (!is.null(full_gradient)) {
-    gradient_type <- tryCatch(as.character(JuliaCall::julia_eval(
-      "string(typeof(_pdmp_model.grad.f))")),
-      error = function(e) NA_character_)
-    hvp_type <- tryCatch(as.character(JuliaCall::julia_eval(
-      "string(typeof(_pdmp_model.hvp))")),
-      error = function(e) NA_character_)
-    resolved <- if (grepl("OMRFFullGradientProvider", gradient_type,
-                           fixed = TRUE)) "native" else "unresolved"
-    list(requested_backend = "native", resolved_backend = resolved,
-         gradient_provider_type = gradient_type,
-         hvp_provider_type = hvp_type)
-  } else {
-    list(requested_backend = "bridgestan", resolved_backend = "bridgestan",
-         gradient_provider_type = NA_character_,
-         hvp_provider_type = NA_character_)
-  }
+  backend_provenance <- list(
+    requested_backend = "bridgestan", resolved_backend = "bridgestan",
+    gradient_provider_type = NA_character_,
+    hvp_provider_type = NA_character_)
   if (is.environment(result)) result <- as.list(result)
   if (verify_flow_specification) {
     resolved_chains <- lapply(seq_len(params$n_chains), function(chain) {
@@ -1727,31 +1578,11 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
   }
   if (materialize) result <- .materialize(result)
   if (!is.null(subsampling) &&
-      subsampling_anchor_selection_policy %in% c("position", "node_position")) {
+      identical(subsampling_anchor_selection_policy, "position")) {
     dataset_hash <- dataset_identity_hash(standata)
     bank_envelope_spec <- subsampling$residual_envelope
     bank_envelope_spec$categorical_residual_cap <- NULL
     envelope_hash <- flow_hash(bank_envelope_spec)
-    node_support_order <- function(envelope, parameter_order) {
-      seen <- as.integer(envelope$seen)
-      P <- length(seen)
-      thresholds <- grep(paste0("^", envelope$thresholds, "\\."),
-        parameter_order)
-      interactions <- grep(paste0("^", envelope$interactions, "\\."),
-        parameter_order)
-      starts <- cumsum(c(1L, head(seen - 1L, -1L)))
-      incident <- vector("list", P)
-      edge <- 0L
-      if (P > 1L) for (left in seq_len(P - 1L))
-        for (right in (left + 1L):P) {
-          edge <- edge + 1L
-          incident[[left]] <- c(incident[[left]], interactions[[edge]])
-          incident[[right]] <- c(incident[[right]], interactions[[edge]])
-        }
-      lapply(seq_len(P), function(node) c(
-        thresholds[seq.int(starts[[node]], length.out = seen[[node]] - 1L)],
-        incident[[node]]))
-    }
     supplied_bank_specs <- if (is.null(subsampling_position_anchor_bank_spec))
       NULL else if (!is.null(subsampling_position_anchor_bank_spec$version))
         rep(list(subsampling_position_anchor_bank_spec), params$n_chains) else
@@ -1765,8 +1596,7 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
       supplied <- if (is.null(supplied_bank_specs)) NULL else
         supplied_bank_specs[[chain]]
       .position_bank_result_spec(counters, supplied, endpoint,
-        subsampling_anchor_selection_policy, unc_names, dataset_hash,
-        envelope_hash, subsampling$residual_envelope, node_support_order)
+        unc_names, dataset_hash, envelope_hash, subsampling$residual_envelope)
     })
     attr(result, "position_anchor_bank_spec") <- if (length(bank_specs) == 1L)
       bank_specs[[1L]] else bank_specs

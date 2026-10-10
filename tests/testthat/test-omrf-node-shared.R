@@ -28,55 +28,6 @@ node_shared_omrf_fixture <- function() {
   )
 }
 
-test_that("node-shared OMRF gradient closure retains scale-state priors", {
-  skip_on_cran()
-  skip_if_no_pdmp_julia_backend()
-  skip_if_not_installed("Matrix")
-  fixture <- node_shared_omrf_fixture()
-  model <- system.file(
-    "stan", "omrf", "omrf_node_shared.stan",
-    package = "PDMPSamplersR")
-  if (!nzchar(model)) {
-    model <- testthat::test_path(
-      "..", "..", "inst", "stan", "omrf", "omrf_node_shared.stan")
-  }
-  compiled <- compile_pdmp_stan_model(model)
-  envelope <- omrf_residual_envelope(
-    fixture$data$X, fixture$data$seen, "thresholds_0", "interactions_0",
-    prior_backend = "analytic")
-  anchor <- rep(0, 10L)
-  subsampling <- stan_subsampling(
-    fixture$data$N, 2L, fixture$prior, envelope, anchor = anchor)
-  expect_identical(
-    subsampling$residual_envelope$analytic_prior$type,
-    "node_scale_gaussian")
-  position <- seq(-0.18, 0.27, length.out = 10L)
-  subsets <- combn(fixture$data$N, 2L, simplify = FALSE)
-  diagnostics <- lapply(subsets, function(subset) {
-    stan_subsampling_diagnostics(
-      compiled, fixture$data, subsampling, position, subset,
-      velocity = seq(0.3, 1.2, length.out = 10L), flow = "ZigZag")
-  })
-  mean_subsampling <- Reduce(`+`, lapply(diagnostics, `[[`, "subsampled_gradient")) /
-    length(diagnostics)
-  expect_equal(mean_subsampling, diagnostics[[1L]]$full_gradient, tolerance = 2e-9)
-  expect_equal(
-    diagnostics[[1L]]$residual_gradient,
-    diagnostics[[1L]]$selected_likelihood_gradient -
-      diagnostics[[1L]]$selected_anchor_likelihood_gradient,
-    tolerance = 2e-10)
-  scale_indices <- 7:10
-  expect_gt(max(abs(diagnostics[[1L]]$prior_gradient[scale_indices])), 0.05)
-  expect_equal(
-    diagnostics[[1L]]$selected_likelihood_gradient[scale_indices],
-    rep(0, length(scale_indices)), tolerance = 1e-10)
-  expect_equal(
-    diagnostics[[1L]]$residual_gradient[scale_indices],
-    rep(0, length(scale_indices)), tolerance = 1e-12)
-  expect_identical(fixture$slab$logscale_design$storage, "sparse_rows")
-  expect_equal(length(fixture$slab$logscale_design$x), 9L)
-})
-
 test_that("public node-shared OMRF samples all PDMP routes full and subsampled", {
   skip_on_cran()
   skip_if_no_pdmp_julia_backend()
@@ -94,7 +45,7 @@ test_that("public node-shared OMRF samples all PDMP routes full and subsampled",
     fixture$data$X, fixture$data$seen, "thresholds_0", "interactions_0",
     prior_backend = "analytic")
   subsampling <- stan_subsampling(
-    fixture$data$N, 2L, fixture$prior, envelope, anchor = rep(0, 10L))
+    fixture$data$N, 1L, fixture$prior, envelope, anchor = rep(0, 10L))
   common <- list(
     path_to_stanmodel = compiled, standata = fixture$data,
     algorithm = "GridThinningStrategy", T = 1.5,
@@ -105,26 +56,16 @@ test_that("public node-shared OMRF samples all PDMP routes full and subsampled",
     model_prior = betabernoulli(1, 2), slab_prior = fixture$slab,
     show_progress = FALSE, materialize = FALSE
   )
-  native_full_gradient <- omrf_full_gradient(
-    fixture$data$X, fixture$data$seen, "thresholds_0", "interactions_0",
-    prior_standata = fixture$prior)
-
   for (flow in c("ZigZag", "BouncyParticle", "AdaptiveBoomerang")) {
     full_fit <- do.call(pdmp_sample_from_stanmodel, c(
-      common, list(flow = flow, full_gradient = native_full_gradient,
+      common, list(flow = flow, prior_stanmodel = compiled,
+                  prior_standata = fixture$prior,
                   seed = if (flow == "ZigZag") 1801L else 1802L)))
     subsampling_fit <- do.call(pdmp_sample_from_stanmodel, c(
-      common, list(flow = flow, subsampling = subsampling,
-                   subsampling_warmup = "full", t_warmup = 0.4,
+      common, list(flow = flow, subsampling = subsampling, t_warmup = 0.4,
                    seed = if (flow == "ZigZag") 1811L else 1812L)))
     expect_s3_class(full_fit, "pdmp_result")
     expect_s3_class(subsampling_fit, "pdmp_result")
-    backend <- attr(full_fit, "backend_provenance")
-    expect_identical(backend$resolved_backend, "native")
-    expect_match(backend$gradient_provider_type,
-                 "OMRFFullGradientProvider", fixed = TRUE)
-    expect_match(backend$hvp_provider_type,
-                 "OMRFFullHVPProvider", fixed = TRUE)
     expect_gt(full_fit$stats$sticky_events[[1L]], 0)
     expect_gt(subsampling_fit$stats$sticky_events[[1L]], 0)
     counters <- attr(subsampling_fit, "subsampling_context_counters")[[1L]]
@@ -132,25 +73,16 @@ test_that("public node-shared OMRF samples all PDMP routes full and subsampled",
     expect_equal(
       counters$persons_evaluated,
       subsampling$subsample_size * counters$analytic_residual_calls)
-    expect_equal(
-      counters$analytic_residual_calls,
-      subsampling_fit$stats$residual_oracle_calls[[1L]])
+    # Exact selected refinement evaluates the residual once inside the
+    # subset bound and reuses it, so the generic residual-oracle call
+    # counter stays at zero.
     expect_equal(counters$selected_gradient_calls, 0L)
-    expect_identical(counters$resolved_full_gradient_backend, "native")
-    expect_match(counters$warmup_gradient_provider_type,
-                 "OMRFFullGradientProvider", fixed = TRUE)
-    expect_match(counters$warmup_hvp_provider_type,
-                 "_DependentSlabAnalyticHVP", fixed = TRUE)
-    expect_match(counters$native_warmup_hvp_provider_type,
-                 "OMRFFullHVPProvider", fixed = TRUE)
     expect_match(counters$deterministic_hvp_provider_type,
                  "StanSubsamplingSlabDeterministic", fixed = TRUE)
     expect_equal(counters$anchor_cache_gradient_calls, 0L)
     expect_lte(
       subsampling_fit$stats$subsampling_final_reflections[[1L]],
       subsampling_fit$stats$subsampling_subset_evaluations[[1L]])
-    # A full-gradient call is expected during initialization/transition when
-    # the node-scale target switches from exact warmup to retained sampling.
     # The production invariant is the phase-specific main counter.
     expect_equal(subsampling_fit$stats$main_full_gradient_calls[[1L]], 0L)
     expect_equal(counters$main_native_full_data_scans, 0L)

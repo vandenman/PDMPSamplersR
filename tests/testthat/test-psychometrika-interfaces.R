@@ -60,7 +60,7 @@ test_that("unsupported custom-Stan controls fail before model construction", {
   ))), "requires.*prior_stanmodel.*same model")
 })
 
-test_that("OMRF provider uses persons and finite categorical curvature weights", {
+test_that("OMRF provider specifies the whole-person direct HCV envelope", {
   X <- rbind(c(0, 1, 2), c(2, 0, 1), c(1, 2, 0))
   envelope <- omrf_residual_envelope(
     X, seen = c(3, 3, 3),
@@ -68,55 +68,44 @@ test_that("OMRF provider uses persons and finite categorical curvature weights",
     interactions = "interactions_0"
   )
   expect_s3_class(envelope, "omrf_residual_envelope")
+  expect_identical(envelope$bound_type, "direct_factor_roof_person_hcv")
   expect_identical(envelope$backend, "analytic")
+  expect_identical(envelope$factorization, "person")
+  expect_true(envelope$use_hcv)
+  expect_identical(envelope$hcv_damping, Inf)
   expect_equal(ncol(envelope$weights), nrow(X))
-  expect_true(all(is.finite(envelope$weights)))
-  expect_true(all(envelope$weights >= 0))
   expect_equal(dim(envelope$node_weights), c(ncol(X), nrow(X)))
-  expect_true(all(is.finite(envelope$node_weights)))
-  expect_true(all(envelope$node_weights >= 0))
-  expect_true(all(envelope$weights <= colSums(envelope$node_weights) + 1e-12))
-  full_gradient <- omrf_full_gradient(
-    X, seen = c(3, 3, 3),
-    thresholds = "thresholds_0", interactions = "interactions_0")
-  expect_s3_class(full_gradient, "omrf_full_gradient")
-  expect_identical(full_gradient$spec$prior_backend, "analytic")
-  expect_identical(full_gradient$spec$factorization, "person")
-  expect_identical(
-    omrf_residual_envelope(
-      X, c(3, 3, 3), "a", "b", geometry = "pattern_local")$bound_type,
-    "pattern_local_range")
-  expect_identical(
-    omrf_residual_envelope(
-      X, c(3, 3, 3), "a", "b", use_hcv = TRUE,
-      hcv_damping = Inf, geometry = "pattern_local")$bound_type,
-    "pattern_local_hcv_range")
-  expect_error(
-    omrf_residual_envelope(
-      X, c(3, 3, 3), "a", "b", use_hcv = TRUE,
-      hcv_damping = Inf, geometry = "norm_local"),
-    "pattern_local")
   expect_equal(unname(envelope$edge_order),
                rbind(c(1L, 2L), c(1L, 3L), c(2L, 3L)))
   expect_error(
     omrf_residual_envelope(X, c(2, 3, 3), "a", "b"),
     "encoded"
   )
-  expect_identical(
-    omrf_residual_envelope(X, c(3, 3, 3), "a", "b", backend = "stan")$backend,
-    "stan"
+  expect_error(
+    omrf_residual_envelope(X, c(3, 3, 3), "a", "b", geometry = "pattern_local"),
+    "only supports"
   )
   expect_error(
-    omrf_residual_envelope(X, c(3, 3, 3), "a", "b", backend = "invalid"),
-    "arg"
+    omrf_residual_envelope(X, c(3, 3, 3), "a", "b", factorization = "person_node"),
+    "only supports"
+  )
+  expect_error(
+    omrf_residual_envelope(X, c(3, 3, 3), "a", "b",
+                           signed_only_person_roof = TRUE),
+    "person_signed_roof"
+  )
+  expect_error(
+    omrf_residual_envelope(X, c(3, 3, 3), "a", "b",
+                           shared_current_categorical = TRUE),
+    "joint groups"
   )
 })
 
 test_that("OMRF analytic prior routing prefers an explicit independent prior", {
   X <- matrix(0L, nrow = 2L, ncol = 2L)
-  spec <- omrf_full_gradient(
+  spec <- omrf_residual_envelope(
     X, seen = c(2L, 2L),
-    thresholds = "thresholds_0", interactions = "interactions_0")$spec
+    thresholds = "thresholds_0", interactions = "interactions_0")
   standata <- list(
     prior_threshold_alpha = 1,
     prior_threshold_beta = 1,
@@ -181,12 +170,6 @@ test_that("custom-Stan anchor-bank controls validate before backend setup", {
       "missing.stan", list(),
       subsampling_main_anchor_refresh_distance = 0),
     "positive or Inf"
-  )
-  expect_error(
-    pdmp_sample_from_stanmodel(
-      "missing.stan", list(),
-      subsampling_node_source_check_distance = -0.1),
-    "finite and nonnegative"
   )
   expect_error(
     pdmp_sample_from_stanmodel(

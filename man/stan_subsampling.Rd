@@ -28,16 +28,19 @@ omrf_residual_envelope(
   seen,
   thresholds,
   interactions,
-  backend = c("analytic", "stan"),
-  use_hcv = FALSE,
-  hcv_damping = NULL,
-  hcv_warmup = c("hcv", "first_order"),
-  factorization = c("person", "person_node"),
-  factor_sampling = c("size_biased", "node_stratified"),
-  prior_backend = c("stan", "analytic"),
-  geometry = c("norm_local", "covariate_local", "pattern_local", "grouped_box", "node_grouped_box", "cell_cached_node_grouped_box", "lazy_node_grouped_box"),
-  box_groups = 16L,
-  box_root_groups = max(1L, box_groups %/% 2L)
+  use_hcv = TRUE,
+  hcv_damping = Inf,
+  hcv_warmup = "hcv",
+  factorization = "person",
+  factor_sampling = "size_biased",
+  prior_backend = "analytic",
+  exact_selected_refinement = TRUE,
+  categorical_residual_cap = TRUE,
+  person_signed_roof = FALSE,
+  signed_only_person_roof = FALSE,
+  joint_signed_group_size = 0L,
+  shared_current_categorical = FALSE,
+  geometry = "direct_factor_roof_person_hcv"
 )
 
 stan_parameter_mapping(path_to_stanmodel, standata, parameters = NULL)
@@ -69,66 +72,26 @@ or a recognized package provider such as [omrf_residual_envelope()].}
 \item{interactions}{Interaction parameter block name; edge order is the
 upper triangle `(1,2), (1,3), ..., (P-1,P)`.}
 
-\item{backend}{Residual-gradient backend. The default `"analytic"` evaluates
-the exact OMRF likelihood residual without invoking Stan autodiff.
-`"stan"` retains the selected-likelihood Stan path for validation.}
+\item{use_hcv, hcv_damping, hcv_warmup, factorization, factor_sampling, prior_backend, exact_selected_refinement, categorical_residual_cap, geometry}{Fixed configuration; see Details.}
 
-\item{use_hcv}{Whether to use the analytic categorical Hessian control
-variate. This requires `backend = "analytic"` and retains a certified
-first-order fallback through damping.}
+\item{person_signed_roof}{Linear BPS certificate policy. Signed node
+residual endpoints are summed within each person before taking an
+absolute bound; the factor-summed certificate remains a valid fallback.
+The estimator and retained target are unchanged. Other flows keep the
+ordinary roof.}
 
-\item{hcv_damping}{Positive damping scale. By default this is the number of
-OMRF likelihood coordinates. `Inf` selects the exact undamped Hessian
-control variate and is currently supported only with
-`geometry = "pattern_local"`, `geometry = "grouped_box"`, or one of
-the node-grouped geometries.}
+\item{signed_only_person_roof}{Linear BPS policy which builds the certified
+signed whole-person endpoint roof without also building the factor-summed
+fallback table. It preserves the estimator and uses pointwise factor
+refinement for the selected person. Requires `person_signed_roof = TRUE`.}
 
-\item{hcv_warmup}{HCV policy during warmup. `"hcv"` preserves the existing
-behavior. Experimental `"first_order"` uses the certified first-order
-residual bound during warmup and activates HCV at the main-phase boundary.}
+\item{joint_signed_group_size}{Linear BPS joint signed marked roof. Use `4`
+for fixed seeded groups of four, `16`, `32` or `64` for weighted ragged
+groups, or `0` to keep the ordinary scheduler. Requires
+`signed_only_person_roof = TRUE`.}
 
-\item{factorization}{Experimental likelihood contribution layout. `"person"`
-retains one contribution per person. `"person_node"` exposes each
-person-node conditional as a separate sparse contribution.}
-
-\item{factor_sampling}{Factor-subset design. `"size_biased"` uses the
-generic contribution design; `"node_stratified"` draws an equal number
-from every node while retaining exact size-biased proposal mixing.}
-
-\item{prior_backend}{Deterministic prior-gradient backend. `"stan"` supports
-arbitrary custom priors. `"analytic"` recognizes the package OMRF
-independent Gaussian/Cauchy and node-scale Gaussian prior contracts from
-`prior_standata`.}
-
-\item{geometry}{Certified residual-rate geometry. `"norm_local"` uses a
-compact covariate-norm decomposition. `"covariate_local"` retains
-empirical neighbour covariates in threshold, edge, and edge-pair terms
-while sharing trajectory scales across people. `"pattern_local"` groups
-identical node-neighbour patterns and retains their signed directional
-logit geometry, which is especially tighter for scalar BPS/Boomerang
-rates but is more expensive to construct. `"grouped_box"` is the preferred
-exact HCV clock for non-factorized subsampling: setup partitions whole
-persons into a fixed number of covariate boxes and retained sampling
-evaluates one certificate per box, never one certificate per person. It
-currently requires `backend = "analytic"`, `use_hcv = TRUE`,
-`hcv_damping = Inf`, and `factorization = "person"`.
-`"node_grouped_box"` independently partitions each node by its incident
-covariates and reuses the node's trajectory geometry across those boxes.
-Experimental `"cell_cached_node_grouped_box"` uses the same node boxes but
-samples marked persons from the already-certified grid-cell masses, then
-thins only the selected person using its exact observed covariate pattern.
-This avoids a second all-box pointwise traversal at every clock proposal
-while retaining a whole-person stochastic gradient.
-Experimental `"lazy_node_grouped_box"` exposes a coarser root frontier and
-descends the certified support tree only along the sampled branch.}
-
-\item{box_groups}{Maximum number of deterministic setup-time covariate
-boxes used by `geometry = "grouped_box"`, or boxes per node for
-`geometry = "node_grouped_box"`. The actual number is capped by the
-number of distinct relevant person patterns.}
-
-\item{box_root_groups}{Root boxes per node used by
-`geometry = "lazy_node_grouped_box"`. This must not exceed `box_groups`.}
+\item{shared_current_categorical}{Evaluator that reuses current categorical
+moments for exact active-neighbour patterns. Requires joint groups.}
 
 \item{path_to_stanmodel}{Stan source or compiled-library path.}
 
@@ -152,18 +115,20 @@ A data frame with resolved 1-based indices and names.
 header. `compile_pdmp_stan_model()` compiles a Stan source with the required
 `--allow-undefined` and `USER_HEADER` settings.
 
-Constructs a stacked categorical-logit curvature bound for each person.
-If `B_n` vertically stacks the node-specific affine logit maps, the block
-diagonal categorical covariance has operator norm at most `1/2`, hence the
-complete person Hessian is bounded by
-`0.5 * opnorm(B_n)^2`. This is no larger than summing the separate node
-spectral bounds and preserves a global, anchor-independent certificate.
-The analytic backend uses a tighter low-rank node-local certificate. For
-each node it expands the product of threshold and interaction terms against
-the Euclidean norm of that person's neighbour-category vector. This needs
-only three envelope components per node while retaining covariate magnitude
-and preventing thresholds or nonincident interactions from inflating the
-bound.
+Specifies exact subsampling for an ordinal Markov random field (OMRF)
+likelihood with one likelihood contribution per person. The residual of a
+person's gradient is taken relative to an analytic, undamped Hessian control
+variate at the anchor, and every grid cell gets a certified roof on the
+summed residual rates (geometry `"direct_factor_roof_person_hcv"`).
 Threshold and interaction arguments are Stan unconstrained block names and
 are resolved at sampler initialization.
+}
+\details{
+Several arguments of \code{omrf_residual_envelope()} accept a single value.
+They state the configuration explicitly and are checked against it:
+`use_hcv = TRUE`, `hcv_damping = Inf`, `hcv_warmup = "hcv"`,
+`factorization = "person"`, `factor_sampling = "size_biased"`,
+`prior_backend = "analytic"`, `exact_selected_refinement = TRUE`,
+`categorical_residual_cap = TRUE`, and
+`geometry = "direct_factor_roof_person_hcv"`.
 }

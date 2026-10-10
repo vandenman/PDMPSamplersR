@@ -3,41 +3,19 @@ include(normpath(joinpath(@__DIR__, "..", "..", "inst", "julia",
     "main_interface_function.jl")))
 using .PDMPSamplersRBridge
 
-function audit_spec(X, seen)
-    N, P = size(X)
-    membership = zeros(Int, P, N)
-    nodes = Int[]
-    minima = Vector{Vector{Float64}}()
-    maxima = Vector{Vector{Float64}}()
-    offset = 0
-    for node in 1:P
-        local_membership = [1 + mod(person - 1, min(2, N)) for person in 1:N]
-        for group in 1:maximum(local_membership)
-            people = findall(==(group), local_membership)
-            lower = zeros(P); upper = zeros(P)
-            for neighbour in 1:P
-                neighbour == node && continue
-                lower[neighbour] = minimum(X[people, neighbour])
-                upper[neighbour] = maximum(X[people, neighbour])
-            end
-            push!(nodes, node); push!(minima, lower); push!(maxima, upper)
-        end
-        membership[node, :] .= offset .+ local_membership
-        offset += maximum(local_membership)
-    end
+function direct_spec(X, seen)
     Dict{String,Any}(
         "type"=>"omrf", "backend"=>"analytic", "X"=>X, "seen"=>seen,
         "thresholds"=>"thresholds_0", "interactions"=>"interactions_0",
-        "bound_type"=>"cell_marked_node_box_first_order",
-        "factorization"=>"person_node", "factor_sampling"=>"size_biased",
-        "prior_backend"=>"analytic", "use_hcv"=>false,
+        "bound_type"=>"direct_factor_roof_person_hcv",
+        "factorization"=>"person", "factor_sampling"=>"size_biased",
+        "prior_backend"=>"analytic", "use_hcv"=>true, "hcv_damping"=>Inf,
+        "hcv_scope"=>"global",
         "analytic_prior"=>Dict{String,Any}("type"=>"gaussian",
             "threshold_alpha"=>1.0, "threshold_beta"=>1.0,
             "interaction_scale"=>1.0),
         "exact_selected_refinement"=>true,
-        "node_box_membership"=>membership, "node_box_nodes"=>nodes,
-        "node_box_minima"=>reduce(vcat, permutedims.(minima)),
-        "node_box_maxima"=>reduce(vcat, permutedims.(maxima)))
+        "categorical_residual_cap"=>true)
 end
 
 function live_cv(grad)
@@ -56,8 +34,9 @@ end
     full = joinpath(root, "tests", "stan", "omrf_subsampling_full.json")
     prior = joinpath(root, "tests", "stan", "omrf_subsampling_prior.json")
     X = [0 1 2; 2 0 1; 1 2 0]
-    spec = audit_spec(X, [3, 3, 3])
-    sub = Dict{String,Any}("n_observations"=>9, "subsample_size"=>1,
+    spec = direct_spec(X, [3, 3, 3])
+    N = size(X, 1)
+    sub = Dict{String,Any}("n_observations"=>N, "subsample_size"=>1,
         "anchor"=>zeros(9), "residual_envelope"=>spec)
 
     function built(capacity=1, m=1)
@@ -70,7 +49,7 @@ end
             anchor_capacity=capacity)
     end
 
-    function entry_case(; separate=false, warmup=0.04, updates=true)
+    function entry_case(; warmup=0.04, updates=true)
         model, _, names, adapter, manager = built(1)
         adapter.update_dt = updates ? 0.01 : Inf
         flow = BouncyParticle(9, 0.5)
@@ -88,14 +67,10 @@ end
                 @test cv.residual_oracle.f.anchor == manager.oracle.anchor
                 observed[] = true
             end)
-        warm_model = separate ?
-            PDMPSamplersRBridge.build_omrf_full_model(spec, names, 9) : nothing
         try
             pdmp_sample(SkeletonPoint(fill(0.15, 9), fill(0.4, 9)), flow,
                 model, alg, 0.0, warmup + 0.02, warmup;
-                adapter, warmup_model=warm_model,
-                warmup_algorithm=separate ? deepcopy(alg) : nothing,
-                progress=false, seed=7301,
+                adapter, progress=false, seed=7301,
                 statistic_counter=PDMPSamplers.DevelStatisticCounter)
         finally
             PDMPSamplers.set_phase_first_proposal_observer!(nothing)
@@ -104,30 +79,22 @@ end
         @test manager.oracle.anchor != zeros(9)
     end
 
-    # Actual sampler-entry regressions: separate full warmup, ordinary
-    # subsampled warmup, and a zero-warmup restart.  Capacity one forces bank
-    # replacement without an index change.
-    entry_case(separate=true, warmup=0.04, updates=true)
-    entry_case(separate=false, warmup=0.04, updates=true)
-    entry_case(separate=false, warmup=0.0, updates=false)
+    # Actual sampler-entry regressions: subsampled warmup and a zero-warmup
+    # restart.  Capacity one forces bank replacement without an index change.
+    entry_case(warmup=0.04, updates=true)
+    entry_case(warmup=0.0, updates=false)
 
     # Position-bank finalization is explicit and independent of the adaptive
-    # route's historical `main_refresh_distance == Inf` sentinel, including
-    # the separate full-gradient warmup lifecycle.
+    # route's historical `main_refresh_distance == Inf` sentinel.
     fixed_model, _, fixed_names, fixed_adapter, fixed_manager = built(4)
     fixed_manager.selection_policy = :position
     fixed_manager.main_refresh_distance = 0.2
     fixed_adapter.update_dt = Inf
-    fixed_warm_model = PDMPSamplersRBridge.build_omrf_full_model(
-        spec, fixed_names, 9)
     pdmp_sample(SkeletonPoint(fill(0.15, 9), fill(0.4, 9)),
         BouncyParticle(9, 0.5), fixed_model,
         GridThinningStrategy(; N=4, t_max=0.02, lazy=false,
             bound_violation=:throw), 0.0, 0.06, 0.04;
-        adapter=fixed_adapter, warmup_model=fixed_warm_model,
-        warmup_algorithm=GridThinningStrategy(; N=4, t_max=0.02,
-            lazy=false, bound_violation=:throw),
-        progress=false, seed=7302,
+        adapter=fixed_adapter, progress=false, seed=7302,
         statistic_counter=PDMPSamplers.DevelStatisticCounter)
     @test fixed_manager.capacity == 4
     @test 1 <= length(fixed_manager.entries) <= 4
@@ -188,18 +155,13 @@ end
         SkeletonPoint(zeros(9), [1.0; zeros(8)]), trues(9))
     state.stored_velocity[4] = -0.7
     # Statistics wrapping copies the envelope.  The real adapter horizon is
-    # the pre-proposal hook and must attach its counters before event search.
-    cv.envelope.component_scales!.base.categorical_residual_cap = true
+    # the pre-proposal hook and must attach the live context before event
+    # search.
     preproposal = PDMPSamplers.with_stats(
         model, PDMPSamplers.DevelStatisticCounter())
-    preproposal_scales = preproposal.grad.envelope.component_scales!
-    @test preproposal_scales.base.context !== manager.oracle.residual_context
-    @test preproposal_scales.base.categorical_residual_cap
     PDMPSamplers.adaptation_horizon(adapter, state,
         BouncyParticle(9, 0.0), preproposal.grad, :main, stats)
-    @test preproposal_scales.base.context === manager.oracle.residual_context
-    @test preproposal_scales.base.categorical_residual_cap
-    cv.envelope.component_scales!.base.categorical_residual_cap = false
+    @test preproposal.grad.envelope.context === manager.oracle.residual_context
     before = (copy(state.ξ.x), copy(state.ξ.θ), copy(state.free),
         copy(state.stored_velocity))
     horizon = PDMPSamplersRBridge._omrf_position_anchor_horizon!(
@@ -327,27 +289,10 @@ end
     @test residual_boomerang == residual_bps
 
     # Production draw/refinement regression at a preserved complete live
-    # candidate.  This invokes the specialized cell-marked draw_subset!, its
-    # lazy selected-factor point bound, exact selected refinement, residual
-    # oracle, and final thinning in their production order.
-    function validate_live_context(cv, oracle, state, flow, D, M)
-        env = cv.envelope
-        scales = env.component_scales!
-        cv.anchor == oracle.anchor == scales.base.anchor ||
-            throw(ArgumentError("live anchors disagree"))
-        counts = [count(==(component), vec(env.groups))
-            for component in eachindex(env.totals)]
-        counts == Int.(scales.component_totals) ||
-            throw(ArgumentError("component membership counts disagree"))
-        residual = zeros(length(state.ξ.x))
-        oracle(residual, state.ξ.x, cv.subset, oracle.anchor)
-        exact = 9 * PDMPSamplersRBridge._omrf_exact_selected_residual_abs_rate(
-            state, residual, flow, oracle.residual_context.touched_positions)
-        M + 1e-12 >= D + exact ||
-            throw(ArgumentError("selected-factor bound is too small"))
-        true
-    end
-
+    # candidate.  This invokes the direct envelope's draw_subset!, exact
+    # selected refinement, residual oracle, and final thinning in their
+    # production order: a person J must be accepted with probability
+    # λ(D + N r_J) / (N (D + B)).
     law_state = deepcopy(state)
     law_state.ξ.x[1] = 0.72
     law_state.ξ.θ .= range(-0.8, 0.9; length=9)
@@ -361,36 +306,31 @@ end
     PDMPSamplers.deterministic_gradient!(deterministic, cv, candidate.ξ.x)
     D = PDMPSamplers.λ(candidate, deterministic, BouncyParticle(9, 0.0))
     exact = zeros(9); residual = zeros(9)
-    expected = zeros(9)
-    for factor in 1:9
+    expected = zeros(N)
+    for person in 1:N
         fill!(residual, 0.0)
-        manager.oracle(residual, candidate.ξ.x, [factor], manager.oracle.anchor)
-        @. exact = deterministic + 9residual
-        expected[factor] = PDMPSamplers.λ(
-            candidate, exact, BouncyParticle(9, 0.0)) / (9 * (D + B))
+        manager.oracle(residual, candidate.ξ.x, [person], manager.oracle.anchor)
+        @. exact = deterministic + N * residual
+        expected[person] = PDMPSamplers.λ(
+            candidate, exact, BouncyParticle(9, 0.0)) / (N * (D + B))
     end
     trials = 80_000
-    accepted = zeros(Int, 9)
-    early_rejections = 0
-    residual_marks_before = cv.envelope.component_scales!.component_marks
+    accepted = zeros(Int, N)
     rng = Xoshiro(7401)
     for _ in 1:trials
         M = PDMPSamplers.draw_subset!(rng, cv, D, B)
         R = PDMPSamplers.subsampling_residual_subset_bound(
             manager.oracle, candidate, deterministic, BouncyParticle(9, 0.0),
-            D, M, cv.subset, 9)
-        if iszero(R) || (R < M && rand(rng) * M > R)
-            early_rejections += 1
-            continue
-        end
+            D, M, cv.subset, N)
+        (iszero(R) || (R < M && rand(rng) * M > R)) && continue
         T = PDMPSamplers.subsampling_subset_bound(
             manager.oracle, candidate, deterministic, BouncyParticle(9, 0.0),
-            D, R, cv.subset, 9)
+            D, R, cv.subset, N)
         (iszero(T) || (T < R && rand(rng) * R > T)) && continue
         fill!(residual, 0.0)
         manager.oracle(residual, candidate.ξ.x, cv.subset,
             manager.oracle.anchor)
-        @. exact = deterministic + 9residual
+        @. exact = deterministic + N * residual
         A = PDMPSamplers.λ(candidate, exact, BouncyParticle(9, 0.0))
         rand(rng) * T <= A && (accepted[cv.subset[1]] += 1)
     end
@@ -398,144 +338,9 @@ end
     standard_error = sqrt.(expected .* (1 .- expected) ./ trials)
     @test maximum(abs.(observed .- expected) ./
         max.(standard_error, 1 / trials)) < 5.0
-    residual_draws = cv.envelope.component_scales!.component_marks -
-        residual_marks_before
-    @test 0 < residual_draws < trials
-    @test early_rejections > 0
     println("live_selection_max_z=",
         maximum(abs.(observed .- expected) ./
-            max.(standard_error, 1 / trials)),
-        " residual_mixture_draws=", residual_draws,
-        " early_refinement_rejections=", early_rejections)
-
-    # The actual m=4 person-node design used by dependent Zig-Zag: enumerate
-    # all 126 subsets independently, verify the estimator mean against the
-    # native full gradient, and verify draw_subset!'s implemented size-biased
-    # subset probabilities (including its deterministic/residual mixture).
-    batch_ctx, batch_names =
-        PDMPSamplersRBridge._new_stan_subsampling_context(
-            lib, full, prior, 4)
-    batch_spec = copy(spec)
-    batch_spec["bound_type"] = "node_local_norm_low_rank"
-    batch_weights = zeros(9, 3)
-    for node in 1:3, person in 1:3
-        radius = sqrt(sum(abs2, X[person, neighbour]
-            for neighbour in 1:3 if neighbour != node))
-        batch_weights[node, person] = 1.0
-        batch_weights[3 + node, person] = radius
-        batch_weights[6 + node, person] = radius * radius
-    end
-    batch_spec["norm_weights"] = batch_weights
-    batch_sub = Dict{String,Any}("n_observations"=>9,
-        "subsample_size"=>4, "anchor"=>zeros(9),
-        "residual_envelope"=>batch_spec)
-    batch_model, _, _, _, batch_manager =
-        PDMPSamplersRBridge._build_stan_subsampling_model(
-            batch_ctx, batch_names, batch_sub, zeros(9), nothing, falses(9);
-            anchor_capacity=1)
-    batch_cv = batch_model.grad
-    zig_flow = ZigZag(9)
-    batch_state = deepcopy(law_state)
-    batch_state.ξ.θ .= [1.0, -1.0, 1.0, -1.0, 1.0, -1.0, 1.0, -1.0, 1.0]
-    PDMPSamplers.set_active_set!(batch_cv, batch_state.free)
-    # Use the production screening entry point: the lazy tree owns cached
-    # state/flow used by subsequent selected-factor refinement.
-    batch_B = PDMPSamplers.screening_residual_bound(
-        batch_cv.envelope, batch_state, zig_flow, 0.0)
-    batch_deterministic = zeros(9)
-    PDMPSamplers.deterministic_gradient!(batch_deterministic, batch_cv,
-        batch_state.ξ.x)
-    batch_D = PDMPSamplers.λ(batch_state, batch_deterministic, zig_flow)
-    subsets = NTuple{4,Int}[]
-    for i in 1:6, j in (i + 1):7, k in (j + 1):8, l in (k + 1):9
-        push!(subsets, (i, j, k, l))
-    end
-    @test length(subsets) == 126
-    estimator_mean = zeros(9)
-    enumerated_intensity = zeros(9)
-    batch_residual = zeros(9)
-    sampled_gradient = similar(batch_residual)
-    for subset in subsets
-        fill!(batch_residual, 0.0)
-        batch_manager.oracle(batch_residual, batch_state.ξ.x,
-            collect(subset), batch_manager.oracle.anchor)
-        @. sampled_gradient = batch_deterministic + (9 / 4) * batch_residual
-        estimator_mean .+= sampled_gradient
-        enumerated_intensity .+= max.(0.0,
-            batch_state.ξ.θ .* sampled_gradient)
-    end
-    estimator_mean ./= length(subsets)
-    enumerated_intensity ./= length(subsets)
-    native = PDMPSamplersRBridge.build_omrf_full_model(
-        spec, batch_names, 9)
-    native_gradient = zeros(9)
-    native.grad.f(native_gradient, batch_state.ξ.x)
-    @test estimator_mean ≈ native_gradient atol=2e-12
-    # Exercise the actual lazy size-biased draw/refinement law.  Some residual
-    # mixture paths are rejected within the component hierarchy before an
-    # exact factor is evaluated, so the static generic subset-probability
-    # formula is intentionally not used here.  The contribution of a sampled
-    # candidate to coordinate i is (D+B) λ_i/M; its expectation must equal
-    # the independently enumerated uniform-batch marked intensity.  This is
-    # distinct from the full-gradient rate because positive-part formation is
-    # nonlinear; unbiasedness of the underlying gradient is checked above.
-    batch_trials = 80_000
-    batch_rng = Xoshiro(7402)
-    intensity_sum = zeros(9)
-    intensity_square_sum = zeros(9)
-    for _ in 1:batch_trials
-        M = PDMPSamplers.draw_subset!(batch_rng, batch_cv, batch_D, batch_B)
-        iszero(M) && continue
-        R = PDMPSamplers.subsampling_residual_subset_bound(
-            batch_manager.oracle, batch_state, batch_deterministic, zig_flow,
-            batch_D, M, batch_cv.subset, 9 / 4)
-        (iszero(R) || (R < M && rand(batch_rng) * M > R)) && continue
-        T = PDMPSamplers.subsampling_subset_bound(
-            batch_manager.oracle, batch_state, batch_deterministic, zig_flow,
-            batch_D, R, batch_cv.subset, 9 / 4)
-        (iszero(T) || (T < R && rand(batch_rng) * R > T)) && continue
-        fill!(batch_residual, 0.0)
-        batch_manager.oracle(batch_residual, batch_state.ξ.x,
-            batch_cv.subset, batch_manager.oracle.anchor)
-        @. sampled_gradient = batch_deterministic + (9 / 4) * batch_residual
-        @inbounds for coordinate in eachindex(sampled_gradient)
-            contribution = (batch_D + batch_B) * max(0.0,
-                batch_state.ξ.θ[coordinate] * sampled_gradient[coordinate]) / T
-            intensity_sum[coordinate] += contribution
-            intensity_square_sum[coordinate] += contribution^2
-        end
-    end
-    intensity_mean = intensity_sum ./ batch_trials
-    intensity_variance = max.(0.0,
-        intensity_square_sum ./ batch_trials .- intensity_mean .^ 2)
-    intensity_se = sqrt.(intensity_variance ./ batch_trials)
-    batch_z = maximum(abs.(intensity_mean .- enumerated_intensity) ./
-        max.(intensity_se, 1e-12))
-    println("batch4_intensity_mean=", intensity_mean,
-        " enumerated=", enumerated_intensity, " se=", intensity_se)
-    @test batch_z < 5.0
-    println("batch4_accepted_intensity_max_z=", batch_z)
-
-    # The test-only live-context oracle detects each requested deliberate
-    # perturbation before it can be mistaken for a passing algebraic identity.
-    M = PDMPSamplers.draw_subset!(rng, cv, D, B)
-    R = PDMPSamplers.subsampling_residual_subset_bound(
-        manager.oracle, candidate, deterministic, BouncyParticle(9, 0.0),
-        D, M, cv.subset, 9)
-    @test validate_live_context(cv, manager.oracle, candidate,
-        BouncyParticle(9, 0.0), D, R)
-    totals = copy(cv.envelope.component_scales!.component_totals)
-    cv.envelope.component_scales!.component_totals[1] += 1
-    @test_throws ArgumentError validate_live_context(cv, manager.oracle,
-        candidate, BouncyParticle(9, 0.0), D, R)
-    cv.envelope.component_scales!.component_totals .= totals
-    @test_throws ArgumentError validate_live_context(cv, manager.oracle,
-        candidate, BouncyParticle(9, 0.0), D, D)
-    anchor0 = copy(cv.envelope.component_scales!.base.anchor)
-    cv.envelope.component_scales!.base.anchor[1] += 0.1
-    @test_throws ArgumentError validate_live_context(cv, manager.oracle,
-        candidate, BouncyParticle(9, 0.0), D, R)
-    cv.envelope.component_scales!.base.anchor .= anchor0
+            max.(standard_error, 1 / trials)))
 
     # A prediction is not permission to commit.  The exact reviewer fixture
     # (anchors 0/2, x=0, v=+1) is interrupted at t=.25 by each relevant

@@ -50,7 +50,7 @@ export r_streaming_scientific_reduction, r_streaming_replay_validation,
 export r_chain_has_live_state_provenance
 export r_pdmp_stan, r_pdmp_custom
 export r_stan_subsampling_diagnostics, prepare_stan_subsampling,
-    r_pdmp_stan_subsampling, r_omrf_minibatch_fixed_state
+    r_pdmp_stan_subsampling
 export write_cmdstan_csv, r_constrain_and_write_csv
 export r_pdmp_brms_subsampling, r_pdmp_stan_for_brms
 export r_get_param_unc_names
@@ -64,7 +64,7 @@ export r_cleanup_worker_state
 # Julia variable knowledge in simulation code.
 const _WORKER_STATE_ROOTS = (
     :_stan_model, :_pdmp_model, :_prepared_stan_subsampling, :_subsampling,
-    :_full_gradient_spec, :_path_to_stan_model, :_path_to_stan_data,
+    :_path_to_stan_model, :_path_to_stan_data,
     :_path_to_prior_stan_data_full, :_n_chains, :_curvature_backend,
     :flow, :algorithm, :x0, :theta0, :free0, :stored_velocity0,
     :flow_cov, :flow_mean, :c0, :grid_n, :grid_t_max,
@@ -73,9 +73,8 @@ const _WORKER_STATE_ROOTS = (
     :t0, :T, :t_warmup, :f, :hessian_f, :hessian, :sticky, :can_stick, :model_prior,
     :parameter_prior, :slab_prior, :show_progress, :seed, :adaptive_scheme,
     :refresh_rate, :unc_names, :_unc_names, :subsampling_anchor_updates,
-    :subsampling_warmup, :subsampling_use_anchor_bank,
+    :subsampling_use_anchor_bank,
     :subsampling_anchor_bank_capacity, :subsampling_main_anchor_refresh_distance,
-    :subsampling_node_source_check_distance,
     :subsampling_require_no_main_full_data, :subsampling_diagnostic_window,
     :warmup_adaptation_interval, :subsampling_diagnostic_window,
     :boomerang_variance_floor_fraction,

@@ -11,12 +11,10 @@ pdmp_sample_from_stanmodel(
   prior_standata = NULL,
   subsampling = NULL,
   full_gradient = NULL,
-  subsampling_warmup = c("subsampled", "full"),
   subsampling_anchor_updates = 0L,
   subsampling_use_anchor_bank = FALSE,
   subsampling_anchor_bank_capacity = 8L,
   subsampling_main_anchor_refresh_distance = Inf,
-  subsampling_node_source_check_distance = 0,
   subsampling_require_no_main_full_data = FALSE,
   flow = c("ZigZag", "BouncyParticle", "Boomerang", "AdaptiveBoomerang",
     "PreconditionedZigZag", "PreconditionedBPS"),
@@ -77,24 +75,15 @@ by \code{subsampling}; it is not needed for full-gradient slabs.}
 created by [stan_subsampling()]. The selected Stan branch must add
 the unscaled sum of the installed observations; Julia applies `N / m`.}
 
-\item{full_gradient}{Optional non-factorized native full-gradient backend.
-Currently [omrf_full_gradient()] supports independent-prior OMRF models
-and provides an exact native Hessian-vector product for Boomerang-family
-and other full samplers.}
-
-\item{subsampling_warmup}{Warmup gradient backend for subsampling runs.
-`"subsampled"` preserves the existing behavior. `"full"` uses the exact
-native OMRF full gradient and HVP during warmup, then switches to the
-configured subsampling model for retained sampling.}
+\item{full_gradient}{Must be `NULL`. The native OMRF full-gradient backend
+was removed; full-data runs use the Stan model's gradient.}
 
 \item{subsampling_anchor_updates}{Number of prepared OMRF anchors added from
-continuous-time warmup means. With full-gradient subsampling warmup, zero
-prepares only the exact terminal warmup anchor.}
+continuous-time warmup means.}
 
 \item{subsampling_use_anchor_bank}{Retain prepared OMRF anchors and select
 the nearest entry at event boundaries. If false, updates replace the
-active anchor. Full-gradient subsampling warmup can enable the bank with
-zero scheduled updates because it prepares a terminal anchor.}
+active anchor.}
 
 \item{subsampling_anchor_bank_capacity}{Maximum prepared OMRF anchors kept
 per chain.}
@@ -102,11 +91,6 @@ per chain.}
 \item{subsampling_main_anchor_refresh_distance}{Positive Euclidean distance
 from the nearest prepared anchor that triggers a new exact OMRF anchor
 during main sampling. The default `Inf` disables main-phase preparation.}
-
-\item{subsampling_node_source_check_distance}{Nonnegative scaled Euclidean
-movement required before reconsidering node-local warmup-bank sources.
-Zero preserves checking at every event boundary. Skipped checks retain
-the previous certified node sources and do not change the target.}
 
 \item{subsampling_require_no_main_full_data}{If `TRUE`, fail the run when
 retained sampling performs any full-gradient evaluation, prepares an

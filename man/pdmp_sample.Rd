@@ -28,10 +28,8 @@ pdmp_sample(
   grid_t_max = 2,
   use_fd_hvp = FALSE,
   post_warmup_simplify = FALSE,
-  grid_bound = c("constant", "flat", "linear", "auto", "value_quadratic", "shared_node"),
+  grid_bound = c("value_quadratic", "constant"),
   grid_curvature_bound = NULL,
-  linear_area_threshold = 0.95,
-  linear_min_area_gain = 0,
   lazy_low_tightness_threshold = 0.1,
   lazy_max_low_tightness_rejections = 3L,
   lazy_max_rejections = 0L,
@@ -116,21 +114,15 @@ strategy may switch to a constant bound after warmup, reducing
 gradient calls during the main sampling phase.}
 
 \item{grid_bound}{Character string selecting the GridThinning proposal
-envelope. \code{"constant"} preserves the historical behavior.
-\code{"flat"}, \code{"linear"}, and \code{"auto"} expose signed-rate
-affine envelope machinery when supported by the chosen flow and derivative
-provider. \code{"shared_node"} is an experimental numerical clock using
-consecutive rate nodes and secant-disagreement inflation; it is not a
-mathematically certified thinning envelope.}
+envelope. \code{"value_quadratic"} (default) bounds each grid cell by
+the larger endpoint rate plus \code{grid_curvature_bound * h^2 / 8};
+without \code{grid_curvature_bound} the cells use the ordinary
+GridThinning construction. \code{"constant"} always uses the ordinary
+construction.}
 
-\item{grid_curvature_bound}{Optional nonnegative curvature bound required by
-the experimental `"shared_node"` grid bound.}
-
-\item{linear_area_threshold}{Numeric gate for \code{grid_bound = "linear"}
-or \code{"auto"}; affine cells are skipped when their relative area gain is
-too small.}
-
-\item{linear_min_area_gain}{Numeric absolute area-gain gate for affine cells.}
+\item{grid_curvature_bound}{Optional nonnegative bound on the curvature of
+the event rate over a grid cell, used by \code{grid_bound =
+"value_quadratic"}. Too small a value invalidates the envelope.}
 
 \item{lazy_low_tightness_threshold}{Nonnegative threshold used by lazy grid
 refinement diagnostics.}

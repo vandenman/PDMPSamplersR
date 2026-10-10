@@ -96,19 +96,15 @@ test_that("pdmp_sample rejects invalid gradient function", {
   expect_error(pdmp_sample(function(x) x[1], d = 2, flow = "ZigZag", T = 100), "length")
 })
 
-test_that("shared-node grid bounds require explicit inflation", {
-  shared <- PDMPSamplersR:::validate_pdmp_params(
-    d = 2, flow = "ZigZag", algorithm = "GridThinningStrategy", T = 10,
-    grid_bound = "shared_node", grid_curvature_bound = 2
-  )
-  expect_identical(shared$grid_bound, "shared_node")
-  expect_error(
-    PDMPSamplersR:::validate_pdmp_params(
+test_that("grid bounds default to value_quadratic and reject removed modes", {
+  params <- PDMPSamplersR:::validate_pdmp_params(
+    d = 2, flow = "ZigZag", algorithm = "GridThinningStrategy", T = 10)
+  expect_identical(params$grid_bound, "value_quadratic")
+  for (removed in c("flat", "linear", "auto", "shared_node")) {
+    expect_error(PDMPSamplersR:::validate_pdmp_params(
       d = 2, flow = "ZigZag", algorithm = "GridThinningStrategy", T = 10,
-      grid_bound = "shared_node"
-    ),
-    "grid_curvature_bound"
-  )
+      grid_bound = removed), "should be one of")
+  }
 })
 
 test_that("pdmp_sample forwards support-boundary diagnostics", {

@@ -82,10 +82,8 @@ validate_pdmp_params <- function(d, flow, algorithm, T, t0 = 0.0, t_warmup = 0.0
                                 slab_prior = NULL,
                                 grid_n = 30, grid_t_max = 2.0,
                                 post_warmup_simplify = FALSE,
-                                grid_bound = "constant",
+                                grid_bound = "value_quadratic",
                                 grid_curvature_bound = NULL,
-                                linear_area_threshold = 0.95,
-                                linear_min_area_gain = 0.0,
                                 n_chains = 1L, threaded = FALSE, seed = NULL,
                                 adaptive_scheme = "diagonal",
                                 unc_names = NULL,
@@ -110,7 +108,7 @@ validate_pdmp_params <- function(d, flow, algorithm, T, t0 = 0.0, t_warmup = 0.0
   grid_like_algorithms <- "GridThinningStrategy"
   algorithm <- match.arg(algorithm, c("ThinningStrategy", grid_like_algorithms, "RootsPoissonStrategy"))
   adaptive_scheme <- match.arg(adaptive_scheme, c("diagonal", "fullrank"))
-  grid_bound <- match.arg(grid_bound, c("constant", "flat", "linear", "auto", "value_quadratic", "shared_node"))
+  grid_bound <- match.arg(grid_bound, c("value_quadratic", "constant"))
 
   # AdaptiveBoomerang requires GridThinningStrategy and a warmup period
   if (flow == "AdaptiveBoomerang") {
@@ -252,20 +250,11 @@ validate_pdmp_params <- function(d, flow, algorithm, T, t0 = 0.0, t_warmup = 0.0
     if (!is.finite(grid_curvature_bound) || grid_curvature_bound < 0)
       cli::cli_abort("Argument {.arg grid_curvature_bound} must be NULL or a finite non-negative number.")
   }
-  if (grid_bound == "shared_node" && is.null(grid_curvature_bound)) {
-    cli::cli_abort("Argument {.arg grid_curvature_bound} is required for experimental {.val shared_node} bounds.")
-  }
-  validate_type(linear_area_threshold, type = "double", n = 1)
-  validate_type(linear_min_area_gain, type = "double", n = 1)
   validate_type(lazy_low_tightness_threshold, type = "double", n = 1)
   lazy_max_low_tightness_rejections <- cast_integer(lazy_max_low_tightness_rejections, n = 1)
   lazy_max_rejections <- cast_integer(lazy_max_rejections, n = 1)
   validate_type(lazy_max_low_tightness_rejections, type = "integer", n = 1, positive = TRUE)
   validate_type(lazy_max_rejections, type = "integer", n = 1)
-  if (linear_area_threshold < 0)
-    cli::cli_abort("Argument {.arg linear_area_threshold} must be non-negative.")
-  if (linear_min_area_gain < 0)
-    cli::cli_abort("Argument {.arg linear_min_area_gain} must be non-negative.")
   if (lazy_low_tightness_threshold < 0)
     cli::cli_abort("Argument {.arg lazy_low_tightness_threshold} must be non-negative.")
   if (lazy_max_rejections < 0)
@@ -281,8 +270,6 @@ validate_pdmp_params <- function(d, flow, algorithm, T, t0 = 0.0, t_warmup = 0.0
     post_warmup_simplify = post_warmup_simplify,
     grid_bound = grid_bound,
     grid_curvature_bound = grid_curvature_bound,
-    linear_area_threshold = linear_area_threshold,
-    linear_min_area_gain = linear_min_area_gain,
     lazy_low_tightness_threshold = lazy_low_tightness_threshold,
     lazy_max_low_tightness_rejections = lazy_max_low_tightness_rejections,
     lazy_max_rejections = lazy_max_rejections,
@@ -545,18 +532,14 @@ validate_support_boundary_control <- function(support_boundary) {
 #'   strategy may switch to a constant bound after warmup, reducing
 #'   gradient calls during the main sampling phase.
 #' @param grid_bound Character string selecting the GridThinning proposal
-#'   envelope. \code{"constant"} preserves the historical behavior.
-#'   \code{"flat"}, \code{"linear"}, and \code{"auto"} expose signed-rate
-#'   affine envelope machinery when supported by the chosen flow and derivative
-#'   provider. \code{"shared_node"} is an experimental numerical clock using
-#'   consecutive rate nodes and secant-disagreement inflation; it is not a
-#'   mathematically certified thinning envelope.
-#' @param grid_curvature_bound Optional nonnegative curvature bound required by
-#'   the experimental `"shared_node"` grid bound.
-#' @param linear_area_threshold Numeric gate for \code{grid_bound = "linear"}
-#'   or \code{"auto"}; affine cells are skipped when their relative area gain is
-#'   too small.
-#' @param linear_min_area_gain Numeric absolute area-gain gate for affine cells.
+#'   envelope. \code{"value_quadratic"} (default) bounds each grid cell by
+#'   the larger endpoint rate plus \code{grid_curvature_bound * h^2 / 8};
+#'   without \code{grid_curvature_bound} the cells use the ordinary
+#'   GridThinning construction. \code{"constant"} always uses the ordinary
+#'   construction.
+#' @param grid_curvature_bound Optional nonnegative bound on the curvature of
+#'   the event rate over a grid cell, used by \code{grid_bound =
+#'   "value_quadratic"}. Too small a value invalidates the envelope.
 #' @param lazy_low_tightness_threshold Nonnegative threshold used by lazy grid
 #'   refinement diagnostics.
 #' @param lazy_max_low_tightness_rejections Nonnegative number of consecutive
@@ -603,10 +586,8 @@ pdmp_sample <- function(f, d,
                         grid_n = 30, grid_t_max = 2.0,
                         use_fd_hvp = FALSE,
                         post_warmup_simplify = FALSE,
-                        grid_bound = c("constant", "flat", "linear", "auto", "value_quadratic", "shared_node"),
+                        grid_bound = c("value_quadratic", "constant"),
                         grid_curvature_bound = NULL,
-                        linear_area_threshold = 0.95,
-                        linear_min_area_gain = 0.0,
                         lazy_low_tightness_threshold = 0.1,
                         lazy_max_low_tightness_rejections = 3L,
                         lazy_max_rejections = 0L,
@@ -657,7 +638,6 @@ pdmp_sample <- function(f, d,
                                 sticky, can_stick, model_prior, parameter_prior, slab_prior,
                                 grid_n, grid_t_max, post_warmup_simplify,
                                 grid_bound, grid_curvature_bound,
-                                linear_area_threshold, linear_min_area_gain,
                                 n_chains, threaded, seed,
                                 adaptive_scheme = adaptive_scheme)
 
@@ -725,8 +705,6 @@ pdmp_sample <- function(f, d,
     post_warmup_simplify = post_warmup_simplify,
     grid_bound = grid_bound,
     grid_curvature_bound = grid_curvature_bound,
-    linear_area_threshold = linear_area_threshold,
-    linear_min_area_gain = linear_min_area_gain,
     t0 = t0, T = T, t_warmup = t_warmup,
     hessian = hessian_f,
     sticky = sticky, can_stick = can_stick,
@@ -866,10 +844,8 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
                         use_fd_hvp = FALSE,
                         curvature_backend = NULL,
                         post_warmup_simplify = FALSE,
-                        grid_bound = c("constant", "flat", "linear", "auto", "value_quadratic", "shared_node"),
+                        grid_bound = c("value_quadratic", "constant"),
                         grid_curvature_bound = NULL,
-                        linear_area_threshold = 0.95,
-                        linear_min_area_gain = 0.0,
                         lazy_low_tightness_threshold = 0.1,
                         lazy_max_low_tightness_rejections = 3L,
                         lazy_max_rejections = 0L,
@@ -1255,7 +1231,6 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
                                  sticky, can_stick, model_prior, parameter_prior, slab_prior,
                                  grid_n, grid_t_max, post_warmup_simplify,
                                  grid_bound, grid_curvature_bound,
-                                 linear_area_threshold, linear_min_area_gain,
                                  n_chains, threaded, seed,
                                  adaptive_scheme = adaptive_scheme,
                                  unc_names = unc_names,
@@ -1436,8 +1411,6 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
       post_warmup_simplify = post_warmup_simplify,
       grid_bound = grid_bound,
       grid_curvature_bound = grid_curvature_bound,
-      linear_area_threshold = linear_area_threshold,
-      linear_min_area_gain = linear_min_area_gain,
       lazy_low_tightness_threshold = lazy_low_tightness_threshold,
       lazy_max_low_tightness_rejections = lazy_max_low_tightness_rejections,
       lazy_max_rejections = lazy_max_rejections,
@@ -1475,8 +1448,6 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
       post_warmup_simplify = post_warmup_simplify,
       grid_bound = grid_bound,
       grid_curvature_bound = grid_curvature_bound,
-      linear_area_threshold = linear_area_threshold,
-      linear_min_area_gain = linear_min_area_gain,
       lazy_low_tightness_threshold = lazy_low_tightness_threshold,
       lazy_max_low_tightness_rejections = lazy_max_low_tightness_rejections,
       lazy_max_rejections = lazy_max_rejections,

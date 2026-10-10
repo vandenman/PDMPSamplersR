@@ -68,8 +68,7 @@ const _WORKER_STATE_ROOTS = (
     :_path_to_prior_stan_data_full, :_n_chains, :_curvature_backend,
     :flow, :algorithm, :x0, :theta0, :free0, :stored_velocity0,
     :flow_cov, :flow_mean, :c0, :grid_n, :grid_t_max,
-    :grid_bound, :grid_curvature_bound, :linear_area_threshold,
-    :linear_min_area_gain, :post_warmup_simplify,
+    :grid_bound, :grid_curvature_bound, :post_warmup_simplify,
     :t0, :T, :t_warmup, :f, :hessian_f, :hessian, :sticky, :can_stick, :model_prior,
     :parameter_prior, :slab_prior, :show_progress, :seed, :adaptive_scheme,
     :refresh_rate, :unc_names, :_unc_names, :subsampling_anchor_updates,
@@ -219,9 +218,8 @@ end
 
 function build_algorithm(algorithm_type::String; c0::Float64, d::Integer, grid_n::Int, grid_t_max::Float64,
         use_fd_hvp::Bool=false, curvature_backend::String="auto",
-        post_warmup_simplify::Bool=false, grid_bound::String="constant",
+        post_warmup_simplify::Bool=false, grid_bound::String="value_quadratic",
         grid_curvature_bound::Union{Nothing,Float64}=nothing,
-        linear_area_threshold::Float64=0.95, linear_min_area_gain::Float64=0.0,
         lazy_low_tightness_threshold::Float64=0.1,
         lazy_max_low_tightness_rejections::Int=3,
         lazy_max_rejections::Int=0)
@@ -239,8 +237,6 @@ function build_algorithm(algorithm_type::String; c0::Float64, d::Integer, grid_n
             bound = Symbol(grid_bound),
             bound_violation = bound_violation,
             curvature_bound = grid_curvature_bound,
-            linear_area_threshold = linear_area_threshold,
-            linear_min_area_gain = linear_min_area_gain,
             lazy_low_tightness_threshold = lazy_low_tightness_threshold,
             lazy_max_low_tightness_rejections = lazy_max_low_tightness_rejections,
             lazy_max_rejections = lazy_max_rejections)
@@ -1811,10 +1807,8 @@ function r_pdmp_stan(
         use_fd_hvp::Bool = false,
         curvature_backend::String = "auto",
         post_warmup_simplify::Bool = true,
-        grid_bound::String = "constant",
+        grid_bound::String = "value_quadratic",
         grid_curvature_bound::Union{Nothing,Float64} = nothing,
-        linear_area_threshold::Float64 = 0.95,
-        linear_min_area_gain::Float64 = 0.0,
         lazy_low_tightness_threshold::Float64 = 0.1,
         lazy_max_low_tightness_rejections::Int = 3,
         lazy_max_rejections::Int = 0,
@@ -1869,7 +1863,6 @@ function r_pdmp_stan(
     initial_refresh_rate = try Float64(PDMPSamplers.refresh_rate(flow)) catch; NaN end
     alg0 = build_algorithm(algorithm_type; c0, d, grid_n, grid_t_max, use_fd_hvp, curvature_backend,
         post_warmup_simplify, grid_bound, grid_curvature_bound,
-        linear_area_threshold, linear_min_area_gain,
         lazy_low_tightness_threshold, lazy_max_low_tightness_rejections,
         lazy_max_rejections)
     alg = _build_sticky_event_algorithm(alg0, sticky, model_prior,
@@ -1950,10 +1943,8 @@ function r_pdmp_custom(
         grid_n::Int = 30,
         grid_t_max::Float64 = 2.0,
         post_warmup_simplify::Bool = true,
-        grid_bound::String = "constant",
+        grid_bound::String = "value_quadratic",
         grid_curvature_bound::Union{Nothing,Float64} = nothing,
-        linear_area_threshold::Float64 = 0.95,
-        linear_min_area_gain::Float64 = 0.0,
         t0::Float64 = 0.0,
         T::Float64 = 10000.0,
         t_warmup::Float64 = 0.0,
@@ -2018,8 +2009,7 @@ function r_pdmp_custom(
     flow = build_flow(flow_type, prec, flow_mean_vec; adaptive_scheme, refresh_rate)
     initial_refresh_rate = try Float64(PDMPSamplers.refresh_rate(flow)) catch; NaN end
     alg0 = build_algorithm(algorithm_type; c0, d, grid_n, grid_t_max,
-        post_warmup_simplify, grid_bound, grid_curvature_bound,
-        linear_area_threshold, linear_min_area_gain)
+        post_warmup_simplify, grid_bound, grid_curvature_bound)
     alg = isnothing(slab_prior) ?
         wrap_sticky(alg0, sticky, model_prior, parameter_prior_vec, can_stick_vec) :
         wrap_dependent_sticky(alg0, sticky, model_prior, slab_prior, can_stick_vec, flow)
@@ -2157,7 +2147,6 @@ function _run_subsampling_brms_subsampled(lib_path_std::String,
         flow_type::String, algorithm_type::String, flow_mean, flow_cov,
         output_csv::String; c0::Float64, grid_n::Int, grid_t_max::Float64,
         grid_bound::String, grid_curvature_bound::Union{Nothing,Float64},
-        linear_area_threshold::Float64, linear_min_area_gain::Float64,
         t0::Float64, T::Float64, t_warmup::Float64,
         adaptive_scheme::String, discretize_dt::Float64,
         show_progress::Bool, n_chains::Int, threaded::Bool,
@@ -2208,8 +2197,7 @@ function _run_subsampling_brms_subsampled(lib_path_std::String,
     flow = build_flow(flow_type, prec, fmean; adaptive_scheme)
     initial_refresh_rate = try Float64(PDMPSamplers.refresh_rate(flow)) catch; NaN end
     alg = build_algorithm(algorithm_type; c0, d, grid_n, grid_t_max,
-        use_fd_hvp, post_warmup_simplify, grid_bound, grid_curvature_bound,
-        linear_area_threshold, linear_min_area_gain)
+        use_fd_hvp, post_warmup_simplify, grid_bound, grid_curvature_bound)
     alg = wrap_sticky(alg, sticky, model_prior, parameter_prior, can_stick)
     if anchor_capacity == 0
         chains = pdmp_sample(anchor, flow, models, alg, t0, T, t_warmup;
@@ -2283,10 +2271,8 @@ function r_pdmp_brms_subsampling(
         c0::Float64 = 1e-2,
         grid_n::Int = 30,
         grid_t_max::Float64 = 2.0,
-        grid_bound::String = "constant",
+        grid_bound::String = "value_quadratic",
         grid_curvature_bound::Union{Nothing,Float64} = nothing,
-        linear_area_threshold::Float64 = 0.95,
-        linear_min_area_gain::Float64 = 0.0,
         t0::Float64 = 0.0,
         T::Float64 = 10000.0,
         t_warmup::Float64 = 0.0,
@@ -2325,8 +2311,7 @@ function r_pdmp_brms_subsampling(
         Vector{Float64}(observation_multipliers),
         flow_type, algorithm_type,
         flow_mean, flow_cov, output_csv;
-        c0, grid_n, grid_t_max, grid_bound, grid_curvature_bound,
-        linear_area_threshold, linear_min_area_gain, t0, T, t_warmup,
+        c0, grid_n, grid_t_max, grid_bound, grid_curvature_bound, t0, T, t_warmup,
         adaptive_scheme, discretize_dt, show_progress, n_chains, threaded,
         seed, compute_lp, use_fd_hvp, post_warmup_simplify,
         sticky, can_stick, model_prior, parameter_prior,
@@ -2344,10 +2329,8 @@ function r_pdmp_stan_for_brms(
         c0::Float64 = 1e-2,
         grid_n::Int = 30,
         grid_t_max::Float64 = 2.0,
-        grid_bound::String = "constant",
+        grid_bound::String = "value_quadratic",
         grid_curvature_bound::Union{Nothing,Float64} = nothing,
-        linear_area_threshold::Float64 = 0.95,
-        linear_min_area_gain::Float64 = 0.0,
         t0::Float64 = 0.0,
         T::Float64 = 10000.0,
         t_warmup::Float64 = 0.0,
@@ -2387,9 +2370,7 @@ function r_pdmp_stan_for_brms(
     flow = build_flow(flow_type, prec, fmean; adaptive_scheme)
     initial_refresh_rate = try Float64(PDMPSamplers.refresh_rate(flow)) catch; NaN end
     alg0 = build_algorithm(algorithm_type; c0, d, grid_n, grid_t_max,
-        use_fd_hvp, post_warmup_simplify, grid_bound, grid_curvature_bound,
-        linear_area_threshold,
-        linear_min_area_gain)
+        use_fd_hvp, post_warmup_simplify, grid_bound, grid_curvature_bound)
     alg = isnothing(slab_prior) ?
         wrap_sticky(alg0, sticky, model_prior, parameter_prior_vec, can_stick_vec) :
         wrap_dependent_sticky(alg0, sticky, model_prior, slab_prior, can_stick_vec, flow, unc_names_vec)

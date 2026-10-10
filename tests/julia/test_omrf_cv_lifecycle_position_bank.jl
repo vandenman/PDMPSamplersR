@@ -56,7 +56,7 @@ end
         alg = GridThinningStrategy(; N=4, t_max=0.02, lazy=false,
             bound_violation=:throw)
         observed = Ref(false)
-        PDMPSamplers.set_phase_first_proposal_observer!(
+        observer = PDMPSamplers.SamplerObserver(; phase_start=
             (phase, state, live_model, flow, alg, cache) -> begin
                 phase === :main || return
                 cv = live_cv(live_model.grad)
@@ -67,14 +67,10 @@ end
                 @test cv.residual_oracle.f.anchor == manager.oracle.anchor
                 observed[] = true
             end)
-        try
-            pdmp_sample(SkeletonPoint(fill(0.15, 9), fill(0.4, 9)), flow,
-                model, alg, 0.0, warmup + 0.02, warmup;
-                adapter, progress=false, seed=7301,
-                statistic_counter=PDMPSamplers.DevelStatisticCounter)
-        finally
-            PDMPSamplers.set_phase_first_proposal_observer!(nothing)
-        end
+        pdmp_sample(SkeletonPoint(fill(0.15, 9), fill(0.4, 9)), flow,
+            model, alg, 0.0, warmup + 0.02, warmup;
+            adapter, progress=false, seed=7301,
+            statistic_counter=PDMPSamplers.DevelStatisticCounter, observer)
         @test observed[]
         @test manager.oracle.anchor != zeros(9)
     end
@@ -419,7 +415,7 @@ end
     path_adapter.update_dt = Inf
     prepared_before_path = path_manager.preparations
     scheduler_records = NamedTuple[]
-    PDMPSamplers.set_phase_step_observer!(
+    scheduler_observer = PDMPSamplers.SamplerObserver(; step=
         (stage, phase, observed_state, criterion_horizon, adapter_horizon,
                 event_type, observed_stats) -> push!(scheduler_records, (
             stage, phase, physical_time=Float64(observed_state.t[]),
@@ -428,17 +424,14 @@ end
             pending_target=path_manager.pending_boundary_idx,
             event_type,
             rejection=Bool(observed_stats.last_rejected))))
-    path_result = try
-        pdmp_sample(
-            SkeletonPoint([-0.251; zeros(8)], [2.0; fill(0.05, 8)]),
-            BouncyParticle(9, 0.5), path_model,
-            GridThinningStrategy(; N=4, t_max=0.01, lazy=false,
-                bound_violation=:throw), 0.0, 0.04, 0.0;
-            adapter=path_adapter, progress=false, seed=7511,
-            statistic_counter=PDMPSamplers.DevelStatisticCounter)
-    finally
-        PDMPSamplers.set_phase_step_observer!(nothing)
-    end
+    path_result = pdmp_sample(
+        SkeletonPoint([-0.251; zeros(8)], [2.0; fill(0.05, 8)]),
+        BouncyParticle(9, 0.5), path_model,
+        GridThinningStrategy(; N=4, t_max=0.01, lazy=false,
+            bound_violation=:throw), 0.0, 0.04, 0.0;
+        adapter=path_adapter, progress=false, seed=7511,
+        statistic_counter=PDMPSamplers.DevelStatisticCounter,
+        observer=scheduler_observer)
     path_trace = path_result.traces[1]
     @test path_manager.selection_boundaries >= 2
     @test path_manager.preparations == prepared_before_path

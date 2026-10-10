@@ -271,6 +271,15 @@ end
 
 end
 
+@testset "Boomerang log-scale floor name resolution is exact" begin
+    names = ["thresholds_0.1", "global_scale", "node_scale.1",
+        "node_scale_extra", "interactions_0.1"]
+    @test PDMPSamplersRBridge._boomerang_logscale_floor_mask(names, 5) ==
+        BitVector([false, true, true, false, false])
+    @test_throws DimensionMismatch PDMPSamplersRBridge._boomerang_logscale_floor_mask(
+        names, 4)
+end
+
 @testset "retained full-data invariant reports every work category" begin
     clean = [Dict{String,Any}(
         "anchor_main_preparations" => 0,

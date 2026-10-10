@@ -100,7 +100,10 @@ function _boomerang_logscale_floor_mask(unc_names, d::Integer)
     names = String.(unc_names)
     length(names) == d || throw(DimensionMismatch(
         "parameter-name count $(length(names)) does not match dimension $d"))
-    return PDMPSamplers.boomerang_logscale_variance_floor_mask(names)
+    # The research variance safeguard applies to the hierarchical log-scale
+    # parameters of the OMRF Stan models.
+    return BitVector(name == "global_scale" || startswith(name, "node_scale.")
+        for name in names)
 end
 
 _subsampling_collection_values(values::Union{AbstractVector,Tuple}) = values

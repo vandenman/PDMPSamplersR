@@ -116,7 +116,7 @@ end
         flow = PDMPSamplersRBridge.build_flow("PreconditionedZigZag",
             precision, zeros(d))
         function initialized_velocity(seed)
-            rng = PDMPSamplers._make_initial_rng(seed, 1)
+            rng = PDMPSamplers.make_initial_rng(seed, 1)
             velocity = PDMPSamplers.initialize_velocity(rng, flow, d)
             velocity[interactions] .= 0.0
             return velocity

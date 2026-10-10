@@ -173,7 +173,7 @@ function _build_sticky_event_algorithm(alg0, sticky::Bool, model_prior,
 end
 
 function _resolved_flow_mean(flow)
-    base = PDMPSamplers._underlying_flow(flow)
+    base = PDMPSamplers.underlying_flow(flow)
     return hasproperty(base, :μ) ? Vector{Float64}(getproperty(base, :μ)) : Float64[]
 end
 
@@ -190,7 +190,7 @@ function _resolved_flow_covariance(flow)
             return Matrix{Float64}(I, d, d)
         end
     end
-    base = PDMPSamplers._underlying_flow(flow)
+    base = PDMPSamplers.underlying_flow(flow)
     if hasproperty(base, :ΣL)
         factor = getproperty(base, :ΣL)
         return Matrix{Float64}(factor * transpose(factor))
@@ -203,7 +203,7 @@ end
 
 function _flow_spec(flow)
     Dict("flow_type" => string(typeof(flow)),
-         "inner_flow_type" => string(typeof(PDMPSamplers._underlying_flow(flow))),
+         "inner_flow_type" => string(typeof(PDMPSamplers.underlying_flow(flow))),
          "mean" => _resolved_flow_mean(flow),
          "covariance" => _resolved_flow_covariance(flow))
 end
@@ -615,7 +615,7 @@ function _flow_provenance(chains::PDMPChains, requested_flow::String,
         t_warmup::Float64=0.0)
     trace = chains.traces[1]
     flow = trace.flow
-    underlying = PDMPSamplers._underlying_flow(flow)
+    underlying = PDMPSamplers.underlying_flow(flow)
     preconditioner = flow isa PDMPSamplers.PreconditionedDynamics ?
         string(typeof(flow.metric)) : "None"
     adaptation_class = if flow isa PDMPSamplers.PreconditionedDynamics &&
@@ -918,16 +918,16 @@ function r_chain_streaming_reflection_jump_summary(chains::PDMPChains;
         "reflection-jump summary requires a streaming trace"))
     covariance = _resolved_flow_covariance(trace.flow)
     inverse_scale = 1.0 ./ sqrt.(diag(covariance))
-    cursor = PDMPSamplers._stream_cursor(trace)
+    cursor = PDMPSamplers.stream_cursor(trace)
     count = 0
     total = 0.0
     maximum = 0.0
     for metadata in trace.chunks
-        chunk = PDMPSamplers._load_streaming_chunk(metadata)
+        chunk = PDMPSamplers.load_streaming_chunk(metadata)
         @inbounds for event in eachindex(chunk.times)
             kind = chunk.kinds[event]
             jump = 0.0
-            if kind == PDMPSamplers._STREAM_EVENT_REFLECT_FULL
+            if kind == PDMPSamplers.STREAM_EVENT_REFLECT_FULL
                 after = view(chunk.full_effective_velocities, :,
                     Int(chunk.full_slots[event]))
                 for i in eachindex(cursor.velocity)
@@ -937,19 +937,19 @@ function r_chain_streaming_reflection_jump_summary(chains::PDMPChains;
                         jump += delta * delta
                     end
                 end
-            elseif kind == PDMPSamplers._STREAM_EVENT_REFLECT_COORD
+            elseif kind == PDMPSamplers.STREAM_EVENT_REFLECT_COORD
                 i = Int(chunk.coordinates[event])
                 delta = (chunk.velocities[event] - cursor.velocity[i]) *
                     inverse_scale[i]
                 jump = delta * delta
             end
-            if kind == PDMPSamplers._STREAM_EVENT_REFLECT_FULL ||
-                    kind == PDMPSamplers._STREAM_EVENT_REFLECT_COORD
+            if kind == PDMPSamplers.STREAM_EVENT_REFLECT_FULL ||
+                    kind == PDMPSamplers.STREAM_EVENT_REFLECT_COORD
                 count += 1
                 total += jump
                 maximum = max(maximum, jump)
             end
-            PDMPSamplers._stream_apply_event!(cursor, chunk, event)
+            PDMPSamplers.stream_apply_event!(cursor, chunk, event)
         end
     end
     return Float64[count, total, iszero(count) ? NaN : total / count,
@@ -1076,7 +1076,7 @@ function r_from_streaming_skeleton(directory_list::AbstractVector,
             BitVector(terminal_free_masks_list[i]), flow)
         directory = String(directory_list[i])
         chunk_count = Int(chunk_count_list[i])
-        trace = PDMPSamplers._restore_streaming_trace(directory, chunk_count,
+        trace = PDMPSamplers.restore_streaming_trace(directory, chunk_count,
             flow, initial, terminal;
             physical_events=Int(physical_events_list[i]),
             computational_boundaries=Int(computational_boundaries_list[i]),
@@ -1092,7 +1092,7 @@ end
         model_first, model_second, bin::Int, coordinates, edge_local,
         x, velocity, free, elapsed::Float64, flow)
     elapsed <= 0 && return nothing
-    base = PDMPSamplers._underlying_flow(flow)
+    base = PDMPSamplers.underlying_flow(flow)
     is_boomerang = base isa PDMPSamplers.AnyBoomerang
     model_size = 0
     @inbounds for ii in eachindex(coordinates)
@@ -1131,7 +1131,7 @@ function _r_stream_state_at!(out_x, out_velocity, out_free, column, x, velocity,
         elapsed, flow, coordinates)
     scratch_x = copy(x)
     scratch_velocity = copy(velocity)
-    PDMPSamplers._stream_move!(scratch_x, scratch_velocity, free, elapsed, flow)
+    PDMPSamplers.stream_move!(scratch_x, scratch_velocity, free, elapsed, flow)
     @inbounds for ii in eachindex(coordinates)
         j = coordinates[ii]
         out_x[ii, column] = scratch_x[j]
@@ -1153,7 +1153,7 @@ function r_streaming_scientific_reduction(chains::PDMPChains,
     trace = chains.traces[chain]
     trace isa PDMPSamplers.StreamingPDMPTrace || throw(ArgumentError(
         "scientific streaming reduction requires a streaming trace"))
-    trace.finalized || PDMPSamplers._flush_streaming_trace!(trace)
+    trace.finalized || PDMPSamplers.flush_streaming_trace!(trace)
     coordinates = Int.(coordinates_raw)
     edge_mask = Bool.(edge_mask_raw)
     edge_local = edge_mask[coordinates]
@@ -1183,7 +1183,7 @@ function r_streaming_scientific_reduction(chains::PDMPChains,
     grid_value = Matrix{Float64}(undef, q, length(grid_times))
     grid_velocity = Matrix{Float64}(undef, q, length(grid_times))
     grid_free = Matrix{Bool}(undef, q, length(grid_times))
-    cursor = PDMPSamplers._stream_cursor(trace)
+    cursor = PDMPSamplers.stream_cursor(trace)
     absolute_time = initial.t
     local_time = 0.0
     bin = 1
@@ -1199,7 +1199,7 @@ function r_streaming_scientific_reduction(chains::PDMPChains,
             _r_stream_integrate_piece!(first, second, occupancy, model_first,
                 model_second, bin, coordinates, edge_local, cursor.x,
                 cursor.velocity, cursor.free, elapsed, trace.flow)
-            PDMPSamplers._stream_move!(cursor.x, cursor.velocity, cursor.free,
+            PDMPSamplers.stream_move!(cursor.x, cursor.velocity, cursor.free,
                 elapsed, trace.flow)
             local_time = stop
             if bin < nb && local_time >= edges[bin + 1] - tol
@@ -1211,7 +1211,7 @@ function r_streaming_scientific_reduction(chains::PDMPChains,
     end
 
     for metadata in trace.chunks
-        chunk = PDMPSamplers._load_streaming_chunk(metadata)
+        chunk = PDMPSamplers.load_streaming_chunk(metadata)
         @inbounds for event in eachindex(chunk.times)
             event_local = chunk.times[event] - initial.t
             if event_local > duration && event_local <= duration + tol
@@ -1229,12 +1229,12 @@ function r_streaming_scientific_reduction(chains::PDMPChains,
             end
             advance_to!(event_local)
             kind = chunk.kinds[event]
-            changed_coordinate = kind in (PDMPSamplers._STREAM_EVENT_FREEZE,
-                PDMPSamplers._STREAM_EVENT_RELEASE) ?
+            changed_coordinate = kind in (PDMPSamplers.STREAM_EVENT_FREEZE,
+                PDMPSamplers.STREAM_EVENT_RELEASE) ?
                 Int(chunk.coordinates[event]) : 0
             before_free = changed_coordinate == 0 ? false :
                 cursor.free[changed_coordinate]
-            PDMPSamplers._stream_apply_event!(cursor, chunk, event)
+            PDMPSamplers.stream_apply_event!(cursor, chunk, event)
             transition_bin = clamp(searchsortedfirst(edges, event_local) - 1,
                 1, nb)
             if changed_coordinate != 0 && before_free != cursor.free[changed_coordinate]
@@ -1323,8 +1323,8 @@ function r_streaming_dense_test_reference(chains::PDMPChains; chain::Int=1)
     end
     return (times=times, positions=reduce(hcat, positions),
         velocities=reduce(hcat, velocities), free_masks=reduce(hcat, masks),
-        is_boomerang=PDMPSamplers._underlying_flow(trace.flow) isa AnyBoomerang,
-        is_mutable=PDMPSamplers._underlying_flow(trace.flow) isa MutableBoomerang,
+        is_boomerang=PDMPSamplers.underlying_flow(trace.flow) isa AnyBoomerang,
+        is_mutable=PDMPSamplers.underlying_flow(trace.flow) isa MutableBoomerang,
         mu=_resolved_flow_mean(trace.flow),
         flow_cov=_resolved_flow_covariance(trace.flow))
 end
@@ -1369,11 +1369,11 @@ function r_chain_free_masks(chains::PDMPChains; chain::Int)
 end
 
 function r_chain_is_boomerang(chains::PDMPChains; chain::Int)
-    PDMPSamplers._underlying_flow(chains.traces[chain].flow) isa AnyBoomerang
+    PDMPSamplers.underlying_flow(chains.traces[chain].flow) isa AnyBoomerang
 end
 
 function r_chain_is_mutable_boomerang(chains::PDMPChains; chain::Int)
-    PDMPSamplers._underlying_flow(chains.traces[chain].flow) isa MutableBoomerang
+    PDMPSamplers.underlying_flow(chains.traces[chain].flow) isa MutableBoomerang
 end
 
 function r_chain_mu(chains::PDMPChains; chain::Int)
@@ -1433,7 +1433,7 @@ r_chain_flow_spec(chains::PDMPChains; chain::Int) =
     _flow_spec(chains.traces[chain].flow)
 
 function _final_lambda_ref(chains::PDMPChains, chain::Int)
-    base = PDMPSamplers._underlying_flow(chains.traces[chain].flow)
+    base = PDMPSamplers.underlying_flow(chains.traces[chain].flow)
     return base isa AnyBoomerang ? Float64(base.λref) : NaN
 end
 
@@ -1876,7 +1876,7 @@ function r_pdmp_stan(
         # coordinates initialized exactly on their face start inactive; all
         # other coordinates retain the generated invariant velocity.
         velocity = PDMPSamplers.initialize_velocity(
-            PDMPSamplers._make_initial_rng(seed, n_chains), flow, d)
+            PDMPSamplers.make_initial_rng(seed, n_chains), flow, d)
         if sticky
             @inbounds for i in eachindex(velocity, x0_vec, can_stick_vec)
                 can_stick_vec[i] && iszero(x0_vec[i]) && (velocity[i] = 0.0)

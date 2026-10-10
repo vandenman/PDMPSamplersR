@@ -2144,7 +2144,7 @@ end
 
 PDMPSamplers.n_observations(envelope::OMRFDirectPersonNodeHCVEnvelope) =
     envelope.n_persons
-PDMPSamplers._trajectory_scale_anchor(
+PDMPSamplers.trajectory_scale_anchor(
     envelope::OMRFDirectPersonNodeHCVEnvelope) = envelope.anchor
 
 @inline function _omrf_shared_equal(workspace::OMRFSharedCurrentWorkspace,
@@ -2462,7 +2462,7 @@ end
 # dispatch rather than through the legacy callback field.  Tell the generic
 # grid validator about that explicit implementation; this does not weaken the
 # validation for any other envelope.
-PDMPSamplers._validate_subsampling_grid_envelope(
+PDMPSamplers.validate_subsampling_grid_envelope(
     ::PDMPSamplers.AnyBoomerang,
     ::OMRFDirectPersonNodeHCVEnvelope) = nothing
 
@@ -2787,8 +2787,7 @@ function PDMPSamplers.deterministic_gradient!(out,
     provider = cv.deterministic_gradient!
     if provider isa PDMPSamplers.WithStats
         PDMPSamplers._inc_counter_∇f_calls(provider.stats)
-        PDMPSamplers._inc_gradient_purpose!(
-            provider.stats, Val(:deterministic_gradient))
+        PDMPSamplers._inc_counter_deterministic_gradient_calls(provider.stats)
     end
     # A dependent slab (node-scale prior) wraps the oracle in a slab correction;
     # the fast path below then adds the same correction, so that the
@@ -3405,11 +3404,11 @@ end
         "direct HCV proposal time is outside the cached active grid"))
 end
 
-PDMPSamplers._joint_signed_group_enabled(
+PDMPSamplers.joint_signed_group_enabled(
     envelope::OMRFDirectPersonNodeHCVEnvelope) =
     envelope.joint_group_size > 0
 
-function PDMPSamplers._joint_signed_cell_mass!(cv,
+function PDMPSamplers.joint_signed_cell_mass!(cv,
         envelope::OMRFDirectPersonNodeHCVEnvelope, state, flow,
         left::Float64, right::Float64)
     envelope.joint_group_size > 0 || throw(ArgumentError(
@@ -3494,13 +3493,13 @@ function PDMPSamplers._joint_signed_cell_mass!(cv,
     return mass
 end
 
-function PDMPSamplers._joint_signed_active_mass!(
+function PDMPSamplers.joint_signed_active_mass!(
         envelope::OMRFDirectPersonNodeHCVEnvelope, state, t)
     _omrf_direct_activate_time!(envelope, state, t)
     return @inbounds envelope.joint_cell_mass[envelope.active_cell]
 end
 
-function PDMPSamplers._joint_signed_draw_mark!(rng::Random.AbstractRNG,
+function PDMPSamplers.joint_signed_draw_mark!(rng::Random.AbstractRNG,
         envelope::OMRFDirectPersonNodeHCVEnvelope, subset::Vector{Int})
     cell = envelope.active_cell
     B = size(envelope.joint_groups, 2)
@@ -3566,7 +3565,7 @@ function PDMPSamplers.observation_residual_bound(
 end
 
 
-function PDMPSamplers._draw_component(rng::Random.AbstractRNG,
+function PDMPSamplers.draw_component(rng::Random.AbstractRNG,
         envelope::OMRFDirectPersonNodeHCVEnvelope,
         B::Real)::Int
     cell = envelope.active_cell
@@ -3596,7 +3595,7 @@ end
         envelope.person_cell_cumulative[person - 1, cell]
 end
 
-PDMPSamplers._draw_distinguished(rng::Random.AbstractRNG,
+PDMPSamplers.draw_distinguished(rng::Random.AbstractRNG,
     ::OMRFDirectPersonNodeHCVEnvelope, observation::Int) = observation
 
 @inline function PDMPSamplers.begin_subsampling_mark!(
@@ -3674,9 +3673,9 @@ function PDMPSamplers.draw_subset!(rng::Random.AbstractRNG,
     residual_source = !(iszero(B) ||
         (!iszero(D) && rand(rng) * total <= D))
     if residual_source
-        cv.subset[1] = PDMPSamplers._draw_component(rng, envelope, B)
+        cv.subset[1] = PDMPSamplers.draw_component(rng, envelope, B)
     else
-        PDMPSamplers._draw_base_subset!(rng, cv, cv.subset_design)
+        PDMPSamplers.draw_base_subset!(rng, cv, cv.subset_design)
     end
     PDMPSamplers.record_subsampling_mark_source!(
         cv.residual_oracle, residual_source)
@@ -3846,11 +3845,11 @@ end
 function PDMPSamplers.subsampling_subset_bound(
         oracle::OMRFAnalyticSubsamplingOracle, state, gradient, flow,
         D, M, subset, scale)
-    oracle.exact_selected_refinement || return PDMPSamplers._signed_subset_bound(
+    oracle.exact_selected_refinement || return PDMPSamplers.signed_subset_bound(
         state, gradient, flow, D, M)
     supported_flow = flow isa Union{ZigZag,BouncyParticle,
         PDMPSamplers.AnyBoomerang,PDMPSamplers.PreconditionedDynamics}
-    supported_flow || return PDMPSamplers._signed_subset_bound(
+    supported_flow || return PDMPSamplers.signed_subset_bound(
         state, gradient, flow, D, M)
     oracle.cached_residual_valid ||
         _omrf_prepare_exact_selected_residual!(oracle, state, subset)
@@ -4644,7 +4643,7 @@ function _finish_omrf_warmup!(manager::OMRFAnchorManager,
     trace = trace_manager === nothing ? nothing :
         PDMPSamplers.get_warmup_trace(trace_manager)
     if frozen_bank && trace !== nothing &&
-            PDMPSamplers._has_integrable_segment(trace)
+            PDMPSamplers.has_integrable_segment(trace)
         representatives, scales = _omrf_representative_anchors(
             trace, position, manager.capacity)
         prepared = [_prepare_omrf_anchor(manager, view(representatives, :, idx))
@@ -4688,7 +4687,7 @@ function _finish_omrf_warmup!(manager::OMRFAnchorManager,
     # the phase boundary authoritative even when the selected entry index did
     # not change.
     active_state = manager.entries[manager.active_idx].state
-    envelope_anchor = PDMPSamplers._trajectory_scale_anchor(cv.envelope)
+    envelope_anchor = PDMPSamplers.trajectory_scale_anchor(cv.envelope)
     needs_sync = cv.anchor != active_state.anchor ||
         manager.oracle.anchor != active_state.anchor ||
         (envelope_anchor !== nothing && envelope_anchor != active_state.anchor)

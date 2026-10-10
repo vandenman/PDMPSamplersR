@@ -62,7 +62,7 @@ end
                 cv = live_cv(live_model.grad)
                 @test cv !== nothing
                 @test cv.anchor == manager.oracle.anchor
-                @test PDMPSamplers._trajectory_scale_anchor(cv.envelope) ==
+                @test PDMPSamplers.trajectory_scale_anchor(cv.envelope) ==
                     manager.oracle.anchor
                 @test cv.residual_oracle.f.anchor == manager.oracle.anchor
                 observed[] = true
@@ -131,11 +131,11 @@ end
     @test PDMPSamplersRBridge._insert_omrf_anchor!(manager, prepared) == 1
     manager.active_idx = 1
     PDMPSamplersRBridge._install_omrf_anchor!(manager, prepared)
-    @test PDMPSamplers._trajectory_scale_anchor(wrapped.grad.envelope) != forced
+    @test PDMPSamplers.trajectory_scale_anchor(wrapped.grad.envelope) != forced
     @test PDMPSamplersRBridge._finish_omrf_warmup!(
         manager, wrapped.grad, forced)
     @test wrapped.grad.anchor == forced
-    @test PDMPSamplers._trajectory_scale_anchor(wrapped.grad.envelope) == forced
+    @test PDMPSamplers.trajectory_scale_anchor(wrapped.grad.envelope) == forced
 
     # Exact weighted Voronoi crossings.  The bank is prepared once, then the
     # position policy performs no preparation or replacement.
@@ -178,7 +178,7 @@ end
     @test state.stored_velocity == before[4]
     @test manager.preparations == preparations
     @test cv.anchor == manager.oracle.anchor ==
-        PDMPSamplers._trajectory_scale_anchor(cv.envelope)
+        PDMPSamplers.trajectory_scale_anchor(cv.envelope)
 
     # The same frozen global bank has exact harmonic Voronoi deadlines for
     # Boomerang.  A transverse crossing is owned at x=1, while a tangent

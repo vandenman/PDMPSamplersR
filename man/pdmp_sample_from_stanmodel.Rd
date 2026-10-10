@@ -14,8 +14,11 @@ pdmp_sample_from_stanmodel(
   subsampling_anchor_updates = 0L,
   subsampling_use_anchor_bank = FALSE,
   subsampling_anchor_bank_capacity = 8L,
+  subsampling_anchor_selection_policy = c("adaptive", "position"),
+  subsampling_position_anchor_bank_spec = NULL,
   subsampling_main_anchor_refresh_distance = Inf,
   subsampling_require_no_main_full_data = FALSE,
+  subsampling_diagnostic_window = 0,
   flow = c("ZigZag", "BouncyParticle", "Boomerang", "AdaptiveBoomerang",
     "PreconditionedZigZag", "PreconditionedBPS"),
   algorithm = c("ThinningStrategy", "GridThinningStrategy", "RootsPoissonStrategy"),
@@ -23,11 +26,15 @@ pdmp_sample_from_stanmodel(
   t0 = 0,
   t_warmup = 0,
   warmup_adaptation_interval = NULL,
+  boomerang_variance_floor_fraction = 0,
   flow_mean = NULL,
   flow_cov = NULL,
   c0 = 0.01,
+  flow_specification = c("auto", "initial", "frozen"),
   x0 = NULL,
   theta0 = NULL,
+  free0 = NULL,
+  stored_velocity0 = NULL,
   sticky = FALSE,
   can_stick = NULL,
   model_prior = NULL,
@@ -50,7 +57,12 @@ pdmp_sample_from_stanmodel(
   threaded = FALSE,
   seed = NULL,
   adaptive_scheme = c("diagonal", "fullrank"),
+  refresh_rate = 1,
   materialize = TRUE,
+  trace_storage = c("dense", "streaming"),
+  streaming_trace_directory = NULL,
+  streaming_trace_buffer_events = 4096L,
+  online_summaries = NULL,
   support_boundary = support_boundary_control()
 )
 }
@@ -88,6 +100,17 @@ active anchor.}
 \item{subsampling_anchor_bank_capacity}{Maximum prepared OMRF anchors kept
 per chain.}
 
+\item{subsampling_anchor_selection_policy}{Research anchor-bank policy.
+`"adaptive"` preserves the existing event-history/envelope policy;
+`"position"` selects one frozen finite bank source by weighted position
+and supports linear Zig--Zag/BPS and harmonic Boomerang flows.}
+
+\item{subsampling_position_anchor_bank_spec}{Optional version-1 mathematical
+position-bank specification saved on a previous result. Restoration
+rebuilds prepared provider quantities from its ordered positions and
+frozen distance scales; it requires zero warmup and matching dataset,
+parameter-order, and envelope/grouping identities.}
+
 \item{subsampling_main_anchor_refresh_distance}{Positive Euclidean distance
 from the nearest prepared anchor that triggers a new exact OMRF anchor
 during main sampling. The default `Inf` disables main-phase preparation.}
@@ -123,11 +146,23 @@ adaptation attempts during warmup. `NULL` uses ten equally spaced warmup
 windows (`t_warmup / 10`); zero attempts adaptation at every event. The
 same interval is used by full-gradient and subsampling runs.}
 
+\item{boomerang_variance_floor_fraction}{Nonnegative opt-in research
+safeguard for adaptive diagonal Boomerang flows. At every adaptation
+update, named `global_scale` and `node_scale.*` coordinates retain at
+least this fraction of their preadaptation variance. Zero (the default)
+disables the safeguard.}
+
 \item{flow_mean}{Numeric vector of length d, mean vector for the flow (default: zero vector).}
 
 \item{flow_cov}{Numeric matrix of size d x d, covariance matrix for the flow (default: identity matrix).}
 
 \item{c0}{Numeric, bound parameter (default: 1e-2).}
+
+\item{flow_specification}{Role of an explicitly supplied `flow_mean` or
+`flow_cov`. `"initial"` permits legitimate warmup adaptation and records
+every chain's retained flow. `"frozen"` requires every retained chain to
+match the request and fails closed otherwise. `"auto"` uses `"initial"`
+when `t_warmup > 0` and `"frozen"` otherwise.}
 
 \item{x0}{Numeric vector of length d, initial position (default: random normal).}
 
@@ -216,6 +251,10 @@ immediately extracted from Julia into R so that \code{saveRDS()} /
 \code{readRDS()} work without any extra steps. Set to \code{FALSE} to skip
 the extraction and keep only the live Julia reference.
 This can save time and memory if you don't need to save the result or if you plan to call \code{materialize()} manually later.}
+
+\item{online_summaries}{\code{NULL} (default) or options from
+\code{online_summary_options()}. Requires \code{trace_storage = "streaming"};
+the summaries are read with \code{read_online_summaries()}.}
 
 \item{support_boundary}{A list created by \code{support_boundary_control()} that
 controls support-boundary diagnostics and heuristic event/refresh recovery.}

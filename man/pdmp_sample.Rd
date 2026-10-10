@@ -40,7 +40,12 @@ pdmp_sample(
   threaded = FALSE,
   seed = NULL,
   adaptive_scheme = c("diagonal", "fullrank"),
+  refresh_rate = 1,
   materialize = TRUE,
+  trace_storage = c("dense", "streaming"),
+  streaming_trace_directory = NULL,
+  streaming_trace_buffer_events = 4096L,
+  online_summaries = NULL,
   support_boundary = support_boundary_control()
 )
 }
@@ -157,6 +162,10 @@ immediately extracted from Julia into R so that \code{saveRDS()} /
 \code{readRDS()} work without any extra steps. Set to \code{FALSE} to skip
 the extraction and keep only the live Julia reference.
 This can save time and memory if you don't need to save the result or if you plan to call \code{materialize()} manually later.}
+
+\item{online_summaries}{\code{NULL} (default) or options from
+\code{online_summary_options()}. Requires \code{trace_storage = "streaming"};
+the summaries are read with \code{read_online_summaries()}.}
 
 \item{support_boundary}{A list created by \code{support_boundary_control()} that
 controls support-boundary diagnostics and heuristic event/refresh recovery.}

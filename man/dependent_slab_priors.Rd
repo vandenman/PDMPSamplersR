@@ -4,7 +4,6 @@
 \alias{dense_gaussian_slab}
 \alias{exchangeable_gaussian_slab}
 \alias{loglinear_gaussian_scale_slab}
-\alias{dependent_slab_priors}
 \title{Dependent slab prior constructors}
 \usage{
 dense_gaussian_slab(mean, cov, coef = NULL)

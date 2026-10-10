@@ -124,11 +124,10 @@ Threshold and interaction arguments are Stan unconstrained block names and
 are resolved at sampler initialization.
 }
 \details{
-Several arguments of \code{omrf_residual_envelope()} accept a single value.
-They state the configuration explicitly and are checked against it:
-`use_hcv = TRUE`, `hcv_damping = Inf`, `hcv_warmup = "hcv"`,
-`factorization = "person"`, `factor_sampling = "size_biased"`,
-`prior_backend = "analytic"`, `exact_selected_refinement = TRUE`,
-`categorical_residual_cap = TRUE`, and
+Several arguments accept a single value. They state the configuration
+explicitly and are checked against it: `use_hcv = TRUE`,
+`hcv_damping = Inf`, `hcv_warmup = "hcv"`, `factorization = "person"`,
+`factor_sampling = "size_biased"`, `prior_backend = "analytic"`,
+`exact_selected_refinement = TRUE`, `categorical_residual_cap = TRUE`, and
 `geometry = "direct_factor_roof_person_hcv"`.
 }

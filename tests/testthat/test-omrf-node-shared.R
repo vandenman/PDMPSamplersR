@@ -42,8 +42,7 @@ test_that("node-shared OMRF gradient closure retains scale-state priors", {
   }
   compiled <- compile_pdmp_stan_model(model)
   envelope <- omrf_residual_envelope(
-    fixture$data$X, fixture$data$seen, "thresholds_0", "interactions_0",
-    prior_backend = "analytic")
+    fixture$data$X, fixture$data$seen, "thresholds_0", "interactions_0")
   anchor <- rep(0, 10L)
   subsampling <- stan_subsampling(
     fixture$data$N, 1L, fixture$prior, envelope, anchor = anchor)
@@ -86,8 +85,7 @@ test_that("public node-shared OMRF samples all PDMP routes full and subsampled",
   }
   compiled <- compile_pdmp_stan_model(model)
   envelope <- omrf_residual_envelope(
-    fixture$data$X, fixture$data$seen, "thresholds_0", "interactions_0",
-    prior_backend = "analytic")
+    fixture$data$X, fixture$data$seen, "thresholds_0", "interactions_0")
   subsampling <- stan_subsampling(
     fixture$data$N, 1L, fixture$prior, envelope, anchor = rep(0, 10L))
   common <- list(

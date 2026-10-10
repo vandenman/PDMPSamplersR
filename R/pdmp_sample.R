@@ -567,6 +567,17 @@ validate_support_boundary_control <- function(support_boundary) {
 #'   the summaries are read with \code{read_online_summaries()}.
 #' @param support_boundary A list created by \code{support_boundary_control()} that
 #'   controls support-boundary diagnostics and heuristic event/refresh recovery.
+#' @param refresh_rate Refreshment rate of the \code{"BouncyParticle"} and
+#'   \code{"PreconditionedBPS"} flows (default 1). Ignored by the other flows.
+#' @param trace_storage \code{"dense"} (default) keeps the event trace in
+#'   memory. \code{"streaming"} writes it in chunks to
+#'   \code{streaming_trace_directory}, so memory use does not grow with the
+#'   number of events; it is required for \code{online_summaries}.
+#' @param streaming_trace_directory Directory for the streamed trace. Required
+#'   when \code{trace_storage = "streaming"}, ignored otherwise.
+#' @param streaming_trace_buffer_events Number of events buffered in memory
+#'   before a chunk is written (default 4096). Used only with
+#'   \code{trace_storage = "streaming"}.
 #'
 #' @return A \code{pdmp_result} object. Use \code{mean}, \code{var},
 #'   \code{quantile}, etc. for continuous-time estimators, or
@@ -771,6 +782,14 @@ pdmp_sample <- function(f, d,
 #'   was removed; full-data runs use the Stan model's gradient.
 #' @param theta0 Optional initial velocity forwarded to both full-gradient and
 #'   custom-Stan subsampling initialization.
+#' @param free0,stored_velocity0 Optional sticky state to continue a previous
+#'   run: \code{free0} is the logical mask of free coordinates and
+#'   \code{stored_velocity0} the stored velocities of the frozen ones. Both
+#'   must be supplied together, with length equal to the number of
+#'   parameters, and require \code{sticky = TRUE}.
+#' @param subsampling_diagnostic_window Width, in sampling time, of the windows
+#'   over which the OMRF anchor manager records retained-phase subsampling
+#'   diagnostics. The default 0 disables them.
 #' @param subsampling_anchor_updates Number of prepared OMRF anchors added from
 #'   continuous-time warmup means.
 #' @param subsampling_use_anchor_bank Retain prepared OMRF anchors and select

@@ -119,6 +119,10 @@ anchor, or traverses every OMRF person-node conditional in native Julia.
 Setup and warmup work are allowed. This is intended as a hard benchmark
 invariant for frozen-control-variate and direct-clock experiments.}
 
+\item{subsampling_diagnostic_window}{Width, in sampling time, of the windows
+over which the OMRF anchor manager records retained-phase subsampling
+diagnostics. The default 0 disables them.}
+
 \item{flow}{Character string specifying the flow type. One of "ZigZag",
 "BouncyParticle", "Boomerang", "AdaptiveBoomerang", "PreconditionedZigZag",
 or "PreconditionedBPS".
@@ -166,6 +170,12 @@ when `t_warmup > 0` and `"frozen"` otherwise.}
 
 \item{theta0}{Optional initial velocity forwarded to both full-gradient and
 custom-Stan subsampling initialization.}
+
+\item{free0, stored_velocity0}{Optional sticky state to continue a previous
+run: \code{free0} is the logical mask of free coordinates and
+\code{stored_velocity0} the stored velocities of the frozen ones. Both
+must be supplied together, with length equal to the number of
+parameters, and require \code{sticky = TRUE}.}
 
 \item{sticky}{Logical, whether to use sticky sampling (default: FALSE).}
 
@@ -238,11 +248,26 @@ better for correlated targets). Ignored for other flow types. With sticky
 sampling, "fullrank" releases frozen coordinates with the experimental
 boundary-proposal law; "diagonal" uses the stored-velocity law.}
 
+\item{refresh_rate}{Refreshment rate of the \code{"BouncyParticle"} and
+\code{"PreconditionedBPS"} flows (default 1). Ignored by the other flows.}
+
 \item{materialize}{Logical. If \code{TRUE} (default), the chain skeleton is
 immediately extracted from Julia into R so that \code{saveRDS()} /
 \code{readRDS()} work without any extra steps. Set to \code{FALSE} to skip
 the extraction and keep only the live Julia reference.
 This can save time and memory if you don't need to save the result or if you plan to call \code{materialize()} manually later.}
+
+\item{trace_storage}{\code{"dense"} (default) keeps the event trace in
+memory. \code{"streaming"} writes it in chunks to
+\code{streaming_trace_directory}, so memory use does not grow with the
+number of events; it is required for \code{online_summaries}.}
+
+\item{streaming_trace_directory}{Directory for the streamed trace. Required
+when \code{trace_storage = "streaming"}, ignored otherwise.}
+
+\item{streaming_trace_buffer_events}{Number of events buffered in memory
+before a chunk is written (default 4096). Used only with
+\code{trace_storage = "streaming"}.}
 
 \item{online_summaries}{\code{NULL} (default) or options from
 \code{online_summary_options()}. Requires \code{trace_storage = "streaming"};

@@ -149,11 +149,26 @@ better for correlated targets). Ignored for other flow types. With sticky
 sampling, "fullrank" releases frozen coordinates with the experimental
 boundary-proposal law; "diagonal" uses the stored-velocity law.}
 
+\item{refresh_rate}{Refreshment rate of the \code{"BouncyParticle"} and
+\code{"PreconditionedBPS"} flows (default 1). Ignored by the other flows.}
+
 \item{materialize}{Logical. If \code{TRUE} (default), the chain skeleton is
 immediately extracted from Julia into R so that \code{saveRDS()} /
 \code{readRDS()} work without any extra steps. Set to \code{FALSE} to skip
 the extraction and keep only the live Julia reference.
 This can save time and memory if you don't need to save the result or if you plan to call \code{materialize()} manually later.}
+
+\item{trace_storage}{\code{"dense"} (default) keeps the event trace in
+memory. \code{"streaming"} writes it in chunks to
+\code{streaming_trace_directory}, so memory use does not grow with the
+number of events; it is required for \code{online_summaries}.}
+
+\item{streaming_trace_directory}{Directory for the streamed trace. Required
+when \code{trace_storage = "streaming"}, ignored otherwise.}
+
+\item{streaming_trace_buffer_events}{Number of events buffered in memory
+before a chunk is written (default 4096). Used only with
+\code{trace_storage = "streaming"}.}
 
 \item{online_summaries}{\code{NULL} (default) or options from
 \code{online_summary_options()}. Requires \code{trace_storage = "streaming"};

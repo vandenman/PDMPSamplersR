@@ -5726,6 +5726,13 @@ function prepare_stan_subsampling(lib_path::String, full_data::String,
     return (; contexts, unc_names, d)
 end
 
+# Residual-rate bound of one sampled observation (a person for the direct
+# OMRF envelope, whose generic observation bounds are indexed by factor).
+_diagnostic_observation_bound(envelope, observation) =
+    PDMPSamplers.observation_residual_bound(envelope, observation)
+_diagnostic_observation_bound(envelope::OMRFDirectPersonNodeHCVEnvelope,
+    person) = _omrf_direct_person_cell_bound(envelope, person)
+
 function r_stan_subsampling_diagnostics(lib_path::String, full_data::String,
         prior_data::String, subsampling, position, subset, velocity,
         flow_type::String, flow_mean, flow_cov, diagnostic_phase::String)
@@ -5797,10 +5804,15 @@ function r_stan_subsampling_diagnostics(lib_path::String, full_data::String,
         _as_flow_mean(flow_mean, d))
     state = PDMPState(0.0, SkeletonPoint(copy(x), diagnostic_velocity))
     PDMPSamplers.initialize_flow_state!(state, flow)
+    # The direct OMRF envelope certifies grid cells; a zero-width cell at the
+    # diagnostic state gives its pointwise bounds.
+    envelope isa OMRFDirectPersonNodeHCVEnvelope &&
+        PDMPSamplers.component_cell_scales!(
+            envelope.cell_scales, envelope, state, flow, 0.0, 0.0)
     scales = PDMPSamplers.component_scales!(
         envelope.scales, envelope, state, flow, 0.0)
     envelope_rate = (N / m) * sum(i ->
-        PDMPSamplers.observation_residual_bound(envelope, i), subset_vec)
+        _diagnostic_observation_bound(envelope, i), subset_vec)
     scaled_residual = (N / m) * residual
     residual_rate = PDMPSamplers.λ(state, scaled_residual, flow) +
         PDMPSamplers.λ(state, -scaled_residual, flow)
@@ -5819,8 +5831,7 @@ function r_stan_subsampling_diagnostics(lib_path::String, full_data::String,
                 PDMPSamplers.λ(state, diagnostic_residual, flow) +
                 PDMPSamplers.λ(state, -diagnostic_residual, flow)
             per_observation_envelope[observation] =
-                PDMPSamplers.observation_residual_bound(
-                    envelope, observation)
+                _diagnostic_observation_bound(envelope, observation)
             @. diagnostic_gradient = deterministic + N * diagnostic_residual
             per_observation_stochastic_rate[observation] =
                 PDMPSamplers.λ(state, diagnostic_gradient, flow)

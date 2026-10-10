@@ -28,6 +28,50 @@ node_shared_omrf_fixture <- function() {
   )
 }
 
+test_that("node-shared OMRF gradient closure retains scale-state priors", {
+  skip_on_cran()
+  skip_if_no_pdmp_julia_backend()
+  skip_if_not_installed("Matrix")
+  fixture <- node_shared_omrf_fixture()
+  model <- system.file(
+    "stan", "omrf", "omrf_node_shared.stan",
+    package = "PDMPSamplersR")
+  if (!nzchar(model)) {
+    model <- testthat::test_path(
+      "..", "..", "inst", "stan", "omrf", "omrf_node_shared.stan")
+  }
+  compiled <- compile_pdmp_stan_model(model)
+  envelope <- omrf_residual_envelope(
+    fixture$data$X, fixture$data$seen, "thresholds_0", "interactions_0",
+    prior_backend = "analytic")
+  anchor <- rep(0, 10L)
+  subsampling <- stan_subsampling(
+    fixture$data$N, 1L, fixture$prior, envelope, anchor = anchor)
+  expect_identical(
+    subsampling$residual_envelope$analytic_prior$type,
+    "node_scale_gaussian")
+  position <- seq(-0.18, 0.27, length.out = 10L)
+  subsets <- as.list(seq_len(fixture$data$N))
+  diagnostics <- lapply(subsets, function(subset) {
+    stan_subsampling_diagnostics(
+      compiled, fixture$data, subsampling, position, subset,
+      velocity = seq(0.3, 1.2, length.out = 10L), flow = "ZigZag")
+  })
+  mean_subsampling <- Reduce(`+`, lapply(diagnostics, `[[`, "subsampled_gradient")) /
+    length(diagnostics)
+  expect_equal(mean_subsampling, diagnostics[[1L]]$full_gradient, tolerance = 2e-9)
+  scale_indices <- 7:10
+  expect_gt(max(abs(diagnostics[[1L]]$prior_gradient[scale_indices])), 0.05)
+  expect_equal(
+    diagnostics[[1L]]$selected_likelihood_gradient[scale_indices],
+    rep(0, length(scale_indices)), tolerance = 1e-10)
+  expect_equal(
+    diagnostics[[1L]]$residual_gradient[scale_indices],
+    rep(0, length(scale_indices)), tolerance = 1e-12)
+  expect_identical(fixture$slab$logscale_design$storage, "sparse_rows")
+  expect_equal(length(fixture$slab$logscale_design$x), 9L)
+})
+
 test_that("public node-shared OMRF samples all PDMP routes full and subsampled", {
   skip_on_cran()
   skip_if_no_pdmp_julia_backend()

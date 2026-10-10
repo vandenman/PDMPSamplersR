@@ -1,3 +1,71 @@
+test_that("public OMRF diagnostics verify explicit persons and single N/m scaling", {
+  skip_on_cran()
+  skip_if_no_pdmp_julia_backend()
+
+  stan <- system.file(
+    "stan", "omrf", "omrf.stan", package = "PDMPSamplersR")
+  X <- rbind(c(0L, 1L, 2L), c(2L, 0L, 1L), c(1L, 2L, 0L))
+  full <- list(
+    N = 3L, P = 3L, K = 3L, X = X, seen = rep(3L, 3L),
+    prior_only = 0L, prior_interaction_sd = 0.5,
+    prior_threshold_alpha = 2, prior_threshold_beta = 2
+  )
+  prior <- full
+  prior$prior_only <- 1L
+  envelope <- omrf_residual_envelope(
+    X, full$seen, "thresholds_0", "interactions_0"
+  )
+  anchor <- rep(0, 9L)
+  subsampling <- stan_subsampling(3L, 1L, prior, envelope, anchor = anchor)
+  expect_identical(
+    subsampling$residual_envelope$analytic_prior$type, "gaussian")
+  node_prior <- list(
+    N = nrow(X), P = ncol(X), K = 2L, X = X, seen = full$seen,
+    prior_only = 1L, prior_threshold_alpha = 2,
+    prior_threshold_beta = 2, slab_base_scale = 0.7,
+    prior_global_scale_sd = 1.2, prior_node_scale_sd = 0.8)
+  node_subsampling <- stan_subsampling(
+    nrow(X), 1L, node_prior, envelope, anchor = anchor)
+  expect_identical(
+    node_subsampling$residual_envelope$analytic_prior$type,
+    "node_scale_gaussian")
+  expect_identical(
+    node_subsampling$residual_envelope$analytic_prior$global_scale,
+    "global_scale")
+  expect_identical(
+    node_subsampling$residual_envelope$analytic_prior$node_scale,
+    "node_scale")
+
+  compiled <- compile_pdmp_stan_model(stan)
+  position <- seq(-0.21, 0.27, length.out = 9L)
+  diagnostics <- lapply(seq_len(3L), function(person) {
+    stan_subsampling_diagnostics(
+      compiled, full, subsampling, position = position, subset = person,
+      velocity = rep(1, 9L), flow = "ZigZag")
+  })
+  # With one person per proposal, N/m = 3 is applied exactly once: the
+  # average over persons of the subsampled gradient is the full gradient.
+  mean_subsampled <- Reduce(`+`, lapply(diagnostics, `[[`,
+    "subsampled_gradient")) / length(diagnostics)
+  expect_equal(mean_subsampled, diagnostics[[1L]]$full_gradient,
+               tolerance = 1e-9)
+  # The residual also subtracts the anchor Hessian term, so it is not the
+  # plain first-order difference; its rate is certified per person.
+  for (diagnostic in diagnostics) {
+    expect_lte(diagnostic$residual_rate,
+               diagnostic$envelope_rate * (1 + 1e-10) + 1e-10)
+  }
+
+  anchor_diagnostic <- stan_subsampling_diagnostics(
+    compiled, full, subsampling, position = anchor, subset = 1L,
+    velocity = rep(1, 9L), flow = "BouncyParticle")
+  expect_equal(
+    anchor_diagnostic$subsampled_gradient, anchor_diagnostic$full_gradient,
+    tolerance = 1e-10
+  )
+  expect_equal(anchor_diagnostic$anchor_closure_error, 0, tolerance = 1e-12)
+})
+
 test_that("public independent-slab OMRF supports subsampling AdaptiveBoomerang", {
   skip_on_cran()
   skip_if_no_pdmp_julia_backend()

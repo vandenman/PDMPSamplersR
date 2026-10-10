@@ -28,19 +28,11 @@ omrf_residual_envelope(
   seen,
   thresholds,
   interactions,
-  use_hcv = TRUE,
-  hcv_damping = Inf,
-  hcv_warmup = "hcv",
-  factorization = "person",
-  factor_sampling = "size_biased",
-  prior_backend = "analytic",
   exact_selected_refinement = TRUE,
-  categorical_residual_cap = TRUE,
   person_signed_roof = FALSE,
   signed_only_person_roof = FALSE,
   joint_signed_group_size = 0L,
-  shared_current_categorical = FALSE,
-  geometry = "direct_factor_roof_person_hcv"
+  shared_current_categorical = FALSE
 )
 
 stan_parameter_mapping(path_to_stanmodel, standata, parameters = NULL)
@@ -72,7 +64,9 @@ or a recognized package provider such as [omrf_residual_envelope()].}
 \item{interactions}{Interaction parameter block name; edge order is the
 upper triangle `(1,2), (1,3), ..., (P-1,P)`.}
 
-\item{use_hcv, hcv_damping, hcv_warmup, factorization, factor_sampling, prior_backend, exact_selected_refinement, categorical_residual_cap, geometry}{Fixed configuration; see Details.}
+\item{exact_selected_refinement}{If `TRUE` (default), the selected person's
+residual is evaluated once while thinning against the subset bound and
+reused for the candidate rate. `FALSE` thins against the drawn roof only.}
 
 \item{person_signed_roof}{Linear BPS certificate policy. Signed node
 residual endpoints are summed within each person before taking an
@@ -121,13 +115,7 @@ person's gradient is taken relative to an analytic, undamped Hessian control
 variate at the anchor, and every grid cell gets a certified roof on the
 summed residual rates (geometry `"direct_factor_roof_person_hcv"`).
 Threshold and interaction arguments are Stan unconstrained block names and
-are resolved at sampler initialization.
-}
-\details{
-Several arguments accept a single value. They state the configuration
-explicitly and are checked against it: `use_hcv = TRUE`,
-`hcv_damping = Inf`, `hcv_warmup = "hcv"`, `factorization = "person"`,
-`factor_sampling = "size_biased"`, `prior_backend = "analytic"`,
-`exact_selected_refinement = TRUE`, `categorical_residual_cap = TRUE`, and
-`geometry = "direct_factor_roof_person_hcv"`.
+are resolved at sampler initialization. The prior gradient is analytic, so
+`prior_standata` passed to [stan_subsampling()] must follow one of the
+package's OMRF prior contracts.
 }

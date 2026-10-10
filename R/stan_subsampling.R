@@ -245,22 +245,18 @@ stan_subsampling <- function(n_observations, subsample_size,
 #' variate at the anchor, and every grid cell gets a certified roof on the
 #' summed residual rates (geometry `"direct_factor_roof_person_hcv"`).
 #' Threshold and interaction arguments are Stan unconstrained block names and
-#' are resolved at sampler initialization.
-#'
-#' Several arguments accept a single value. They state the configuration
-#' explicitly and are checked against it: `use_hcv = TRUE`,
-#' `hcv_damping = Inf`, `hcv_warmup = "hcv"`, `factorization = "person"`,
-#' `factor_sampling = "size_biased"`, `prior_backend = "analytic"`,
-#' `exact_selected_refinement = TRUE`, `categorical_residual_cap = TRUE`, and
-#' `geometry = "direct_factor_roof_person_hcv"`.
+#' are resolved at sampler initialization. The prior gradient is analytic, so
+#' `prior_standata` passed to [stan_subsampling()] must follow one of the
+#' package's OMRF prior contracts.
 #'
 #' @param X Integer person-by-node matrix encoded from zero.
 #' @param seen Number of observed categories per node.
 #' @param thresholds Threshold parameter block name.
 #' @param interactions Interaction parameter block name; edge order is the
 #'   upper triangle `(1,2), (1,3), ..., (P-1,P)`.
-#' @param use_hcv,hcv_damping,hcv_warmup,factorization,factor_sampling,prior_backend,exact_selected_refinement,categorical_residual_cap,geometry
-#'   Fixed configuration; see Details.
+#' @param exact_selected_refinement If `TRUE` (default), the selected person's
+#'   residual is evaluated once while thinning against the subset bound and
+#'   reused for the candidate rate. `FALSE` thins against the drawn roof only.
 #' @param person_signed_roof Linear BPS certificate policy. Signed node
 #'   residual endpoints are summed within each person before taking an
 #'   absolute bound; the factor-summed certificate remains a valid fallback.
@@ -280,37 +276,13 @@ stan_subsampling <- function(n_observations, subsample_size,
 #' @rdname stan_subsampling
 #' @export
 omrf_residual_envelope <- function(X, seen, thresholds, interactions,
-                                   use_hcv = TRUE, hcv_damping = Inf,
-                                   hcv_warmup = "hcv",
-                                   factorization = "person",
-                                   factor_sampling = "size_biased",
-                                   prior_backend = "analytic",
                                    exact_selected_refinement = TRUE,
-                                   categorical_residual_cap = TRUE,
                                    person_signed_roof = FALSE,
                                    signed_only_person_roof = FALSE,
                                    joint_signed_group_size = 0L,
-                                   shared_current_categorical = FALSE,
-                                   geometry = "direct_factor_roof_person_hcv") {
-  fixed <- list(
-    use_hcv = TRUE, hcv_damping = Inf, hcv_warmup = "hcv",
-    factorization = "person", factor_sampling = "size_biased",
-    prior_backend = "analytic", exact_selected_refinement = TRUE,
-    categorical_residual_cap = TRUE,
-    geometry = "direct_factor_roof_person_hcv")
-  supplied <- list(
-    use_hcv = use_hcv, hcv_damping = hcv_damping, hcv_warmup = hcv_warmup,
-    factorization = factorization, factor_sampling = factor_sampling,
-    prior_backend = prior_backend,
-    exact_selected_refinement = exact_selected_refinement,
-    categorical_residual_cap = categorical_residual_cap, geometry = geometry)
-  for (name in names(fixed)) {
-    if (!identical(supplied[[name]], fixed[[name]])) {
-      cli::cli_abort("Argument {.arg {name}} only supports {.code {deparse(fixed[[name]])}}.")
-    }
-  }
-  for (name in c("person_signed_roof", "signed_only_person_roof",
-                 "shared_current_categorical")) {
+                                   shared_current_categorical = FALSE) {
+  for (name in c("exact_selected_refinement", "person_signed_roof",
+                 "signed_only_person_roof", "shared_current_categorical")) {
     value <- get(name)
     if (!is.logical(value) || length(value) != 1L || is.na(value)) {
       cli::cli_abort("Argument {.arg {name}} must be TRUE or FALSE.")
@@ -398,7 +370,7 @@ omrf_residual_envelope <- function(X, seen, thresholds, interactions,
   envelope$hcv_scope <- "global"
   envelope$hcv_bank_learning <- "geometric"
   envelope$zigzag_sign_aware <- FALSE
-  envelope$exact_selected_refinement <- TRUE
+  envelope$exact_selected_refinement <- exact_selected_refinement
   envelope$categorical_residual_cap <- TRUE
   envelope$signed_bps <- FALSE
   envelope$signed_harmonic <- FALSE

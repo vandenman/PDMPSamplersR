@@ -537,7 +537,6 @@ mutable struct OMRFResidualContext
     likelihood_hessian::Union{Nothing,Matrix{Float64}}
     use_hcv::Bool
     hcv_active::Bool
-    hcv_damping::Float64
     displacement::Vector{Float64}
     hcv_product::Vector{Float64}
     node_supports::Vector{Vector{Int}}
@@ -1287,8 +1286,8 @@ function _omrf_joint_signed_deterministic_upper(oracle, active, state, flow,
     _omrf_actual_flow(flow) isa BouncyParticle || throw(ArgumentError(
         "joint signed deterministic bound supports linear BPS only"))
     context = oracle.residual_context
-    context.hcv_active && isinf(context.hcv_damping) || throw(ArgumentError(
-        "joint signed bound requires the installed undamped global HCV"))
+    context.hcv_active || throw(ArgumentError(
+        "joint signed bound requires the installed global HCV"))
     _omrf_fill_path_intervals!(oracle.interval_xlo, oracle.interval_xhi,
         oracle.interval_vlo, oracle.interval_vhi, state, flow, left, right)
     _omrf_prior_intervals!(oracle.interval_glo, oracle.interval_ghi,
@@ -1408,9 +1407,10 @@ function _omrf_residual_context(envelope_spec, unc_names, anchor,
         Bool(_rget(envelope_spec, :use_hcv))
     hcv_after_warmup = _haskey(envelope_spec, :hcv_after_warmup) &&
         Bool(_rget(envelope_spec, :hcv_after_warmup))
-    hcv_damping = use_hcv ? Float64(_rget(envelope_spec, :hcv_damping)) : 1.0
-    !isnan(hcv_damping) && hcv_damping > 0 || throw(ArgumentError(
-        "OMRF HCV damping must be positive"))
+    # The HCV is undamped; the specification still records `hcv_damping = Inf`.
+    use_hcv && _haskey(envelope_spec, :hcv_damping) &&
+        !isinf(Float64(_rget(envelope_spec, :hcv_damping))) && throw(
+            ArgumentError("only the undamped OMRF HCV (hcv_damping = Inf) is supported"))
     hcv_scope = use_hcv && _haskey(envelope_spec, :hcv_scope) ?
         String(_rget(envelope_spec, :hcv_scope)) : "global"
     hcv_scope == "global" || throw(ArgumentError(
@@ -1443,7 +1443,7 @@ function _omrf_residual_context(envelope_spec, unc_names, anchor,
         zeros(N, P), zeros(P, P), observed_threshold_counts,
         observed_interaction_sums, zeros(maximum(seen) - 1),
         zeros(maximum(seen) - 1), nothing, use_hcv,
-        use_hcv && !hcv_after_warmup, hcv_damping,
+        use_hcv && !hcv_after_warmup,
         zeros(d), zeros(d), Vector{Vector{Int}}(),
         sizehint!(Int[], d), falses(d), counts, trues(d), 0,
         OMRFHCVProductCache(d))
@@ -1625,13 +1625,8 @@ function omrf_residual!(context::OMRFResidualContext, out, x, subset)
     end
     empty!(context.touched_positions)
     N, P = size(context.X)
-    α = if context.hcv_active
-        displacement2 = dot(context.displacement, context.displacement)
-        isinf(context.hcv_damping) ? 1.0 :
-            context.hcv_damping / (context.hcv_damping + displacement2)
-    else
-        0.0
-    end
+    # Weight of the (undamped) Hessian correction.
+    α = context.hcv_active ? 1.0 : 0.0
     # A person touches the support of every node; record it once.
     if !isempty(subset)
         @inbounds for node in 1:P
@@ -1859,12 +1854,9 @@ function (oracle::OMRFAnalyticSubsamplingOracle)(out, x)
     context = oracle.residual_context
     if context.hcv_active
         @. context.displacement = x - oracle.anchor
-        displacement2 = dot(context.displacement, context.displacement)
-        α = isinf(context.hcv_damping) ? 1.0 :
-            context.hcv_damping / (context.hcv_damping + displacement2)
         _omrf_haffine!(context.hcv_product, context.hcv_cache,
             something(context.likelihood_hessian), context.displacement)
-        @. out += α * context.hcv_product
+        @. out += context.hcv_product
     end
     return out
 end
@@ -2222,18 +2214,16 @@ function _new_omrf_direct_hcv_envelope(anchor,
     joint_group_size == 4 && N % 4 != 0 && throw(ArgumentError(
         "fixed groups of four require a divisible population"))
     joint_group_size >= 16 &&
-        !(shared_current && context.use_hcv &&
-          isinf(context.hcv_damping)) && throw(ArgumentError(
-            "grouped joint signed bounds require shared-current evaluation and global undamped HCV; got shared=$shared_current use_hcv=$(context.use_hcv) damping=$(context.hcv_damping)"))
+        !(shared_current && context.use_hcv) && throw(ArgumentError(
+            "grouped joint signed bounds require shared-current evaluation and the HCV; got shared=$shared_current use_hcv=$(context.use_hcv)"))
     joint_group_size >= 16 && N < 2joint_group_size && throw(ArgumentError(
         "grouped joint signed bounds need at least two full groups (N >= 2m)"))
     shared_current && joint_group_size == 0 && throw(ArgumentError(
         "shared-current categorical evaluation requires joint groups"))
     shared_current && any(!=(4), context.seen) && throw(ArgumentError(
         "shared-current categorical evaluation currently requires four categories at every node"))
-    shared_current && !(context.hcv_active &&
-        isinf(context.hcv_damping)) && throw(ArgumentError(
-        "shared-current JS4 requires active global undamped HCV"))
+    shared_current && !context.hcv_active && throw(ArgumentError(
+        "shared-current JS4 requires the active HCV"))
     n_groups = joint_group_size == 0 ? 0 : cld(N, joint_group_size)
     permutation = joint_group_size == 0 ? Int[] :
         randperm(Random.Xoshiro(230923), N)
@@ -4179,9 +4169,8 @@ function _build_omrf_residual_envelope(envelope_spec, anchor,
     bound_type == "direct_factor_roof_person_hcv" || throw(ArgumentError(
         "unsupported OMRF residual geometry \"$bound_type\"; only " *
         "direct_factor_roof_person_hcv is supported"))
-    residual_context.use_hcv && residual_context.hcv_active &&
-        isinf(residual_context.hcv_damping) || throw(ArgumentError(
-            "direct HCV geometry requires active undamped HCV"))
+    residual_context.use_hcv && residual_context.hcv_active || throw(
+        ArgumentError("direct HCV geometry requires the active HCV"))
     cell_scope = _haskey(envelope_spec, :direct_cv_cell_scope) ?
         String(_rget(envelope_spec, :direct_cv_cell_scope)) : "cell"
     cell_scope == "cell" || throw(ArgumentError(
@@ -6398,9 +6387,6 @@ function r_pdmp_stan_subsampling(prepared, subsampling, x0, flow_type::String,
         "analytic_prior" => model.grad.residual_oracle isa
             OMRFAnalyticSubsamplingOracle &&
             model.grad.residual_oracle.analytic_prior !== nothing,
-        "hcv_damping" => model.grad.residual_oracle isa OMRFAnalyticSubsamplingOracle &&
-            model.grad.residual_oracle.residual_context.use_hcv ?
-            model.grad.residual_oracle.residual_context.hcv_damping : 0.0,
     ) for (model, ctx, snapshot, manager) in
         zip(models, contexts, construction_snapshots, anchor_managers)]
     result["subsampling_context_counters"] = subsampling_context_counters

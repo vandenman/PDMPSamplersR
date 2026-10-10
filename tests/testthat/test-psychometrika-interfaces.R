@@ -83,12 +83,11 @@ test_that("OMRF provider specifies the whole-person direct HCV envelope", {
   )
   expect_error(
     omrf_residual_envelope(X, c(3, 3, 3), "a", "b", geometry = "pattern_local"),
-    "only supports"
+    "unused argument"
   )
-  expect_error(
-    omrf_residual_envelope(X, c(3, 3, 3), "a", "b", factorization = "person_node"),
-    "only supports"
-  )
+  expect_false(omrf_residual_envelope(
+    X, c(3, 3, 3), "a", "b",
+    exact_selected_refinement = FALSE)$exact_selected_refinement)
   expect_error(
     omrf_residual_envelope(X, c(3, 3, 3), "a", "b",
                            signed_only_person_roof = TRUE),

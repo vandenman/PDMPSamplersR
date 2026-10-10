@@ -274,14 +274,12 @@ end
 @testset "retained full-data invariant reports every work category" begin
     clean = [Dict{String,Any}(
         "anchor_main_preparations" => 0,
-        "main_native_full_data_scans" => 0,
-        "main_event_bound_observation_visits" => 0)]
+        "main_native_full_data_scans" => 0)]
     @test isnothing(PDMPSamplersRBridge._enforce_no_main_full_data!(
         [0], clean))
     dirty = [Dict{String,Any}(
         "anchor_main_preparations" => 2,
-        "main_native_full_data_scans" => 3,
-        "main_event_bound_observation_visits" => 17)]
+        "main_native_full_data_scans" => 3)]
     error = try
         PDMPSamplersRBridge._enforce_no_main_full_data!([1], dirty)
         nothing
@@ -293,7 +291,6 @@ end
     @test contains(message, "main_full_gradient_calls=1")
     @test contains(message, "anchor_main_preparations=2")
     @test contains(message, "main_native_full_data_scans=3")
-    @test contains(message, "main_event_bound_observation_visits=17")
 end
 
 function omrf_curvature_weights(X, seen; legacy_node_sum=false,

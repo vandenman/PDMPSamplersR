@@ -11,25 +11,11 @@ mutable struct StanSubsamplingCallCounts
     analytic_residual::Int
     selected_refinement_calls::Int
     analytic_persons::Int
-    analytic_factors::Int
     analytic_node_conditionals::Int
-    compact_person_bounds::Int
-    compact_static_constructions::Int
-    compact_aggregate_point_calls::Int
-    compact_cell_bound_calls::Int
-    compact_term_selection_calls::Int
-    compact_person_selection_calls::Int
-    compact_observation_bound_calls::Int
     model_constructions::Int
     data_constructions::Int
     native_full_data_scans::Int
-    event_bound_observation_visits::Int
-    native_full_gradient_seconds::Float64
     analytic_residual_seconds::Float64
-    envelope_point_calls::Int
-    envelope_point_seconds::Float64
-    envelope_cell_calls::Int
-    envelope_cell_seconds::Float64
     proposal_deterministic_bound_sum::Float64
     proposal_aggregate_residual_bound_sum::Float64
     proposal_subset_bound_sum::Float64
@@ -42,21 +28,7 @@ mutable struct StanSubsamplingCallCounts
     proposal_acceptance_probability_sum::Float64
     proposal_certificate_ratio_sum::Float64
     proposal_intrinsic_ratio_sum::Float64
-    lazy_branch_evaluations::Int
-    lazy_branch_rejections::Int
-    lazy_leaf_evaluations::Int
-    lazy_sampling_seconds::Float64
-    cell_cached_point_screen_seconds::Float64
-    compact_static_seconds::Float64
-    compact_aggregate_point_seconds::Float64
-    compact_cell_bound_seconds::Float64
-    compact_term_selection_seconds::Float64
-    compact_person_selection_seconds::Float64
-    compact_observation_bound_seconds::Float64
     compact_anchor_likelihood_seconds::Float64
-    harmonic_coefficient_preparations::Int
-    harmonic_coefficient_cache_hits::Int
-    harmonic_coefficient_seconds::Float64
     direct_factor_bound_scans::Int
     direct_factors_evaluated::Int
     direct_cell_certificate_seconds::Float64
@@ -69,7 +41,6 @@ mutable struct StanSubsamplingCallCounts
     direct_left_endpoint_evaluations::Int
     direct_right_endpoint_evaluations::Int
     direct_residual_table_constructions::Int
-    direct_horizon_table_hits::Int
     direct_internal_cell_uses::Int
     deterministic_hvp_calls::Int
     deterministic_hvp_seconds::Float64
@@ -78,12 +49,6 @@ mutable struct StanSubsamplingCallCounts
     residual_source_proposals::Int
     deterministic_source_acceptances::Int
     residual_source_acceptances::Int
-    categorical_point_evaluations::Int
-    categorical_point_displacement_gt_four::Int
-    categorical_point_old_bound_sum::Float64
-    categorical_point_new_bound_sum::Float64
-    categorical_cell_cache_hits::Int
-    categorical_cell_cache_misses::Int
     shared_current_pattern_evaluations::Int
     shared_current_cell_evaluations::Int
     shared_current_rebuilt_nodes::Int
@@ -97,22 +62,9 @@ mutable struct StanSubsamplingCallCounts
     direct_path_forced_rebuilds::Int
 end
 StanSubsamplingCallCounts() = StanSubsamplingCallCounts(
-    # 4:24 are integer counters.
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    # native/analytic timing, point/cell counters and their timings.
-    0.0, 0.0, 0, 0.0, 0, 0.0,
-    0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
-    # proposal count, proposal summaries, lazy counters/timing.
-    0, 0.0, 0.0, 0.0, 0, 0, 0, 0.0, 0.0,
-    # compact timing counters.
-    0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
-    0, 0, 0.0,
-    0, 0, 0.0, 0, 0,
-    0, 0, 0.0, 0, 0, 0, 0, 0, 0,
-    0, 0.0, false, 0, 0, 0, 0,
-    0, 0, 0.0, 0.0, 0, 0,
-    0, 0, 0, 0.0, 0,
-    zeros(Int, 10), 0, 0, 0, 0, 0)
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+    0.0, 0.0, 0, 0.0, 0.0, 0.0, 0.0, 0, 0, 0.0, 0, 0, 0, 0, 0.0, 0, 0, 0, 0, 0,
+    0, 0.0, false, 0, 0, 0, 0, 0, 0, 0, 0.0, 0, zeros(Int, 10), 0, 0, 0, 0, 0)
 
 mutable struct StanSubsamplingContext
     full::PDMPModel
@@ -4345,7 +4297,6 @@ mutable struct OMRFAnchorManager
     warmup_finish_preparation_seconds::Float64
     warmup_finish_selection_seconds::Float64
     warmup_finish_native_full_data_scans::Int
-    warmup_finish_event_bound_observation_visits::Int
     selection_seconds::Float64
     selection_component_evaluations::Int
     window_diagnostics::Any
@@ -4743,8 +4694,7 @@ function _new_omrf_anchor_manager(oracle::OMRFAnalyticSubsamplingOracle,
         ones(length(oracle.full_anchor)),
         0, 0.0, 0, 0, 0, 0, 0.0, 0.0, Inf,
         oracle.residual_context.hcv_active, nothing, 0, 0, 0.0, 0.0,
-        oracle.ctx.counts.native_full_data_scans,
-        oracle.ctx.counts.event_bound_observation_visits, 0.0, 0, nothing,
+        oracle.ctx.counts.native_full_data_scans, 0.0, 0, nothing,
         :adaptive, 0, Inf, UInt64(0), UInt64(0), 0,
         Float64[], zeros(0, 0), Float64[], :scaled, false)
     initial = OMRFPreparedAnchorState(oracle.anchor, oracle.full_anchor,
@@ -4910,8 +4860,6 @@ function _finish_omrf_warmup!(manager::OMRFAnchorManager,
     manager.warmup_finish_selection_seconds = manager.selection_seconds
     manager.warmup_finish_native_full_data_scans =
         manager.oracle.ctx.counts.native_full_data_scans
-    manager.warmup_finish_event_bound_observation_visits =
-        manager.oracle.ctx.counts.event_bound_observation_visits
     return anchor_changed || hcv_changed || needs_sync
 end
 
@@ -5994,8 +5942,6 @@ function r_pdmp_stan_subsampling(prepared, subsampling, x0, flow_type::String,
         data=ctx.counts.data_constructions,
         full_gradient=ctx.counts.full_gradient,
         native_full_data_scans=ctx.counts.native_full_data_scans,
-        event_bound_observation_visits=
-            ctx.counts.event_bound_observation_visits,
     ) for ctx in contexts]
     d = first(models).d
     flow = build_flow(flow_type, _to_precision(_as_flow_cov(flow_cov, d), d),
@@ -6132,34 +6078,8 @@ function r_pdmp_stan_subsampling(prepared, subsampling, x0, flow_type::String,
              model.grad.residual_oracle.exact_selected_refinement) ?
             ctx.counts.selected_refinement_calls : 0,
         "analytic_persons_evaluated" => ctx.counts.analytic_persons,
-        "analytic_factors_evaluated" => ctx.counts.analytic_factors,
         "node_conditionals_evaluated" => ctx.counts.analytic_node_conditionals,
-        "compact_person_bounds_constructed" =>
-            ctx.counts.compact_person_bounds,
-        "compact_static_constructions" =>
-            ctx.counts.compact_static_constructions,
-        "compact_aggregate_point_calls" =>
-            ctx.counts.compact_aggregate_point_calls,
-        "compact_cell_bound_calls" => ctx.counts.compact_cell_bound_calls,
-        "compact_term_selection_calls" =>
-            ctx.counts.compact_term_selection_calls,
-        "compact_person_selection_calls" =>
-            ctx.counts.compact_person_selection_calls,
-        "compact_observation_bound_calls" =>
-            ctx.counts.compact_observation_bound_calls,
-        "native_full_gradient_seconds" =>
-            ctx.counts.native_full_gradient_seconds,
         "analytic_residual_seconds" => ctx.counts.analytic_residual_seconds,
-        "envelope_point_calls" => ctx.counts.envelope_point_calls,
-        "envelope_point_seconds" => ctx.counts.envelope_point_seconds,
-        "envelope_cell_calls" => ctx.counts.envelope_cell_calls,
-        "envelope_cell_seconds" => ctx.counts.envelope_cell_seconds,
-        "harmonic_coefficient_preparations" =>
-            ctx.counts.harmonic_coefficient_preparations,
-        "harmonic_coefficient_cache_hits" =>
-            ctx.counts.harmonic_coefficient_cache_hits,
-        "harmonic_coefficient_seconds" =>
-            ctx.counts.harmonic_coefficient_seconds,
         "proposal_deterministic_bound_sum" =>
             ctx.counts.proposal_deterministic_bound_sum,
         "proposal_aggregate_residual_bound_sum" =>
@@ -6180,35 +6100,6 @@ function r_pdmp_stan_subsampling(prepared, subsampling, x0, flow_type::String,
         "proposal_mean_intrinsic_ratio" =>
             ctx.counts.proposal_intrinsic_ratio_sum /
             max(ctx.counts.proposal_count, 1),
-        "lazy_branch_evaluations" => ctx.counts.lazy_branch_evaluations,
-        "lazy_branch_rejections" => ctx.counts.lazy_branch_rejections,
-        "lazy_leaf_evaluations" => ctx.counts.lazy_leaf_evaluations,
-        "lazy_sampling_seconds" => ctx.counts.lazy_sampling_seconds,
-        "cell_cached_point_screen_seconds" =>
-            ctx.counts.cell_cached_point_screen_seconds,
-        "categorical_point_evaluations" =>
-            ctx.counts.categorical_point_evaluations,
-        "categorical_point_displacement_gt_four" =>
-            ctx.counts.categorical_point_displacement_gt_four,
-        "categorical_point_old_bound_sum" =>
-            ctx.counts.categorical_point_old_bound_sum,
-        "categorical_point_new_bound_sum" =>
-            ctx.counts.categorical_point_new_bound_sum,
-        "categorical_cell_cache_hits" =>
-            ctx.counts.categorical_cell_cache_hits,
-        "categorical_cell_cache_misses" =>
-            ctx.counts.categorical_cell_cache_misses,
-        "compact_static_seconds" => ctx.counts.compact_static_seconds,
-        "compact_aggregate_point_seconds" =>
-            ctx.counts.compact_aggregate_point_seconds,
-        "compact_cell_bound_seconds" =>
-            ctx.counts.compact_cell_bound_seconds,
-        "compact_term_selection_seconds" =>
-            ctx.counts.compact_term_selection_seconds,
-        "compact_person_selection_seconds" =>
-            ctx.counts.compact_person_selection_seconds,
-        "compact_observation_bound_seconds" =>
-            ctx.counts.compact_observation_bound_seconds,
         "compact_anchor_likelihood_seconds" =>
             ctx.counts.compact_anchor_likelihood_seconds,
         "direct_factor_bound_scans" =>
@@ -6235,8 +6126,6 @@ function r_pdmp_stan_subsampling(prepared, subsampling, x0, flow_type::String,
             ctx.counts.direct_right_endpoint_evaluations,
         "direct_residual_table_constructions" =>
             ctx.counts.direct_residual_table_constructions,
-        "direct_horizon_table_hits" =>
-            ctx.counts.direct_horizon_table_hits,
         "direct_internal_cell_uses" =>
             ctx.counts.direct_internal_cell_uses,
         "shared_current_pattern_evaluations" =>
@@ -6291,8 +6180,6 @@ function r_pdmp_stan_subsampling(prepared, subsampling, x0, flow_type::String,
         "model_constructions" => ctx.counts.model_constructions,
         "data_constructions" => ctx.counts.data_constructions,
         "native_full_data_scans" => ctx.counts.native_full_data_scans,
-        "event_bound_observation_visits" =>
-            ctx.counts.event_bound_observation_visits,
         "initialization_model_constructions" => snapshot.model,
         "initialization_data_constructions" => snapshot.data,
         "initialization_full_gradient_calls" => snapshot.full_gradient,
@@ -6310,11 +6197,6 @@ function r_pdmp_stan_subsampling(prepared, subsampling, x0, flow_type::String,
             ctx.counts.native_full_data_scans - snapshot.native_full_data_scans :
             ctx.counts.native_full_data_scans -
                 manager.warmup_finish_native_full_data_scans,
-        "main_event_bound_observation_visits" => manager === nothing ?
-            ctx.counts.event_bound_observation_visits -
-                snapshot.event_bound_observation_visits :
-            ctx.counts.event_bound_observation_visits -
-                manager.warmup_finish_event_bound_observation_visits,
         "anchor_recycled_preparations" => manager === nothing ? 0 :
             manager.recycled_preparations,
         "anchor_total_preparation_seconds" => manager === nothing ? 0.0 : manager.preparation_seconds,
@@ -6487,15 +6369,12 @@ function _enforce_no_main_full_data!(main_full_gradient_calls,
         full_gradients = main_full_gradient_calls[chain]
         anchor_preparations = counters["anchor_main_preparations"]
         native_scans = counters["main_native_full_data_scans"]
-        event_bound_visits = get(
-            counters, "main_event_bound_observation_visits", 0)
         if !iszero(full_gradients) || !iszero(anchor_preparations) ||
-                !iszero(native_scans) || !iszero(event_bound_visits)
+                !iszero(native_scans)
             push!(violations, "chain $chain: main_full_gradient_calls=" *
                 "$full_gradients, anchor_main_preparations=" *
                 "$anchor_preparations, main_native_full_data_scans=" *
-                "$native_scans, main_event_bound_observation_visits=" *
-                "$event_bound_visits")
+                "$native_scans")
         end
     end
     isempty(violations) || throw(ErrorException(

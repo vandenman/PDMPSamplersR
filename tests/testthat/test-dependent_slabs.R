@@ -182,8 +182,9 @@ test_that("dependent slabs run through AdaptiveBoomerang warmup and sampling", {
 
   multi1 <- run_chain("diagonal", 812L, n_chains = 2L)
   multi2 <- run_chain("diagonal", 812L, n_chains = 2L)
-  deterministic_names <- setdiff(names(multi1$stats),
-    grep("elapsed_time", names(multi1$stats), value = TRUE))
+  # Wall-clock timings and memory use differ between identical runs.
+  deterministic_names <- grep("elapsed_time|_seconds$|_allocated_bytes$",
+                              names(multi1$stats), value = TRUE, invert = TRUE)
   expect_equal(multi1$stats[deterministic_names],
     multi2$stats[deterministic_names])
   expect_equal(inclusion_probs(multi1), inclusion_probs(multi2))

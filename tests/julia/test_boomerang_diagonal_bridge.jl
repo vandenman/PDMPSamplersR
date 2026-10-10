@@ -1,5 +1,10 @@
 using Test
 using LinearAlgebra
+using PDMPSamplers
+
+include(normpath(joinpath(@__DIR__, "..", "..", "inst", "julia",
+    "main_interface_function.jl")))
+using .PDMPSamplersRBridge
 
 @testset "Boomerang bridge preserves diagonal covariance structure" begin
     covariance = Matrix(Diagonal([0.25, 1.5, 8.0, 0.04]))

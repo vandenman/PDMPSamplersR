@@ -109,10 +109,29 @@ test_that("public independent-slab OMRF supports subsampling AdaptiveBoomerang",
   subsampling_fit <- do.call(
     pdmp_sample_from_stanmodel,
     c(common, list(subsampling = subsampling, seed = 1902L)))
+  # A longer run so that the main phase reaches subsampled proposals.
+  bank_common <- common
+  bank_common$T <- 15
+  bank_fit <- do.call(
+    pdmp_sample_from_stanmodel,
+    c(bank_common, list(
+      subsampling = subsampling,
+      subsampling_use_anchor_bank = TRUE,
+      subsampling_anchor_updates = 1L,
+      subsampling_require_no_main_full_data = TRUE,
+      seed = 1905L)))
   expect_s3_class(full_fit, "pdmp_result")
   expect_s3_class(subsampling_fit, "pdmp_result")
+  expect_s3_class(bank_fit, "pdmp_result")
   expect_gt(full_fit$stats$sticky_events[[1L]], 0)
   expect_gt(subsampling_fit$stats$sticky_events[[1L]], 0)
+  expect_equal(bank_fit$stats$main_full_gradient_calls[[1L]], 0)
+  expect_gt(bank_fit$stats$main_subsampling_subset_evaluations[[1L]], 0)
+  bank_counters <- attr(bank_fit, "subsampling_context_counters")[[1L]]
+  if (is.environment(bank_counters)) bank_counters <- as.list(bank_counters)
+  expect_gte(bank_counters$anchor_preparations, 1L)
+  expect_equal(bank_counters$anchor_main_preparations, 0L)
+  expect_equal(bank_counters$main_native_full_data_scans, 0L)
   counters <- attr(subsampling_fit, "subsampling_context_counters")[[1L]]
   if (is.environment(counters)) counters <- as.list(counters)
   expect_identical(counters$omrf_factorization, "person")

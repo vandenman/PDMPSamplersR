@@ -5387,28 +5387,17 @@ function _select_omrf_anchor!(manager::OMRFAnchorManager,
     previous = manager.active_idx
     best_idx = firstindex(manager.entries)
     best_distance = Inf
-    best_score = Inf
-    envelope_selection = phase === :main &&
-        isinf(manager.main_refresh_distance) && manager.capacity > 1 &&
-        state !== nothing
     selection_start = time_ns()
     @inbounds for idx in eachindex(manager.entries)
         entry = manager.entries[idx]
         entry.age += 1
         distance = _omrf_anchor_distance2(manager, x, entry.state)
-        score = envelope_selection ? PDMPSamplers.total_residual_bound(
-            entry.state.envelope, state, flow, 0.0) : distance
-        if score < best_score
+        if distance < best_distance
             best_idx = idx
             best_distance = distance
-            best_score = score
         end
     end
     manager.selection_seconds += (time_ns() - selection_start) * 1e-9
-    if envelope_selection
-        manager.selection_component_evaluations += sum(
-            length(entry.state.envelope.totals) for entry in manager.entries)
-    end
     manager.entries[best_idx].age = 0
     manager.active_idx = best_idx
     if phase === :main

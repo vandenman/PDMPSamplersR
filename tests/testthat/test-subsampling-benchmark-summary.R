@@ -2,7 +2,8 @@ benchmark_script <- function(name) {
   source_path <- testthat::test_path("..", "..", "benchmarks", name)
   if (file.exists(source_path)) return(source_path)
   installed_path <- system.file("benchmarks", name, package = "PDMPSamplersR")
-  if (!nzchar(installed_path)) stop("Installed benchmark script not found: ", name)
+  # The benchmark scripts are not part of every checkout or installation.
+  if (!nzchar(installed_path)) testthat::skip(paste("benchmark script not found:", name))
   installed_path
 }
 
@@ -10,7 +11,7 @@ benchmark_implementation <- function(name) {
   source_path <- testthat::test_path("..", "..", "inst", "benchmarks", name)
   if (file.exists(source_path)) return(source_path)
   installed_path <- system.file("benchmarks", name, package = "PDMPSamplersR")
-  if (!nzchar(installed_path)) stop("Benchmark implementation not found: ", name)
+  if (!nzchar(installed_path)) testthat::skip(paste("benchmark implementation not found:", name))
   installed_path
 }
 
@@ -285,6 +286,10 @@ test_that("benchmark wrappers are synchronized and implementations are canonical
     source_root <- file.path(source_root, "00_pkg_src", "PDMPSamplersR")
   }
   installed_root <- system.file("benchmarks", package = "PDMPSamplersR")
+  if (!file.exists(file.path(source_root, "benchmarks", "omrf_subsampling.R")) ||
+      !nzchar(installed_root)) {
+    skip("benchmark scripts not found")
+  }
   for (name in c("omrf_subsampling.R", "summarize_subsampling_first_batch.R",
                  "summarize_subsampling_hcv.R")) {
     expect_identical(

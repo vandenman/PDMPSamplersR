@@ -1548,7 +1548,6 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
   }
   subsampling_context_counters <- result$subsampling_context_counters
   window_diagnostics <- result$window_diagnostics
-  candidate_records <- result$candidate_records
   if (!is.null(subsampling_context_counters)) {
     subsampling_context_counters <- lapply(subsampling_context_counters, function(counter) {
       if (is.environment(counter)) as.list(counter) else counter
@@ -1566,7 +1565,6 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
     attr(result, "subsampling") <- TRUE
     attr(result, "subsampling_context_counters") <- subsampling_context_counters
     attr(result, "omrf_window_diagnostics") <- window_diagnostics
-    attr(result, "omrf_candidate_records") <- candidate_records
   }
   if (materialize) result <- .materialize(result)
   if (!is.null(subsampling) &&

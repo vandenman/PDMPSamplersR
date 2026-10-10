@@ -1650,82 +1650,6 @@ end
 @inline _omrf_base_oracle(oracle::PDMPSamplers.WithResidualStats) =
     _omrf_base_oracle(oracle.f)
 
-# Opt-in research sidecar. It is disabled by default and records only scalar
-# proposal quantities, so ordinary sampling has one predictable branch and no
-# per-candidate allocation.
-const _OMRF_CANDIDATE_RECORD_LIMIT = Ref(0)
-const _OMRF_CANDIDATE_RECORDS =
-    IdDict{OMRFAnalyticSubsamplingOracle,Vector{NTuple{7,Float64}}}()
-const _OMRF_CANDIDATE_RECORD_SECONDS = Ref(0.0)
-const _OMRF_CANDIDATE_RECORD_CALLS = Ref(0)
-
-function set_omrf_candidate_record_limit!(limit::Integer)
-    limit >= 0 || throw(ArgumentError("candidate record limit must be nonnegative"))
-    _OMRF_CANDIDATE_RECORD_LIMIT[] = Int(limit)
-    empty!(_OMRF_CANDIDATE_RECORDS)
-    _OMRF_CANDIDATE_RECORD_SECONDS[] = 0.0
-    _OMRF_CANDIDATE_RECORD_CALLS[] = 0
-    return nothing
-end
-
-omrf_candidate_record_diagnostics() = (
-    seconds=_OMRF_CANDIDATE_RECORD_SECONDS[],
-    calls=_OMRF_CANDIDATE_RECORD_CALLS[])
-
-import Profile
-const _OMRF_PROFILE_REPORT = Ref("")
-function set_omrf_main_profile_enabled!(enabled::Bool)
-    if enabled
-        start_hook = () -> begin
-            Profile.clear()
-            Profile.init(n=10^7, delay=0.0005)
-            Profile.start_timer()
-        end
-        stop_hook = () -> begin
-            Profile.stop_timer()
-            io = IOBuffer()
-            Profile.print(io; format=:flat, sortedby=:count, mincount=2)
-            _OMRF_PROFILE_REPORT[] = String(take!(io))
-        end
-        PDMPSamplers.set_main_phase_profile_hooks!(start_hook, stop_hook)
-    else
-        PDMPSamplers.set_main_phase_profile_hooks!(nothing, nothing)
-    end
-    return nothing
-end
-omrf_main_profile_report() = _OMRF_PROFILE_REPORT[]
-
-function PDMPSamplers.record_subsampling_candidate!(
-        oracle::OMRFAnalyticSubsamplingOracle,
-        cell_roof, aggregate_bound, aggregate_passed, subset_probability,
-        selected_subset_bound, exact_selected_intensity, accepted)
-    limit = _OMRF_CANDIDATE_RECORD_LIMIT[]
-    iszero(limit) && return nothing
-    started = time_ns()
-    _OMRF_CANDIDATE_RECORD_CALLS[] += 1
-    rows = get!(() -> NTuple{7,Float64}[], _OMRF_CANDIDATE_RECORDS, oracle)
-    if length(rows) >= limit
-        _OMRF_CANDIDATE_RECORD_SECONDS[] += (time_ns() - started) * 1e-9
-        return nothing
-    end
-    push!(rows, (Float64(cell_roof), Float64(aggregate_bound),
-        Float64(aggregate_passed), Float64(subset_probability),
-        Float64(selected_subset_bound), Float64(exact_selected_intensity),
-        Float64(accepted)))
-    _OMRF_CANDIDATE_RECORD_SECONDS[] += (time_ns() - started) * 1e-9
-    return nothing
-end
-
-function _omrf_candidate_record_matrix(oracle::OMRFAnalyticSubsamplingOracle)
-    rows = get(_OMRF_CANDIDATE_RECORDS, oracle, NTuple{7,Float64}[])
-    isempty(rows) && return zeros(Float64, 0, 7)
-    matrix = Matrix{Float64}(undef, length(rows), 7)
-    @inbounds for i in eachindex(rows), j in 1:7
-        matrix[i, j] = rows[i][j]
-    end
-    return matrix
-end
-
 function OMRFAnalyticSubsamplingOracle(ctx::StanSubsamplingContext,
         envelope_spec, unc_names, anchor::Vector{Float64})
     d = length(anchor)
@@ -6269,12 +6193,6 @@ function r_pdmp_stan_subsampling(prepared, subsampling, x0, flow_type::String,
     ) for (model, ctx, snapshot, manager) in
         zip(models, contexts, construction_snapshots, anchor_managers)]
     result["subsampling_context_counters"] = subsampling_context_counters
-    candidate_values = [model.grad.residual_oracle isa
-        OMRFAnalyticSubsamplingOracle ?
-        _omrf_candidate_record_matrix(model.grad.residual_oracle) :
-        zeros(Float64, 0, 7) for model in models]
-    result["candidate_records"] = isone(length(candidate_values)) ?
-        first(candidate_values) : candidate_values
     # Publish phase-local pipeline fields under the stable research names.
     # These are copied from the sampler statistics object, not reconstructed
     # from provider-level call counters.

@@ -5,7 +5,8 @@ test_that("BPS preserves frozen CLPM coordinates at the R/Julia bridge", {
   # The failed production rows all used the 62-dimensional P = 4, T = 4
   # CLPM state.  Coordinates 20, 24, and 31 are representative off-diagonal
   # sticky coordinates from those rows.
-  model <- testthat::local_tempfile(fileext = ".stan")
+  model <- tempfile(fileext = ".stan")
+  on.exit(unlink(model), add = TRUE)
   writeLines(c(
     "data { int<lower=0, upper=1> prior_only; }",
     "parameters { vector[62] x; }",

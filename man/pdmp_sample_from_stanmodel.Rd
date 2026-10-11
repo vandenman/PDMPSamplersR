@@ -42,14 +42,9 @@ pdmp_sample_from_stanmodel(
   slab_prior = NULL,
   grid_n = 30,
   grid_t_max = 2,
-  use_fd_hvp = FALSE,
   curvature_backend = NULL,
-  post_warmup_simplify = FALSE,
   grid_bound = c("value_quadratic", "constant"),
   grid_curvature_bound = NULL,
-  lazy_low_tightness_threshold = 0.1,
-  lazy_max_low_tightness_rejections = 3L,
-  lazy_max_rejections = 0L,
   show_progress = TRUE,
   n_chains = 1L,
   threaded = FALSE,
@@ -197,20 +192,14 @@ package replaces that slab by its active-face restriction internally.}
 
 \item{grid_t_max}{Numeric, maximum time for grid in GridThinningStrategy (default: 2.0).}
 
-\item{use_fd_hvp}{Logical compatibility switch selecting finite-difference
-curvature when no exact Hessian-vector product is used.}
-
 \item{curvature_backend}{Character string selecting directional curvature:
 `"exact"` or `"finite_difference"`. Custom-Stan subsampling has no
-deterministic exact HVP and therefore always requires finite differences.
+deterministic exact HVP unless using the analytic dependent OMRF provider.
 Finite differences use
 shifted exact gradients but approximate their directional derivative and
-therefore have step-size and truncation error. `NULL` preserves the
-legacy `use_fd_hvp` mapping.}
-
-\item{post_warmup_simplify}{Logical. If \code{TRUE}, the grid-thinning
-strategy may switch to a constant bound after warmup, reducing
-gradient calls during the main sampling phase.}
+therefore have step-size and truncation error. `NULL` selects exact
+curvature for full gradients and finite differences for subsampling,
+except that analytic dependent OMRF always uses its exact composed HVP.}
 
 \item{grid_bound}{Character string selecting the GridThinning proposal
 envelope. \code{"value_quadratic"} (default) bounds each grid cell by
@@ -222,15 +211,6 @@ construction.}
 \item{grid_curvature_bound}{Optional nonnegative bound on the curvature of
 the event rate over a grid cell, used by \code{grid_bound =
 "value_quadratic"}. Too small a value invalidates the envelope.}
-
-\item{lazy_low_tightness_threshold}{Nonnegative threshold used by lazy grid
-refinement diagnostics.}
-
-\item{lazy_max_low_tightness_rejections}{Nonnegative number of consecutive
-low-tightness rejections allowed before refinement.}
-
-\item{lazy_max_rejections}{Nonnegative total lazy-rejection limit; zero uses
-the package default behavior.}
 
 \item{show_progress}{Logical, whether to show progress bar (default: TRUE).}
 

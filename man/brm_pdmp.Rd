@@ -33,8 +33,7 @@ brm_pdmp(
   use_hcv = FALSE,
   use_anchor_bank = FALSE,
   bank_capacity = 20L,
-  use_fd_hvp = FALSE,
-  post_warmup_simplify = FALSE,
+  curvature_backend = c("exact", "finite_difference"),
   sticky = FALSE,
   can_stick = NULL,
   model_prior = NULL,
@@ -136,15 +135,9 @@ growth-envelope components. Benchmark representative models before using
 a large capacity. Analytic HCV additionally stores one dense `d * d`
 likelihood Hessian per populated anchor.}
 
-\item{use_fd_hvp}{Logical; use finite-difference directional curvature
-instead of BridgeStan's Hessian-vector product (default: FALSE).
-Replaces each HVP call (2-3x gradient cost) with one extra gradient
-call, giving ~30-50\% per-grid-point savings.}
-
-\item{post_warmup_simplify}{Logical; switch to a fast constant-bound
-thinning mode after warmup when the sampler is well-adapted
-(default: FALSE). Activates when the reflection ratio is below 30\%
-and at least 10 events have been observed.}
+\item{curvature_backend}{Directional curvature evaluation: `"exact"`
+(default) uses Hessian-vector products; `"finite_difference"` uses shifted
+gradients and has finite-difference truncation error.}
 
 \item{sticky}{Logical; enable spike-and-slab variable selection for
 population-level coefficients (default: FALSE). Requires

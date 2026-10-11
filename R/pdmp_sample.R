@@ -513,8 +513,6 @@ validate_support_boundary_control <- function(support_boundary) {
 #' @param theta0 Numeric vector of length d, initial velocity (default: random based on the flow).
 #' @param hessian Function that returns the negative Hessian matrix of size d x d (default: NULL).
 #'   Only used with GridThinningStrategy to compute the Hessian-vector product.
-#' @param use_fd_hvp Logical compatibility switch selecting finite-difference
-#'   curvature when no exact Hessian-vector product is used.
 #' @param sticky Logical, whether to use sticky sampling (default: FALSE).
 #' @param can_stick Logical vector of length d, which coordinates can stick (default: all FALSE).
 #' @param model_prior Prior distribution object for model selection:
@@ -595,7 +593,6 @@ pdmp_sample <- function(f, d,
                         sticky = FALSE, can_stick = NULL, model_prior = NULL, parameter_prior = NULL,
                         slab_prior = NULL,
                         grid_n = 30, grid_t_max = 2.0,
-                        use_fd_hvp = FALSE,
                         post_warmup_simplify = FALSE,
                         grid_bound = c("value_quadratic", "constant"),
                         grid_curvature_bound = NULL,
@@ -770,11 +767,12 @@ pdmp_sample <- function(f, d,
 #'   by \code{subsampling}; it is not needed for full-gradient slabs.
 #' @param curvature_backend Character string selecting directional curvature:
 #'   `"exact"` or `"finite_difference"`. Custom-Stan subsampling has no
-#'   deterministic exact HVP and therefore always requires finite differences.
+#'   deterministic exact HVP unless using the analytic dependent OMRF provider.
 #'   Finite differences use
 #'   shifted exact gradients but approximate their directional derivative and
-#'   therefore have step-size and truncation error. `NULL` preserves the
-#'   legacy `use_fd_hvp` mapping.
+#'   therefore have step-size and truncation error. `NULL` selects exact
+#'   curvature for full gradients and finite differences for subsampling,
+#'   except that analytic dependent OMRF always uses its exact composed HVP.
 #' @param subsampling Optional exact subsampling custom-Stan specification
 #'   created by [stan_subsampling()]. The selected Stan branch must add
 #'   the unscaled sum of the installed observations; Julia applies `N / m`.
@@ -860,7 +858,6 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
                         sticky = FALSE, can_stick = NULL, model_prior = NULL, parameter_prior = NULL,
                         slab_prior = NULL,
                         grid_n = 30, grid_t_max = 2.0,
-                        use_fd_hvp = FALSE,
                         curvature_backend = NULL,
                         post_warmup_simplify = FALSE,
                         grid_bound = c("value_quadratic", "constant"),
@@ -1057,7 +1054,6 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
     }
   }
 
-  validate_type(use_fd_hvp, type = "logical", n = 1)
   if (!is.null(subsampling)) {
     analytic_omrf_hvp <- inherits(subsampling$residual_envelope,
       "omrf_residual_envelope") &&
@@ -1075,7 +1071,7 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
       }
     }
     if (analytic_omrf_hvp) {
-      if (identical(curvature_backend, "finite_difference") || isTRUE(use_fd_hvp)) {
+      if (identical(curvature_backend, "finite_difference")) {
         cli::cli_inform(paste0(
           "Using the exact composed HVP for analytic dependent OMRF subsampling; ",
           "finite-difference curvature is not supported for this combination."))
@@ -1084,14 +1080,10 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
     } else {
       curvature_backend <- curvature_backend %||% "finite_difference"
     }
-    use_fd_hvp <- curvature_backend == "finite_difference"
   } else if (is.null(curvature_backend)) {
-    curvature_backend <- if (isTRUE(use_fd_hvp)) "finite_difference" else "exact"
+    curvature_backend <- "exact"
   } else {
     curvature_backend <- match.arg(curvature_backend, c("exact", "finite_difference"))
-    if (isTRUE(use_fd_hvp) && curvature_backend != "finite_difference") {
-      cli::cli_abort("Argument {.arg use_fd_hvp = TRUE} conflicts with {.arg curvature_backend = {curvature_backend}}.")
-    }
   }
   support_boundary <- validate_support_boundary_control(support_boundary)
   if (!is.null(subsampling) && support_boundary$mode != "error") {
@@ -1425,7 +1417,6 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
       theta0 = theta0,
       free0 = free0, stored_velocity0 = stored_velocity0,
       c0 = c0, grid_n = grid_n, grid_t_max = grid_t_max,
-      use_fd_hvp = _curvature_backend == \"finite_difference\",
       curvature_backend = _curvature_backend,
       post_warmup_simplify = post_warmup_simplify,
       grid_bound = grid_bound,
@@ -1462,7 +1453,6 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
       theta0 = theta0,
       free0 = free0, stored_velocity0 = stored_velocity0,
       c0 = c0, grid_n = grid_n, grid_t_max = grid_t_max,
-      use_fd_hvp = _curvature_backend == \"finite_difference\",
       curvature_backend = _curvature_backend,
       post_warmup_simplify = post_warmup_simplify,
       grid_bound = grid_bound,

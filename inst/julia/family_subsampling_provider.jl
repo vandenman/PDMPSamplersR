@@ -434,7 +434,7 @@ function _store_prepared_subsampling_anchor!(manager::SubsamplingBridgeAnchorMan
 end
 
 function _build_subsampling_bss_model(ctx::SubsamplingBridgeStanContext;
-        use_fd_hvp::Bool=false, anchor_capacity::Integer=0)
+        curvature_backend::String="exact", anchor_capacity::Integer=0)
     designs = ctx.predictor_designs
     N, d, K = ctx.N, ctx.d, length(designs)
     d == length(ctx.anchor) || throw(DimensionMismatch("likelihood design column count must equal the unconstrained dimension"))
@@ -559,7 +559,7 @@ function _build_subsampling_bss_model(ctx::SubsamplingBridgeStanContext;
         (anchor -> _activate_subsampling_anchor!(manager, anchor))
     cv = SubsampledControlVariate(deterministic_gradient!, residual_oracle!, envelope,
         ctx.anchor, ctx.m;
-        deterministic_hvp! = use_fd_hvp ? nothing : deterministic_hvp!,
+        deterministic_hvp! = curvature_backend == "finite_difference" ? nothing : deterministic_hvp!,
         refresh_anchor! = refresh_callback)
     model = PDMPModel(d, cv)
     if manager === nothing

@@ -67,10 +67,9 @@
 #'   growth-envelope components. Benchmark representative models before using
 #'   a large capacity. Analytic HCV additionally stores one dense `d * d`
 #'   likelihood Hessian per populated anchor.
-#' @param use_fd_hvp Logical; use finite-difference directional curvature
-#'   instead of BridgeStan's Hessian-vector product (default: FALSE).
-#'   Replaces each HVP call (2-3x gradient cost) with one extra gradient
-#'   call, giving ~30-50\% per-grid-point savings.
+#' @param curvature_backend Directional curvature evaluation: `"exact"`
+#'   (default) uses Hessian-vector products; `"finite_difference"` uses shifted
+#'   gradients and has finite-difference truncation error.
 #' @param post_warmup_simplify Logical; switch to a fast constant-bound
 #'   thinning mode after warmup when the sampler is well-adapted
 #'   (default: FALSE). Activates when the reflection ratio is below 30\%
@@ -158,7 +157,7 @@ brm_pdmp <- function(
     use_hcv = FALSE,
     use_anchor_bank = FALSE,
     bank_capacity = 20L,
-    use_fd_hvp = FALSE,
+    curvature_backend = c("exact", "finite_difference"),
     post_warmup_simplify = FALSE,
     sticky = FALSE, can_stick = NULL, model_prior = NULL,
     kappa = NULL, slab_prior = NULL,
@@ -177,6 +176,7 @@ brm_pdmp <- function(
   flow <- match.arg(flow)
   algorithm <- match.arg(algorithm)
   adaptive_scheme <- match.arg(adaptive_scheme)
+  curvature_backend <- match.arg(curvature_backend)
   if (!is.null(slab_prior)) {
     if (!isTRUE(sticky)) {
       cli::cli_abort("Argument {.arg slab_prior} requires {.arg sticky} to be {.code TRUE}.")
@@ -492,7 +492,7 @@ brm_pdmp <- function(
       threaded = threaded,
       seed = seed,
       compute_lp = compute_lp,
-      use_fd_hvp = use_fd_hvp,
+      curvature_backend = curvature_backend,
       post_warmup_simplify = post_warmup_simplify,
       sticky = sticky_args$sticky,
       can_stick = sticky_args$can_stick,
@@ -522,7 +522,7 @@ brm_pdmp <- function(
       threaded = threaded,
       seed = seed,
       compute_lp = compute_lp,
-      use_fd_hvp = use_fd_hvp,
+      curvature_backend = curvature_backend,
       post_warmup_simplify = post_warmup_simplify,
       sticky = sticky_args$sticky,
       can_stick = sticky_args$can_stick,

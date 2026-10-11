@@ -5657,7 +5657,6 @@ function r_pdmp_stan_subsampling(prepared, subsampling, x0, flow_type::String,
         free0=nothing,
         stored_velocity0=nothing,
         c0::Float64=1e-2, grid_n::Int=30, grid_t_max::Float64=2.0,
-        use_fd_hvp::Bool=true,
         curvature_backend::String="finite_difference",
         post_warmup_simplify::Bool=false,
         grid_bound::String="value_quadratic",
@@ -5790,7 +5789,7 @@ function r_pdmp_stan_subsampling(prepared, subsampling, x0, flow_type::String,
         initial_variance_floor_fraction=boomerang_variance_floor_fraction)
     boom_floor_mask = _boomerang_logscale_floor_mask(unc_names, d)
     alg0 = build_algorithm(algorithm_type; c0, d, grid_n, grid_t_max,
-        use_fd_hvp, curvature_backend,
+        curvature_backend,
         post_warmup_simplify, grid_bound, grid_curvature_bound,
         lazy_low_tightness_threshold, lazy_max_low_tightness_rejections,
         lazy_max_rejections)

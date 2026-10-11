@@ -220,7 +220,7 @@ function r_resolve_flow_spec(flow_type::String, flow_mean, flow_cov;
 end
 
 function build_algorithm(algorithm_type::String; c0::Float64, d::Integer, grid_n::Int, grid_t_max::Float64,
-        use_fd_hvp::Bool=false, curvature_backend::String="auto",
+        curvature_backend::String="auto",
         post_warmup_simplify::Bool=false, grid_bound::String="value_quadratic",
         grid_curvature_bound::Union{Nothing,Float64}=nothing,
         lazy_low_tightness_threshold::Float64=0.1,
@@ -235,7 +235,7 @@ function build_algorithm(algorithm_type::String; c0::Float64, d::Integer, grid_n
             Symbol(bound_violation_value)
         return GridThinningStrategy(; N = grid_n, t_max = grid_t_max,
             N_min = grid_n_min,
-            use_fd_hvp = use_fd_hvp, curvature_backend = Symbol(curvature_backend),
+            curvature_backend = Symbol(curvature_backend),
             post_warmup_simplify = post_warmup_simplify,
             bound = Symbol(grid_bound),
             bound_violation = bound_violation,
@@ -1777,8 +1777,8 @@ function r_pdmp_stan(
         kwargs...
     )
 
-    use_fd_hvp = Bool(get(kwargs, :use_fd_hvp, false))
-    model = PDMPModel(path_to_stan_model, path_to_stan_data; hvp=!use_fd_hvp)
+    model = PDMPModel(path_to_stan_model, path_to_stan_data;
+        hvp=get(kwargs, :curvature_backend, "auto") != "finite_difference")
     return r_pdmp_stan(model, x0, flow_type, algorithm_type, flow_mean, flow_cov; kwargs...)
 end
 
@@ -1795,7 +1795,6 @@ function r_pdmp_stan(
         c0::Float64 = 1e-2,
         grid_n::Int = 30,
         grid_t_max::Float64 = 2.0,
-        use_fd_hvp::Bool = false,
         curvature_backend::String = "auto",
         post_warmup_simplify::Bool = true,
         grid_bound::String = "value_quadratic",
@@ -1852,7 +1851,7 @@ function r_pdmp_stan(
         initial_variance_floor_fraction=boomerang_variance_floor_fraction)
     boom_floor_mask = _boomerang_logscale_floor_mask(unc_names_vec, d)
     initial_refresh_rate = try Float64(PDMPSamplers.refresh_rate(flow)) catch; NaN end
-    alg0 = build_algorithm(algorithm_type; c0, d, grid_n, grid_t_max, use_fd_hvp, curvature_backend,
+    alg0 = build_algorithm(algorithm_type; c0, d, grid_n, grid_t_max, curvature_backend,
         post_warmup_simplify, grid_bound, grid_curvature_bound,
         lazy_low_tightness_threshold, lazy_max_low_tightness_rejections,
         lazy_max_rejections)
@@ -2142,7 +2141,7 @@ function _run_subsampling_brms_subsampled(lib_path_std::String,
         adaptive_scheme::String, discretize_dt::Float64,
         show_progress::Bool, n_chains::Int, threaded::Bool,
         seed::Union{Integer,Nothing}, compute_lp::Bool,
-        use_fd_hvp::Bool, post_warmup_simplify::Bool,
+        curvature_backend::String, post_warmup_simplify::Bool,
         sticky::Bool, can_stick, model_prior, parameter_prior,
         n_anchor_updates::Int, use_anchor_bank::Bool, bank_capacity::Int,
         use_hcv::Bool)
@@ -2169,7 +2168,7 @@ function _run_subsampling_brms_subsampled(lib_path_std::String,
             predictor_indices, d, offsets, response, known_se,
             observation_multipliers, N, m, anchor; use_hcv)
         push!(contexts, ctx)
-        built = _build_subsampling_bss_model(ctx; use_fd_hvp, anchor_capacity)
+        built = _build_subsampling_bss_model(ctx; curvature_backend, anchor_capacity)
         if anchor_capacity > 0
             model, adapter, manager = built
             adapter.update_dt = n_anchor_updates > 0 ?
@@ -2188,7 +2187,7 @@ function _run_subsampling_brms_subsampled(lib_path_std::String,
     flow = build_flow(flow_type, prec, fmean; adaptive_scheme)
     initial_refresh_rate = try Float64(PDMPSamplers.refresh_rate(flow)) catch; NaN end
     alg = build_algorithm(algorithm_type; c0, d, grid_n, grid_t_max,
-        use_fd_hvp, post_warmup_simplify, grid_bound, grid_curvature_bound)
+        curvature_backend, post_warmup_simplify, grid_bound, grid_curvature_bound)
     alg = wrap_sticky(alg, sticky, model_prior, parameter_prior, can_stick)
     if anchor_capacity == 0
         chains = pdmp_sample(anchor, flow, models, alg, t0, T, t_warmup;
@@ -2274,7 +2273,7 @@ function r_pdmp_brms_subsampling(
         threaded::Bool = false,
         seed::Union{Integer, Nothing} = nothing,
         compute_lp::Bool = false,
-        use_fd_hvp::Bool = false,
+        curvature_backend::String = "exact",
         post_warmup_simplify::Bool = false,
         sticky::Bool = false,
         can_stick::Union{AbstractVector{Bool}, Nothing} = nothing,
@@ -2304,7 +2303,7 @@ function r_pdmp_brms_subsampling(
         flow_mean, flow_cov, output_csv;
         c0, grid_n, grid_t_max, grid_bound, grid_curvature_bound, t0, T, t_warmup,
         adaptive_scheme, discretize_dt, show_progress, n_chains, threaded,
-        seed, compute_lp, use_fd_hvp, post_warmup_simplify,
+        seed, compute_lp, curvature_backend, post_warmup_simplify,
         sticky, can_stick, model_prior, parameter_prior,
         n_anchor_updates, use_anchor_bank, bank_capacity, use_hcv)
 end
@@ -2332,7 +2331,7 @@ function r_pdmp_stan_for_brms(
         threaded::Bool = false,
         seed::Union{Integer, Nothing} = nothing,
         compute_lp::Bool = false,
-        use_fd_hvp::Bool = false,
+        curvature_backend::String = "exact",
         post_warmup_simplify::Bool = false,
         sticky::Bool = false,
         can_stick = nothing,
@@ -2342,7 +2341,7 @@ function r_pdmp_stan_for_brms(
         unc_names = String[]
     )
     sm = BridgeStan.StanModel(path_to_stan_model, path_to_stan_data; warn=false)
-    posterior_model = PDMPModel(sm; hvp = isnothing(slab_prior) && !use_fd_hvp)
+    posterior_model = PDMPModel(sm; hvp = isnothing(slab_prior) && curvature_backend != "finite_difference")
     can_stick_vec = _as_bool_vector(can_stick)
     parameter_prior_vec = isnothing(parameter_prior) ? nothing : _as_float_vector(parameter_prior)
     unc_names_vec = _as_string_vector(unc_names)
@@ -2361,7 +2360,7 @@ function r_pdmp_stan_for_brms(
     flow = build_flow(flow_type, prec, fmean; adaptive_scheme)
     initial_refresh_rate = try Float64(PDMPSamplers.refresh_rate(flow)) catch; NaN end
     alg0 = build_algorithm(algorithm_type; c0, d, grid_n, grid_t_max,
-        use_fd_hvp, post_warmup_simplify, grid_bound, grid_curvature_bound)
+        curvature_backend, post_warmup_simplify, grid_bound, grid_curvature_bound)
     alg = isnothing(slab_prior) ?
         wrap_sticky(alg0, sticky, model_prior, parameter_prior_vec, can_stick_vec) :
         wrap_dependent_sticky(alg0, sticky, model_prior, slab_prior, can_stick_vec, flow, unc_names_vec)

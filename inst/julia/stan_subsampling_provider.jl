@@ -2808,8 +2808,8 @@ function PDMPSamplers.deterministic_gradient!(out,
     _omrf_add_path_terms!(out, envelope, state, flow)
     if slab !== nothing
         x = state.ξ.x
-        PDMPSamplers.active_prior_grad!(slab.slab, slab.all_buf, x, slab.all_active)
-        PDMPSamplers.active_prior_grad!(slab.slab, slab.active_buf, x, slab.active)
+        PDMPSamplers.active_slab_potential_gradient!(slab.slab, slab.all_buf, x, slab.all_active)
+        PDMPSamplers.active_slab_potential_gradient!(slab.slab, slab.active_buf, x, slab.active)
         @. out = out - slab.all_buf + slab.active_buf
     end
     _OMRF_CHECK_FAST_DETERMINISTIC[] && _omrf_check_fast_deterministic(out, cv, state)
@@ -5247,9 +5247,9 @@ end
 
 function (target::StanSubsamplingSlabDeterministic)(out, x)
     target.oracle(out, x)
-    PDMPSamplers.active_prior_grad!(target.slab, target.all_buf, x,
+    PDMPSamplers.active_slab_potential_gradient!(target.slab, target.all_buf, x,
         target.all_active)
-    PDMPSamplers.active_prior_grad!(target.slab, target.active_buf, x,
+    PDMPSamplers.active_slab_potential_gradient!(target.slab, target.active_buf, x,
         target.active)
     @. out = out - target.all_buf + target.active_buf
     return out

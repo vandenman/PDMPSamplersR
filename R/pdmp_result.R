@@ -34,6 +34,7 @@ new_pdmp_result <- function(chains, stats, d, n_chains, skeleton = NULL,
 #' @export
 materialize <- function(x) {
   .check_pdmp(x)
+  if (is.null(x$chains) && !is.null(x$skeleton)) return(x)
   chains <- if (!is.null(x$chains)) x$chains else .ensure_chains(x)
   n <- x$n_chains
   has_live_states <- vapply(seq_len(n), function(i)

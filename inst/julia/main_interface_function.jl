@@ -947,7 +947,10 @@ end
 r_chain_has_live_state_provenance(chains::PDMPChains; chain::Int=1) =
     length(chains.initial_states) >= chain &&
     length(chains.retained_initial_states) >= chain &&
-    length(chains.terminal_states) >= chain
+    length(chains.terminal_states) >= chain &&
+    chains.initial_states[chain] !== nothing &&
+    chains.retained_initial_states[chain] !== nothing &&
+    chains.terminal_states[chain] !== nothing
 
 function r_chain_sparse_initial_time(chains::PDMPChains; chain::Int)
     Float64(chains.traces[chain].initial_state.time)

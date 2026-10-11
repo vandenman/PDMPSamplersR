@@ -102,6 +102,9 @@ test_that("materialize is idempotent", {
   m2 <- materialize(m1)
 
   expect_equal(m1$skeleton, m2$skeleton)
+  expect_identical(m1$initial_states, m2$initial_states)
+  expect_identical(m1$retained_initial_states, m2$retained_initial_states)
+  expect_identical(m1$terminal_states, m2$terminal_states)
   expect_null(m2$chains)
 })
 

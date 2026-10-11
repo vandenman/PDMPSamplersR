@@ -5430,8 +5430,7 @@ function _build_stan_subsampling_model(ctx::StanSubsamplingContext,
         return model, ctx, unc_names
     end
     adapter = PDMPSamplers.SubsamplingAnchorBankAdapter(
-        (live_grad, state, flow, phase, stats, event_type,
-                anchor_boundary_won) -> begin
+        (live_grad, state, flow, phase, stats, event_type) -> begin
             phase === :warmup && !manage_during_warmup && return false
             # `with_stats` reconstructs the retained control variate. Anchor
             # selection must therefore update the chain-local live gradient,
@@ -5445,7 +5444,7 @@ function _build_stan_subsampling_model(ctx::StanSubsamplingContext,
                 _record_omrf_window!(manager, state, flow, stats; stage=:pre)
             end
             changed = _select_omrf_anchor!(manager, active_cv, state.ξ.x;
-                phase, state, flow, boundary_won=anchor_boundary_won,
+                phase, state, flow, boundary_won=event_type === :anchor_selection_boundary,
                 event_type)
             if phase === :main
                 _record_omrf_window!(manager, state, flow, stats; stage=:post)
@@ -5470,7 +5469,7 @@ function _build_stan_subsampling_model(ctx::StanSubsamplingContext,
             _attach_omrf_live_envelope_context!(manager, active_cv)
             _omrf_position_anchor_horizon!(manager, state, flow, phase)
         end,
-        Inf, 0.0)
+        Inf, 0.0, false)
     return model, ctx, unc_names, adapter, manager
 end
 

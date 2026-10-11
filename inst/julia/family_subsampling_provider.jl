@@ -566,10 +566,12 @@ function _build_subsampling_bss_model(ctx::SubsamplingBridgeStanContext;
         return model
     end
     adapter = PDMPSamplers.SubsamplingAnchorBankAdapter(
-        (grad, state, flow, phase) ->
+        (grad, state, flow, phase, stats, event_type) ->
             _select_subsampling_anchor!(manager, grad, state.ξ.x; phase),
         (grad, trace) -> _add_subsampling_anchor!(manager, grad, trace),
-        Inf, 0.0)
+        (grad, state, flow, trace_mgr, stats) -> false,
+        (grad, state, flow, phase, stats) -> Inf,
+        Inf, 0.0, false)
     return model, adapter, manager
 end
 

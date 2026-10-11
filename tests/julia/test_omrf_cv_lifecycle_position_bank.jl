@@ -53,8 +53,7 @@ end
         model, _, names, adapter, manager = built(1)
         adapter.update_dt = updates ? 0.01 : Inf
         flow = BouncyParticle(9, 0.5)
-        alg = GridThinningStrategy(; N=4, t_max=0.02, lazy=false,
-            bound_violation=:throw)
+        alg = GridThinningStrategy(; N=4, t_max=0.02, bound_violation=:throw)
         observed = Ref(false)
         observer = PDMPSamplers.SamplerObserver(; phase_start=
             (phase, state, live_model, flow, alg, cache) -> begin
@@ -88,8 +87,7 @@ end
     fixed_adapter.update_dt = Inf
     pdmp_sample(SkeletonPoint(fill(0.15, 9), fill(0.4, 9)),
         BouncyParticle(9, 0.5), fixed_model,
-        GridThinningStrategy(; N=4, t_max=0.02, lazy=false,
-            bound_violation=:throw), 0.0, 0.06, 0.04;
+        GridThinningStrategy(; N=4, t_max=0.02, bound_violation=:throw), 0.0, 0.06, 0.04;
         adapter=fixed_adapter, progress=false, seed=7302,
         statistic_counter=PDMPSamplers.DevelStatisticCounter)
     @test fixed_manager.capacity == 4
@@ -107,8 +105,7 @@ end
     function adaptive_path(model, adapter)
         pdmp_sample(SkeletonPoint(fill(0.12, 9), fill(0.3, 9)),
             BouncyParticle(9, 0.5), model,
-            GridThinningStrategy(; N=4, t_max=0.02, lazy=false,
-                bound_violation=:throw), 0.0, 0.03, 0.0;
+            GridThinningStrategy(; N=4, t_max=0.02, bound_violation=:throw), 0.0, 0.03, 0.0;
             adapter, progress=false, seed=7303,
             statistic_counter=PDMPSamplers.DevelStatisticCounter).traces[1]
     end
@@ -427,8 +424,7 @@ end
     path_result = pdmp_sample(
         SkeletonPoint([-0.251; zeros(8)], [2.0; fill(0.05, 8)]),
         BouncyParticle(9, 0.5), path_model,
-        GridThinningStrategy(; N=4, t_max=0.01, lazy=false,
-            bound_violation=:throw), 0.0, 0.04, 0.0;
+        GridThinningStrategy(; N=4, t_max=0.01, bound_violation=:throw), 0.0, 0.04, 0.0;
         adapter=path_adapter, progress=false, seed=7511,
         statistic_counter=PDMPSamplers.DevelStatisticCounter,
         observer=scheduler_observer)
@@ -469,8 +465,7 @@ end
     boom_result = pdmp_sample(
         SkeletonPoint([-0.012; zeros(8)], [0.3; fill(0.01, 8)]),
         Boomerang(Diagonal(ones(9)), zeros(9), 0.0), boom_model,
-        GridThinningStrategy(; N=4, t_max=0.004, lazy=false,
-            bound_violation=:throw), 0.0, 0.08, 0.0;
+        GridThinningStrategy(; N=4, t_max=0.004, bound_violation=:throw), 0.0, 0.08, 0.0;
         adapter=boom_adapter, progress=false, seed=7513,
         statistic_counter=PDMPSamplers.DevelStatisticCounter)
     @test boom_manager.selection_boundaries >= 2
@@ -531,7 +526,7 @@ end
     continuation_point = SkeletonPoint(copy(endpoint.position),
         copy(endpoint.physical_velocity))
     continuation_algorithm() = GridThinningStrategy(; N=4, t_max=0.01,
-        lazy=false, bound_violation=:throw)
+        bound_violation=:throw)
     reference_next = pdmp_sample(continuation_point, deepcopy(endpoint.flow),
         path_model, continuation_algorithm(), endpoint.t, endpoint.t + 0.005,
         0.0; adapter=path_adapter, progress=false, seed=7512,

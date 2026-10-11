@@ -226,7 +226,7 @@ end
                     4, 2, 3, anchor; use_hcv=analytic_hcv)
                 flow_model = RB._build_subsampling_bss_model(flow_ctx)
                 chains = pdmp_sample(anchor, flow, [flow_model],
-                    GridThinningStrategy(N=12, t_max=0.5, lazy=false),
+                    GridThinningStrategy(N=12, t_max=0.5),
                     0.0, 0.5, 0.0; progress=false, seed=72,
                     statistic_counter=PDMPSamplers.DevelStatisticCounter)
                 @test length(chains.traces) == 1
@@ -263,7 +263,7 @@ end
         ]
         threaded_models = [RB._build_subsampling_bss_model(ctx_i) for ctx_i in threaded_contexts]
         threaded = pdmp_sample(anchor, BouncyParticle(3), threaded_models,
-            GridThinningStrategy(N=8, t_max=0.25, lazy=false),
+            GridThinningStrategy(N=8, t_max=0.25),
             0.0, 0.25, 0.0; progress=false, threaded=true, seed=91)
         @test length(threaded.traces) == 2
         @test all(ctx_i.calls.full_gradient == 1 for ctx_i in threaded_contexts)

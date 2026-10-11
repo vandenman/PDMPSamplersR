@@ -971,7 +971,7 @@ end
             PDMPSamplers.initialize_state(direct_event_rng,
                 direct_event_flow, direct_model,
                 GridThinningStrategy(N=2, N_min=2, t_max=0.2,
-                    lazy=false, bound_violation=:throw), 0.0,
+                    bound_violation=:throw), 0.0,
                 SkeletonPoint(copy(position), copy(velocity)))
         direct_event_alg.schedule_frozen[] = true
         for _ in 1:4
@@ -1157,8 +1157,7 @@ end
         model = PDMPModel(BridgeStan.StanModel(lib, full; warn=false))
         trace, _ = only(pdmp_sample(
             initial, BouncyParticle(9, 0.4), model,
-            GridThinningStrategy(N=12, t_max=0.5, lazy=false,
-                bound_violation=:throw),
+            GridThinningStrategy(N=12, t_max=0.5, bound_violation=:throw),
             0.0, 1_200.0; progress=false, seed))
         trace
     end
@@ -1170,8 +1169,7 @@ end
             anchor, nothing, falses(9))
         trace, stats = only(pdmp_sample(
             initial, BouncyParticle(9, 0.4), model,
-            GridThinningStrategy(N=12, t_max=0.5, lazy=false,
-                bound_violation=:throw),
+            GridThinningStrategy(N=12, t_max=0.5, bound_violation=:throw),
             0.0, 1_200.0; progress=false, seed,
             statistic_counter=PDMPSamplers.DevelStatisticCounter))
         (trace=trace, stats=stats, ctx=subsampling_ctx)

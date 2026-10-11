@@ -221,10 +221,7 @@ end
 function build_algorithm(algorithm_type::String; c0::Float64, d::Integer, grid_n::Int, grid_t_max::Float64,
         curvature_backend::String="auto",
         grid_bound::String="value_quadratic",
-        grid_curvature_bound::Union{Nothing,Float64}=nothing,
-        lazy_low_tightness_threshold::Float64=0.1,
-        lazy_max_low_tightness_rejections::Int=3,
-        lazy_max_rejections::Int=0)
+        grid_curvature_bound::Union{Nothing,Float64}=nothing)
     if algorithm_type == "ThinningStrategy"
         return ThinningStrategy(GlobalBounds(c0, d))
     elseif algorithm_type == "GridThinningStrategy"
@@ -237,10 +234,7 @@ function build_algorithm(algorithm_type::String; c0::Float64, d::Integer, grid_n
             curvature_backend = Symbol(curvature_backend),
             bound = Symbol(grid_bound),
             bound_violation = bound_violation,
-            curvature_bound = grid_curvature_bound,
-            lazy_low_tightness_threshold = lazy_low_tightness_threshold,
-            lazy_max_low_tightness_rejections = lazy_max_low_tightness_rejections,
-            lazy_max_rejections = lazy_max_rejections)
+            curvature_bound = grid_curvature_bound)
     elseif algorithm_type == "RootsPoissonStrategy"
         return RootsPoissonTimeStrategy()
     else
@@ -1568,10 +1562,6 @@ function extract_stats(chains::PDMPChains)
         "grid_warmup_objective_rejection_rate" => vals(:grid_warmup_objective_rejection_rate),
         "grid_schedule_frozen" => vals(:grid_schedule_frozen),
         "curvature_backend" => textvals(:curvature_backend),
-        "lazy_fallback_low_tightness" => vals(:lazy_fallback_low_tightness),
-        "lazy_fallback_bound_violation" => vals(:lazy_fallback_bound_violation),
-        "lazy_proposal_attempts" => vals(:lazy_proposal_attempts),
-        "lazy_proposal_rejections" => vals(:lazy_proposal_rejections),
         "grid_resets_from_dynamics_adaptation" => vals(:grid_resets_from_dynamics_adaptation),
         "grid_endpoint_evaluations" => vals(:grid_endpoint_evaluations),
         "grid_endpoint_gradient_calls" => vals(:grid_endpoint_gradient_calls),
@@ -1793,9 +1783,6 @@ function r_pdmp_stan(
         curvature_backend::String = "auto",
         grid_bound::String = "value_quadratic",
         grid_curvature_bound::Union{Nothing,Float64} = nothing,
-        lazy_low_tightness_threshold::Float64 = 0.1,
-        lazy_max_low_tightness_rejections::Int = 3,
-        lazy_max_rejections::Int = 0,
         t0::Float64 = 0.0,
         T::Float64 = 10000.0,
         t_warmup::Float64 = 0.0,
@@ -1846,9 +1833,7 @@ function r_pdmp_stan(
     boom_floor_mask = _boomerang_logscale_floor_mask(unc_names_vec, d)
     initial_refresh_rate = try Float64(PDMPSamplers.refresh_rate(flow)) catch; NaN end
     alg0 = build_algorithm(algorithm_type; c0, d, grid_n, grid_t_max, curvature_backend,
-        grid_bound, grid_curvature_bound,
-        lazy_low_tightness_threshold, lazy_max_low_tightness_rejections,
-        lazy_max_rejections)
+        grid_bound, grid_curvature_bound)
     alg = _build_sticky_event_algorithm(alg0, sticky, model_prior,
         parameter_prior_vec, slab_prior, can_stick_vec, flow, unc_names_vec)
 

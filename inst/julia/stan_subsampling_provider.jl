@@ -5659,9 +5659,6 @@ function r_pdmp_stan_subsampling(prepared, subsampling, x0, flow_type::String,
         curvature_backend::String="finite_difference",
         grid_bound::String="value_quadratic",
         grid_curvature_bound::Union{Nothing,Float64}=nothing,
-        lazy_low_tightness_threshold::Float64=0.1,
-        lazy_max_low_tightness_rejections::Int=3,
-        lazy_max_rejections::Int=0,
         t0::Float64=0.0, T::Float64=10000.0, t_warmup::Float64=0.0,
         warmup_adaptation_interval::Union{Nothing,Float64}=nothing,
         boomerang_variance_floor_fraction::Float64=0.0,
@@ -5788,9 +5785,7 @@ function r_pdmp_stan_subsampling(prepared, subsampling, x0, flow_type::String,
     boom_floor_mask = _boomerang_logscale_floor_mask(unc_names, d)
     alg0 = build_algorithm(algorithm_type; c0, d, grid_n, grid_t_max,
         curvature_backend,
-        grid_bound, grid_curvature_bound,
-        lazy_low_tightness_threshold, lazy_max_low_tightness_rejections,
-        lazy_max_rejections)
+        grid_bound, grid_curvature_bound)
     parameter_prior_vec = isnothing(parameter_prior) ? nothing :
         _as_float_vector(parameter_prior)
     alg = _build_sticky_event_algorithm(alg0, sticky, model_prior,

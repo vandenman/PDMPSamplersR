@@ -86,9 +86,6 @@ validate_pdmp_params <- function(d, flow, algorithm, T, t0 = 0.0, t_warmup = 0.0
                                 n_chains = 1L, threaded = FALSE, seed = NULL,
                                 adaptive_scheme = "diagonal",
                                 unc_names = NULL,
-                                lazy_low_tightness_threshold = 0.1,
-                                lazy_max_low_tightness_rejections = 3L,
-                                lazy_max_rejections = 0L,
                                 allow_zero_adaptive_warmup = FALSE) {
 
   # Validate basic parameters
@@ -248,15 +245,6 @@ validate_pdmp_params <- function(d, flow, algorithm, T, t0 = 0.0, t_warmup = 0.0
     if (!is.finite(grid_curvature_bound) || grid_curvature_bound < 0)
       cli::cli_abort("Argument {.arg grid_curvature_bound} must be NULL or a finite non-negative number.")
   }
-  validate_type(lazy_low_tightness_threshold, type = "double", n = 1)
-  lazy_max_low_tightness_rejections <- cast_integer(lazy_max_low_tightness_rejections, n = 1)
-  lazy_max_rejections <- cast_integer(lazy_max_rejections, n = 1)
-  validate_type(lazy_max_low_tightness_rejections, type = "integer", n = 1, positive = TRUE)
-  validate_type(lazy_max_rejections, type = "integer", n = 1)
-  if (lazy_low_tightness_threshold < 0)
-    cli::cli_abort("Argument {.arg lazy_low_tightness_threshold} must be non-negative.")
-  if (lazy_max_rejections < 0)
-    cli::cli_abort("Argument {.arg lazy_max_rejections} must be non-negative.")
 
   return(list(
     d = d, flow = flow, algorithm = algorithm, T = T, t0 = t0, t_warmup = t_warmup,
@@ -267,9 +255,6 @@ validate_pdmp_params <- function(d, flow, algorithm, T, t0 = 0.0, t_warmup = 0.0
     grid_n = grid_n, grid_t_max = grid_t_max,
     grid_bound = grid_bound,
     grid_curvature_bound = grid_curvature_bound,
-    lazy_low_tightness_threshold = lazy_low_tightness_threshold,
-    lazy_max_low_tightness_rejections = lazy_max_low_tightness_rejections,
-    lazy_max_rejections = lazy_max_rejections,
     n_chains = n_chains, threaded = threaded, seed = seed,
     adaptive_scheme = adaptive_scheme
   ))
@@ -532,12 +517,6 @@ validate_support_boundary_control <- function(support_boundary) {
 #' @param grid_curvature_bound Optional nonnegative bound on the curvature of
 #'   the event rate over a grid cell, used by \code{grid_bound =
 #'   "value_quadratic"}. Too small a value invalidates the envelope.
-#' @param lazy_low_tightness_threshold Nonnegative threshold used by lazy grid
-#'   refinement diagnostics.
-#' @param lazy_max_low_tightness_rejections Nonnegative number of consecutive
-#'   low-tightness rejections allowed before refinement.
-#' @param lazy_max_rejections Nonnegative total lazy-rejection limit; zero uses
-#'   the package default behavior.
 #' @param show_progress Logical, whether to show progress bar (default: TRUE).
 #' @param n_chains Integer, number of chains to run (default: 1).
 #' @param threaded Logical, whether to run chains in parallel (default: FALSE).
@@ -589,9 +568,6 @@ pdmp_sample <- function(f, d,
                         grid_n = 30, grid_t_max = 2.0,
                         grid_bound = c("value_quadratic", "constant"),
                         grid_curvature_bound = NULL,
-                        lazy_low_tightness_threshold = 0.1,
-                        lazy_max_low_tightness_rejections = 3L,
-                        lazy_max_rejections = 0L,
                         show_progress = TRUE,
                         n_chains = 1L, threaded = FALSE, seed = NULL,
                         adaptive_scheme = c("diagonal", "fullrank"),
@@ -852,9 +828,6 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
                         curvature_backend = NULL,
                         grid_bound = c("value_quadratic", "constant"),
                         grid_curvature_bound = NULL,
-                        lazy_low_tightness_threshold = 0.1,
-                        lazy_max_low_tightness_rejections = 3L,
-                        lazy_max_rejections = 0L,
                         show_progress = TRUE,
                         n_chains = 1L, threaded = FALSE, seed = NULL,
                         adaptive_scheme = c("diagonal", "fullrank"),
@@ -1234,9 +1207,6 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
                                  n_chains, threaded, seed,
                                  adaptive_scheme = adaptive_scheme,
                                  unc_names = unc_names,
-                                 lazy_low_tightness_threshold = lazy_low_tightness_threshold,
-                                 lazy_max_low_tightness_rejections = lazy_max_low_tightness_rejections,
-                                 lazy_max_rejections = lazy_max_rejections,
                                  allow_zero_adaptive_warmup =
                                    !is.null(subsampling_position_anchor_bank_spec))
   if (!is.null(free0)) {
@@ -1409,9 +1379,6 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
       curvature_backend = _curvature_backend,
       grid_bound = grid_bound,
       grid_curvature_bound = grid_curvature_bound,
-      lazy_low_tightness_threshold = lazy_low_tightness_threshold,
-      lazy_max_low_tightness_rejections = lazy_max_low_tightness_rejections,
-      lazy_max_rejections = lazy_max_rejections,
       t0 = t0, T = T, t_warmup = t_warmup,
       warmup_adaptation_interval = warmup_adaptation_interval,
       boomerang_variance_floor_fraction = boomerang_variance_floor_fraction,
@@ -1444,9 +1411,6 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
       curvature_backend = _curvature_backend,
       grid_bound = grid_bound,
       grid_curvature_bound = grid_curvature_bound,
-      lazy_low_tightness_threshold = lazy_low_tightness_threshold,
-      lazy_max_low_tightness_rejections = lazy_max_low_tightness_rejections,
-      lazy_max_rejections = lazy_max_rejections,
       t0 = t0, T = T, t_warmup = t_warmup,
       warmup_adaptation_interval = warmup_adaptation_interval,
       boomerang_variance_floor_fraction = boomerang_variance_floor_fraction,

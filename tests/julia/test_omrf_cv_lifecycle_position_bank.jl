@@ -163,7 +163,7 @@ end
     move_forward_time!(state, horizon, BouncyParticle(9, 0.0))
     PDMPSamplers.adapt!(Xoshiro(1), adapter, state,
         BouncyParticle(9, 0.0), cv, nothing; phase=:main, stats,
-        event_type=:anchor_selection_boundary, anchor_boundary_won=true)
+        event_type=:anchor_selection_boundary)
     @test PDMPSamplers.did_gradient_adapt(adapter)
     @test manager.active_idx == 2
     @test state.ξ.θ == before[2]
@@ -202,7 +202,7 @@ end
     move_forward_time!(harmonic_state, harmonic_horizon, harmonic_flow)
     PDMPSamplers.adapt!(Xoshiro(2), adapter, harmonic_state,
         harmonic_flow, cv, nothing; phase=:main, stats,
-        event_type=:anchor_selection_boundary, anchor_boundary_won=true)
+        event_type=:anchor_selection_boundary)
     @test manager.active_idx == 2
     @test harmonic_state.ξ.θ[1] ≈ sqrt(3.0) atol=2e-13
     @test harmonic_state.free == harmonic_before[3]

@@ -70,10 +70,6 @@
 #' @param curvature_backend Directional curvature evaluation: `"exact"`
 #'   (default) uses Hessian-vector products; `"finite_difference"` uses shifted
 #'   gradients and has finite-difference truncation error.
-#' @param post_warmup_simplify Logical; switch to a fast constant-bound
-#'   thinning mode after warmup when the sampler is well-adapted
-#'   (default: FALSE). Activates when the reflection ratio is below 30\%
-#'   and at least 10 events have been observed.
 #' @param sticky Logical; enable spike-and-slab variable selection for
 #'   population-level coefficients (default: FALSE). Requires
 #'   `model_prior` to be set. Sticky transitions redraw the complete velocity
@@ -158,7 +154,6 @@ brm_pdmp <- function(
     use_anchor_bank = FALSE,
     bank_capacity = 20L,
     curvature_backend = c("exact", "finite_difference"),
-    post_warmup_simplify = FALSE,
     sticky = FALSE, can_stick = NULL, model_prior = NULL,
     kappa = NULL, slab_prior = NULL,
     stanvars = NULL, sample_prior = "no",
@@ -493,7 +488,6 @@ brm_pdmp <- function(
       seed = seed,
       compute_lp = compute_lp,
       curvature_backend = curvature_backend,
-      post_warmup_simplify = post_warmup_simplify,
       sticky = sticky_args$sticky,
       can_stick = sticky_args$can_stick,
       model_prior = sticky_args$model_prior,
@@ -523,7 +517,6 @@ brm_pdmp <- function(
       seed = seed,
       compute_lp = compute_lp,
       curvature_backend = curvature_backend,
-      post_warmup_simplify = post_warmup_simplify,
       sticky = sticky_args$sticky,
       can_stick = sticky_args$can_stick,
       model_prior = sticky_args$model_prior,

@@ -81,7 +81,6 @@ validate_pdmp_params <- function(d, flow, algorithm, T, t0 = 0.0, t_warmup = 0.0
                                 sticky = FALSE, can_stick = NULL, model_prior = NULL, parameter_prior = NULL,
                                 slab_prior = NULL,
                                 grid_n = 30, grid_t_max = 2.0,
-                                post_warmup_simplify = FALSE,
                                 grid_bound = "value_quadratic",
                                 grid_curvature_bound = NULL,
                                 n_chains = 1L, threaded = FALSE, seed = NULL,
@@ -244,7 +243,6 @@ validate_pdmp_params <- function(d, flow, algorithm, T, t0 = 0.0, t_warmup = 0.0
   grid_n <- cast_integer(grid_n, n = 1)
   validate_type(grid_n, type = "integer", n = 1, positive = TRUE)
   validate_type(grid_t_max, type = "double", n = 1, positive = TRUE)
-  validate_type(post_warmup_simplify, type = "logical", n = 1)
   if (!is.null(grid_curvature_bound)) {
     validate_type(grid_curvature_bound, type = "double", n = 1)
     if (!is.finite(grid_curvature_bound) || grid_curvature_bound < 0)
@@ -267,7 +265,6 @@ validate_pdmp_params <- function(d, flow, algorithm, T, t0 = 0.0, t_warmup = 0.0
     sticky = sticky, can_stick = can_stick, model_prior = model_prior, parameter_prior = parameter_prior,
     slab_prior = slab_prior,
     grid_n = grid_n, grid_t_max = grid_t_max,
-    post_warmup_simplify = post_warmup_simplify,
     grid_bound = grid_bound,
     grid_curvature_bound = grid_curvature_bound,
     lazy_low_tightness_threshold = lazy_low_tightness_threshold,
@@ -526,9 +523,6 @@ validate_support_boundary_control <- function(support_boundary) {
 #'   package replaces that slab by its active-face restriction internally.
 #' @param grid_n Integer, number of grid points for GridThinningStrategy (default: 30).
 #' @param grid_t_max Numeric, maximum time for grid in GridThinningStrategy (default: 2.0).
-#' @param post_warmup_simplify Logical. If \code{TRUE}, the grid-thinning
-#'   strategy may switch to a constant bound after warmup, reducing
-#'   gradient calls during the main sampling phase.
 #' @param grid_bound Character string selecting the GridThinning proposal
 #'   envelope. \code{"value_quadratic"} (default) bounds each grid cell by
 #'   the larger endpoint rate plus \code{grid_curvature_bound * h^2 / 8};
@@ -593,7 +587,6 @@ pdmp_sample <- function(f, d,
                         sticky = FALSE, can_stick = NULL, model_prior = NULL, parameter_prior = NULL,
                         slab_prior = NULL,
                         grid_n = 30, grid_t_max = 2.0,
-                        post_warmup_simplify = FALSE,
                         grid_bound = c("value_quadratic", "constant"),
                         grid_curvature_bound = NULL,
                         lazy_low_tightness_threshold = 0.1,
@@ -644,8 +637,7 @@ pdmp_sample <- function(f, d,
   params <- validate_pdmp_params(d, flow, algorithm, T, t0, t_warmup, flow_mean, flow_cov,
                                 c0, x0, theta0, show_progress,
                                 sticky, can_stick, model_prior, parameter_prior, slab_prior,
-                                grid_n, grid_t_max, post_warmup_simplify,
-                                grid_bound, grid_curvature_bound,
+                                grid_n, grid_t_max, grid_bound, grid_curvature_bound,
                                 n_chains, threaded, seed,
                                 adaptive_scheme = adaptive_scheme)
 
@@ -710,7 +702,6 @@ pdmp_sample <- function(f, d,
   result <- .pdmpsamplers_julia_eval("PDMPSamplersRBridge.r_pdmp_custom(
     grad!, d, x0, flow, algorithm, flow_mean, flow_cov;
     c0 = c0, grid_n = grid_n, grid_t_max = grid_t_max,
-    post_warmup_simplify = post_warmup_simplify,
     grid_bound = grid_bound,
     grid_curvature_bound = grid_curvature_bound,
     t0 = t0, T = T, t_warmup = t_warmup,
@@ -859,7 +850,6 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
                         slab_prior = NULL,
                         grid_n = 30, grid_t_max = 2.0,
                         curvature_backend = NULL,
-                        post_warmup_simplify = FALSE,
                         grid_bound = c("value_quadratic", "constant"),
                         grid_curvature_bound = NULL,
                         lazy_low_tightness_threshold = 0.1,
@@ -1240,8 +1230,7 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
   params <- validate_pdmp_params(d, flow, algorithm, T, t0, t_warmup, flow_mean, flow_cov,
                                  c0, x0, theta0, show_progress,
                                  sticky, can_stick, model_prior, parameter_prior, slab_prior,
-                                 grid_n, grid_t_max, post_warmup_simplify,
-                                 grid_bound, grid_curvature_bound,
+                                 grid_n, grid_t_max, grid_bound, grid_curvature_bound,
                                  n_chains, threaded, seed,
                                  adaptive_scheme = adaptive_scheme,
                                  unc_names = unc_names,
@@ -1418,7 +1407,6 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
       free0 = free0, stored_velocity0 = stored_velocity0,
       c0 = c0, grid_n = grid_n, grid_t_max = grid_t_max,
       curvature_backend = _curvature_backend,
-      post_warmup_simplify = post_warmup_simplify,
       grid_bound = grid_bound,
       grid_curvature_bound = grid_curvature_bound,
       lazy_low_tightness_threshold = lazy_low_tightness_threshold,
@@ -1454,7 +1442,6 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
       free0 = free0, stored_velocity0 = stored_velocity0,
       c0 = c0, grid_n = grid_n, grid_t_max = grid_t_max,
       curvature_backend = _curvature_backend,
-      post_warmup_simplify = post_warmup_simplify,
       grid_bound = grid_bound,
       grid_curvature_bound = grid_curvature_bound,
       lazy_low_tightness_threshold = lazy_low_tightness_threshold,

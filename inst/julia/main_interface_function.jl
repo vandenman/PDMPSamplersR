@@ -68,8 +68,7 @@ const _WORKER_STATE_ROOTS = (
     :_path_to_prior_stan_data_full, :_n_chains, :_curvature_backend,
     :flow, :algorithm, :x0, :theta0, :free0, :stored_velocity0,
     :flow_cov, :flow_mean, :c0, :grid_n, :grid_t_max,
-    :grid_bound, :grid_curvature_bound, :post_warmup_simplify,
-    :t0, :T, :t_warmup, :f, :hessian_f, :hessian, :sticky, :can_stick, :model_prior,
+    :grid_bound, :grid_curvature_bound, :t0, :T, :t_warmup, :f, :hessian_f, :hessian, :sticky, :can_stick, :model_prior,
     :parameter_prior, :slab_prior, :show_progress, :seed, :adaptive_scheme,
     :refresh_rate, :unc_names, :_unc_names, :subsampling_anchor_updates,
     :subsampling_use_anchor_bank,
@@ -221,7 +220,7 @@ end
 
 function build_algorithm(algorithm_type::String; c0::Float64, d::Integer, grid_n::Int, grid_t_max::Float64,
         curvature_backend::String="auto",
-        post_warmup_simplify::Bool=false, grid_bound::String="value_quadratic",
+        grid_bound::String="value_quadratic",
         grid_curvature_bound::Union{Nothing,Float64}=nothing,
         lazy_low_tightness_threshold::Float64=0.1,
         lazy_max_low_tightness_rejections::Int=3,
@@ -236,7 +235,6 @@ function build_algorithm(algorithm_type::String; c0::Float64, d::Integer, grid_n
         return GridThinningStrategy(; N = grid_n, t_max = grid_t_max,
             N_min = grid_n_min,
             curvature_backend = Symbol(curvature_backend),
-            post_warmup_simplify = post_warmup_simplify,
             bound = Symbol(grid_bound),
             bound_violation = bound_violation,
             curvature_bound = grid_curvature_bound,
@@ -1682,11 +1680,6 @@ function extract_stats(chains::PDMPChains)
         "other_main_loop_seconds" => vals(:other_main_loop_seconds),
         "grid_horizon_hits" => vals(:grid_horizon_hits),
         "grid_budget_tail_restarts" => vals(:grid_budget_tail_restarts),
-        "constant_bound_attempts" => vals(:constant_bound_attempts),
-        "constant_bound_accepts" => vals(:constant_bound_accepts),
-        "constant_bound_rejections" => vals(:constant_bound_rejections),
-        "constant_bound_violations" => vals(:constant_bound_violations),
-        "constant_bound_safety_fallbacks" => vals(:constant_bound_safety_fallbacks),
         "grid_bound_violations" => vals(:grid_bound_violations),
         "sticky_inner_searches" => vals(:sticky_inner_searches),
         "sticky_inner_wins" => vals(:sticky_inner_wins),
@@ -1798,7 +1791,6 @@ function r_pdmp_stan(
         grid_n::Int = 30,
         grid_t_max::Float64 = 2.0,
         curvature_backend::String = "auto",
-        post_warmup_simplify::Bool = true,
         grid_bound::String = "value_quadratic",
         grid_curvature_bound::Union{Nothing,Float64} = nothing,
         lazy_low_tightness_threshold::Float64 = 0.1,
@@ -1854,7 +1846,7 @@ function r_pdmp_stan(
     boom_floor_mask = _boomerang_logscale_floor_mask(unc_names_vec, d)
     initial_refresh_rate = try Float64(PDMPSamplers.refresh_rate(flow)) catch; NaN end
     alg0 = build_algorithm(algorithm_type; c0, d, grid_n, grid_t_max, curvature_backend,
-        post_warmup_simplify, grid_bound, grid_curvature_bound,
+        grid_bound, grid_curvature_bound,
         lazy_low_tightness_threshold, lazy_max_low_tightness_rejections,
         lazy_max_rejections)
     alg = _build_sticky_event_algorithm(alg0, sticky, model_prior,
@@ -1934,7 +1926,6 @@ function r_pdmp_custom(
         c0::Float64 = 1e-2,
         grid_n::Int = 30,
         grid_t_max::Float64 = 2.0,
-        post_warmup_simplify::Bool = true,
         grid_bound::String = "value_quadratic",
         grid_curvature_bound::Union{Nothing,Float64} = nothing,
         t0::Float64 = 0.0,
@@ -2001,7 +1992,7 @@ function r_pdmp_custom(
     flow = build_flow(flow_type, prec, flow_mean_vec; adaptive_scheme, refresh_rate)
     initial_refresh_rate = try Float64(PDMPSamplers.refresh_rate(flow)) catch; NaN end
     alg0 = build_algorithm(algorithm_type; c0, d, grid_n, grid_t_max,
-        post_warmup_simplify, grid_bound, grid_curvature_bound)
+        grid_bound, grid_curvature_bound)
     alg = isnothing(slab_prior) ?
         wrap_sticky(alg0, sticky, model_prior, parameter_prior_vec, can_stick_vec) :
         wrap_dependent_sticky(alg0, sticky, model_prior, slab_prior, can_stick_vec, flow)
@@ -2143,8 +2134,7 @@ function _run_subsampling_brms_subsampled(lib_path_std::String,
         adaptive_scheme::String, discretize_dt::Float64,
         show_progress::Bool, n_chains::Int, threaded::Bool,
         seed::Union{Integer,Nothing}, compute_lp::Bool,
-        curvature_backend::String, post_warmup_simplify::Bool,
-        sticky::Bool, can_stick, model_prior, parameter_prior,
+        curvature_backend::String, sticky::Bool, can_stick, model_prior, parameter_prior,
         n_anchor_updates::Int, use_anchor_bank::Bool, bank_capacity::Int,
         use_hcv::Bool)
 
@@ -2189,7 +2179,7 @@ function _run_subsampling_brms_subsampled(lib_path_std::String,
     flow = build_flow(flow_type, prec, fmean; adaptive_scheme)
     initial_refresh_rate = try Float64(PDMPSamplers.refresh_rate(flow)) catch; NaN end
     alg = build_algorithm(algorithm_type; c0, d, grid_n, grid_t_max,
-        curvature_backend, post_warmup_simplify, grid_bound, grid_curvature_bound)
+        curvature_backend, grid_bound, grid_curvature_bound)
     alg = wrap_sticky(alg, sticky, model_prior, parameter_prior, can_stick)
     if anchor_capacity == 0
         chains = pdmp_sample(anchor, flow, models, alg, t0, T, t_warmup;
@@ -2279,7 +2269,6 @@ function r_pdmp_brms_subsampling(
         seed::Union{Integer, Nothing} = nothing,
         compute_lp::Bool = false,
         curvature_backend::String = "exact",
-        post_warmup_simplify::Bool = false,
         sticky::Bool = false,
         can_stick::Union{AbstractVector{Bool}, Nothing} = nothing,
         model_prior = nothing,
@@ -2308,8 +2297,7 @@ function r_pdmp_brms_subsampling(
         flow_mean, flow_cov, output_csv;
         c0, grid_n, grid_t_max, grid_bound, grid_curvature_bound, t0, T, t_warmup,
         adaptive_scheme, discretize_dt, show_progress, n_chains, threaded,
-        seed, compute_lp, curvature_backend, post_warmup_simplify,
-        sticky, can_stick, model_prior, parameter_prior,
+        seed, compute_lp, curvature_backend, sticky, can_stick, model_prior, parameter_prior,
         n_anchor_updates, use_anchor_bank, bank_capacity, use_hcv)
 end
 
@@ -2337,7 +2325,6 @@ function r_pdmp_stan_for_brms(
         seed::Union{Integer, Nothing} = nothing,
         compute_lp::Bool = false,
         curvature_backend::String = "exact",
-        post_warmup_simplify::Bool = false,
         sticky::Bool = false,
         can_stick = nothing,
         model_prior = nothing,
@@ -2365,7 +2352,7 @@ function r_pdmp_stan_for_brms(
     flow = build_flow(flow_type, prec, fmean; adaptive_scheme)
     initial_refresh_rate = try Float64(PDMPSamplers.refresh_rate(flow)) catch; NaN end
     alg0 = build_algorithm(algorithm_type; c0, d, grid_n, grid_t_max,
-        curvature_backend, post_warmup_simplify, grid_bound, grid_curvature_bound)
+        curvature_backend, grid_bound, grid_curvature_bound)
     alg = isnothing(slab_prior) ?
         wrap_sticky(alg0, sticky, model_prior, parameter_prior_vec, can_stick_vec) :
         wrap_dependent_sticky(alg0, sticky, model_prior, slab_prior, can_stick_vec, flow, unc_names_vec)

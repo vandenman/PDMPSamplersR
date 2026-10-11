@@ -1026,7 +1026,8 @@ function r_from_sparse_skeleton(
         )
         push!(traces, _r_factorized_trace(events, flow, initial_state))
     end
-    PDMPChains(traces, PDMPSamplers.StatisticCounter[])
+    PDMPChains(traces, [PDMPSamplers.StatisticCounter() for _ in traces],
+        fill(nothing, n), fill(nothing, n), fill(nothing, n))
 end
 
 function r_from_streaming_skeleton(directory_list::AbstractVector,
@@ -1084,7 +1085,7 @@ function r_from_streaming_skeleton(directory_list::AbstractVector,
         push!(traces, trace); push!(initial_states, initial)
         push!(terminal_states, terminal)
     end
-    return PDMPChains(traces, PDMPSamplers.StatisticCounter[], initial_states,
+    return PDMPChains(traces, [PDMPSamplers.StatisticCounter() for _ in traces], initial_states,
         copy(initial_states), terminal_states)
 end
 
@@ -1474,7 +1475,8 @@ function r_from_skeleton(times_list::AbstractVector, positions_list::AbstractVec
             throw(DimensionMismatch("free-mask dimensions must match positions"))
         push!(traces, PDMPTrace(times, positions, velocities, flow, masks))
     end
-    PDMPChains(traces, PDMPSamplers.StatisticCounter[])
+    PDMPChains(traces, [PDMPSamplers.StatisticCounter() for _ in traces],
+        fill(nothing, n), fill(nothing, n), fill(nothing, n))
 end
 
 const StatsValue = Union{Vector{Float64}, Matrix{Float64}, Vector{String}}
@@ -2207,14 +2209,17 @@ function _run_subsampling_brms_subsampled(lib_path_std::String,
                 t0, T, t_warmup; progress=show_progress && i == 1,
                 adapter=adapter_i, seed=seed_i,
                 statistic_counter=PDMPSamplers.DevelStatisticCounter)
-            return chain.traces[1], chain.stats[1]
+            return chain.traces[1], chain.stats[1], chain.initial_states[1],
+                chain.retained_initial_states[1], chain.terminal_states[1]
         end
         chain_results = if threaded && n_chains > 1
             fetch.([Threads.@spawn run_chain(i) for i in 1:n_chains])
         else
             [run_chain(i) for i in 1:n_chains]
         end
-        chains = PDMPChains(first.(chain_results), last.(chain_results))
+        chains = PDMPChains(getindex.(chain_results, 1), getindex.(chain_results, 2),
+            getindex.(chain_results, 3), getindex.(chain_results, 4),
+            getindex.(chain_results, 5))
     end
 
     n_ch = length(chains.traces)

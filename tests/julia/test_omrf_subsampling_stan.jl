@@ -1155,11 +1155,11 @@ end
     seeds = (731, 733, 735)
     full_traces = map(seeds) do seed
         model = PDMPModel(BridgeStan.StanModel(lib, full; warn=false))
-        trace, _ = pdmp_sample(
+        trace, _ = only(pdmp_sample(
             initial, BouncyParticle(9, 0.4), model,
             GridThinningStrategy(N=12, t_max=0.5, lazy=false,
                 bound_violation=:throw),
-            0.0, 1_200.0; progress=false, seed)
+            0.0, 1_200.0; progress=false, seed))
         trace
     end
     subsampling_runs = map(seeds) do seed
@@ -1168,12 +1168,12 @@ end
         model, subsampling_ctx, _ = PDMPSamplersRBridge._build_stan_subsampling_model(
             only(prepared.contexts), prepared.unc_names, subsampling,
             anchor, nothing, falses(9))
-        trace, stats = pdmp_sample(
+        trace, stats = only(pdmp_sample(
             initial, BouncyParticle(9, 0.4), model,
             GridThinningStrategy(N=12, t_max=0.5, lazy=false,
                 bound_violation=:throw),
             0.0, 1_200.0; progress=false, seed,
-            statistic_counter=PDMPSamplers.DevelStatisticCounter)
+            statistic_counter=PDMPSamplers.DevelStatisticCounter))
         (trace=trace, stats=stats, ctx=subsampling_ctx)
     end
     subsampling_traces = getproperty.(subsampling_runs, :trace)

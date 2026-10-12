@@ -31,7 +31,6 @@ export r_chain_is_streaming,
     r_chain_streaming_buffer_maximum
 export r_chain_sparse_initial_time, r_chain_sparse_initial_position, r_chain_sparse_initial_velocity
 export r_chain_sparse_event_indices, r_chain_sparse_event_times, r_chain_sparse_event_positions, r_chain_sparse_event_velocities
-export r_chain_sparse_initial_free_mask, r_chain_sparse_event_free_values
 export r_from_sparse_skeleton
 export r_from_streaming_skeleton
 export r_chain_has_live_state_provenance
@@ -868,11 +867,6 @@ function r_chain_sparse_initial_velocity(chains::PDMPChains; chain::Int)
     Vector{Float64}(chains.traces[chain].initial_state.velocity)
 end
 
-function r_chain_sparse_initial_free_mask(chains::PDMPChains; chain::Int)
-    point = chains.traces[chain].initial_state
-    return .!(iszero.(point.position) .& iszero.(point.velocity))
-end
-
 function r_chain_sparse_event_indices(chains::PDMPChains; chain::Int)
     Int32[e.index for e in chains.traces[chain].events]
 end
@@ -887,11 +881,6 @@ end
 
 function r_chain_sparse_event_velocities(chains::PDMPChains; chain::Int)
     Float64[e.velocity for e in chains.traces[chain].events]
-end
-
-function r_chain_sparse_event_free_values(chains::PDMPChains; chain::Int)
-    trace = chains.traces[chain]
-    return [!(iszero(event.position) && iszero(event.velocity)) for event in trace.events]
 end
 
 function r_from_sparse_skeleton(
@@ -1054,7 +1043,7 @@ end
 function r_from_skeleton(times_list::AbstractVector, positions_list::AbstractVector,
                           velocities_list::AbstractVector, is_boomerang_list::AbstractVector,
                           mu_list::AbstractVector, is_mutable_boomerang_list::AbstractVector,
-                          flow_cov_list=nothing, free_masks_list=nothing)
+                          flow_cov_list::AbstractVector, free_masks_list::AbstractVector)
     n = length(times_list)
     traces = PDMPTrace[]
     sizehint!(traces, n)
@@ -1066,11 +1055,7 @@ function r_from_skeleton(times_list::AbstractVector, positions_list::AbstractVec
         is_boom    = Bool(is_boomerang_list[i])
         is_mutable = Bool(is_mutable_boomerang_list[i])
         mu         = Vector{Float64}(mu_list[i])
-        covariance = if flow_cov_list === nothing || isempty(flow_cov_list[i])
-            Matrix{Float64}(I, d, d)
-        else
-            Matrix{Float64}(flow_cov_list[i])
-        end
+        covariance = Matrix{Float64}(flow_cov_list[i])
         precision = inv(Symmetric(covariance))
         flow = if is_mutable
             MutableBoomerang(precision, mu)
@@ -1079,7 +1064,7 @@ function r_from_skeleton(times_list::AbstractVector, positions_list::AbstractVec
         else
             ZigZag(I(d), zeros(d))
         end
-        masks = if free_masks_list === nothing || isempty(free_masks_list[i])
+        masks = if isempty(free_masks_list[i])
             nothing
         else
             Matrix{Bool}(free_masks_list[i])

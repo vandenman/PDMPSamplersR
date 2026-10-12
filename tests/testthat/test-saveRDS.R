@@ -199,7 +199,7 @@ test_that("sticky Boomerang round-trip preserves segment masks and moments", {
   expect_identical(restored$skeleton[[1L]]$free_masks, masks)
 })
 
-test_that("sticky ZigZag exports sparse mask transitions and live endpoint", {
+test_that("sticky ZigZag exports a sparse skeleton and live endpoint", {
   skip_on_cran()
   skip_if_no_pdmp_julia_backend()
 
@@ -215,10 +215,6 @@ test_that("sticky ZigZag exports sparse mask transitions and live endpoint", {
   sk <- saved$skeleton[[1L]]
 
   expect_true(isTRUE(sk$sparse))
-  expect_type(sk$initial_free_mask, "logical")
-  expect_length(sk$initial_free_mask, 2L)
-  expect_type(sk$event_free_values, "logical")
-  expect_length(sk$event_free_values, length(sk$event_times))
   endpoint <- saved$terminal_states[[1L]]
   expect_length(endpoint$position, 2L)
   expect_length(endpoint$physical_velocity, 2L)

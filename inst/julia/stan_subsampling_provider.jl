@@ -4021,10 +4021,7 @@ mutable struct OMRFWindowDiagnostics
     last_allocated_bytes::UInt64
     anchor_distance_sum::Float64
     anchor_distance_count::Int
-    diagnostic_seconds::Float64
     rows::Vector{Dict{String,Any}}
-    pending_post::Any
-    row_pushed_this_call::Bool
     last_pipeline_values::Dict{Symbol,Float64}
 end
 
@@ -4032,84 +4029,13 @@ function OMRFWindowDiagnostics(width::Real)
     width > 0 || throw(ArgumentError("OMRF diagnostic window width must be positive"))
     return OMRFWindowDiagnostics(Float64(width), NaN, NaN, NaN, UInt(0),
         0, 0, 0, 0, 0.0, 0.0, UInt(0), 0.0, 0,
-        0.0, Dict{String,Any}[], nothing, false, Dict{Symbol,Float64}())
+        Dict{String,Any}[], Dict{Symbol,Float64}())
 end
 
 @inline _omrf_allocated_bytes() = _OMRF_RESEARCH_DIAGNOSTICS ? begin
     gc = Base.gc_num()
     UInt(gc.total_allocd + gc.allocd)
 end : UInt(0)
-
-"""Measure the residual funnel at one retained BPS trajectory state.
-
-This is deliberately opt-in through the existing diagnostic-window path. It
-reuses the exact factor residual oracle for the diagnostic only; it is not
-part of ordinary sampling. The signed quantity is the existing person-node
-pattern certificate, while the compact quantity is the pointwise compact
-aggregate bound.
-"""
-function _omrf_window_funnel(manager, state, flow)
-    actual_flow = flow isa PDMPSamplers.PreconditionedDynamics ?
-        flow.dynamics : flow
-    actual_flow isa Union{BouncyParticle,PDMPSamplers.AnyBoomerang} ||
-        return nothing
-    manager.active_idx > 0 || return nothing
-    prepared = manager.entries[manager.active_idx].state
-    envelope = prepared.envelope
-    oracle = manager.oracle
-    context = oracle.residual_context
-    compact = PDMPSamplers.total_residual_bound(
-        envelope, state, flow, 0.0)
-    signed = 0.0
-    people, nodes = size(context.X)
-    @inbounds for node in 1:nodes, person in 1:people
-        signed += _omrf_person_node_pattern_bound_at(
-            context, oracle.anchor, state, flow, person, node, 0.0)
-    end
-    deterministic_gradient = zeros(Float64, length(state.ξ.x))
-    oracle(deterministic_gradient, state.ξ.x)
-    corrected_deterministic = copy(deterministic_gradient)
-    if actual_flow isa PDMPSamplers.AnyBoomerang
-        z = state.ξ.x .- actual_flow.μ
-        mul!(corrected_deterministic, actual_flow.Γ, z,
-            -1.0, 1.0)
-    end
-    deterministic_rate = PDMPSamplers.λ(
-        state, corrected_deterministic, flow)
-    residual = zeros(Float64, length(state.ξ.x))
-    full_gradient = copy(deterministic_gradient)
-    one_factor = [0]
-    exact_sum = 0.0
-    stochastic_sum = 0.0
-    @inbounds for factor in 1:(people * nodes)
-        one_factor[1] = factor
-        oracle(residual, state.ξ.x, one_factor, oracle.anchor)
-        exact_sum += _omrf_exact_selected_residual_abs_rate(
-            state, residual, flow, context.touched_positions)
-        full_gradient .+= residual
-        stochastic_gradient = deterministic_gradient .+
-            (people * nodes) .* residual
-        if actual_flow isa PDMPSamplers.AnyBoomerang
-            z = state.ξ.x .- actual_flow.μ
-            mul!(stochastic_gradient, actual_flow.Γ, z,
-                -1.0, 1.0)
-        end
-        stochastic_sum += PDMPSamplers.λ(
-            state, stochastic_gradient, flow)
-    end
-    if actual_flow isa PDMPSamplers.AnyBoomerang
-        z = state.ξ.x .- actual_flow.μ
-        mul!(full_gradient, actual_flow.Γ, z, -1.0, 1.0)
-    end
-    full_rate = PDMPSamplers.λ(state, full_gradient, flow)
-    return (compact=compact, signed=signed, exact_sum=exact_sum,
-        exact_mean=exact_sum / (people * nodes),
-        stochastic_rate_mean=stochastic_sum / (people * nodes),
-        deterministic_rate=deterministic_rate,
-        deterministic_grid_roof=deterministic_rate,
-        actual_stochastic_rate=stochastic_sum / (people * nodes),
-        full_rate=full_rate)
-end
 
 """Chain-local LRU bank of fully prepared OMRF anchor states."""
 mutable struct OMRFAnchorManager
@@ -4189,43 +4115,9 @@ function _omrf_nearest_anchor_distance(manager::OMRFAnchorManager, x)
         for entry in manager.entries))
 end
 
-function _omrf_window_post!(manager::OMRFAnchorManager, state, flow)
+function _record_omrf_window!(manager::OMRFAnchorManager, state, flow, stats)
     window = manager.window_diagnostics
     window === nothing && return nothing
-    # Funnel evaluation scans every person-node factor and is intended only
-    # for bounded research diagnostics.  Evaluate the post-event side only
-    # when the matching pre-event call actually emitted a window row.
-    window.row_pushed_this_call || return nothing
-    diagnostic_started = time_ns()
-    funnel = _omrf_window_funnel(manager, state, flow)
-    window.diagnostic_seconds += (time_ns() - diagnostic_started) * 1e-9
-    distance = manager.active_idx > 0 ? sqrt(_omrf_anchor_distance2(
-        manager, state.ξ.x, manager.entries[manager.active_idx].state)) : NaN
-    snapshot = (funnel=funnel, distance=distance)
-    if window.row_pushed_this_call && !isempty(window.rows)
-        row = window.rows[end]
-        row["post_anchor_distance"] = distance
-        row["post_compact_residual_bound"] = funnel === nothing ? NaN : funnel.compact
-        row["post_signed_predictor_bound"] = funnel === nothing ? NaN : funnel.signed
-        row["post_stochastic_bps_rate_mean"] = funnel === nothing ? NaN : funnel.stochastic_rate_mean
-        row["post_exact_factor_rate_sum"] = funnel === nothing ? NaN : funnel.exact_sum
-        row["post_exact_factor_rate_mean"] = funnel === nothing ? NaN : funnel.exact_mean
-        row["post_full_gradient_bps_rate"] = funnel === nothing ? NaN : funnel.full_rate
-        row["post_deterministic_rate"] = funnel === nothing ? NaN : funnel.deterministic_rate
-        row["post_deterministic_grid_roof"] = funnel === nothing ? NaN : funnel.deterministic_grid_roof
-        row["post_actual_stochastic_rate"] = funnel === nothing ? NaN : funnel.actual_stochastic_rate
-    else
-        window.pending_post = snapshot
-    end
-    return nothing
-end
-
-function _record_omrf_window!(manager::OMRFAnchorManager, state, flow, stats;
-        stage::Symbol=:pre)
-    window = manager.window_diagnostics
-    window === nothing && return nothing
-    stage === :post && return _omrf_window_post!(manager, state, flow)
-    window.row_pushed_this_call = false
     reflections = _omrf_window_counter(stats, :reflections_events)
     roofs = _omrf_window_counter(stats, :subsampling_cell_roof_proposals)
     subsets = _omrf_window_counter(stats, :subsampling_subset_evaluations)
@@ -4255,14 +4147,6 @@ function _record_omrf_window!(manager::OMRFAnchorManager, state, flow, stats;
         manager.entries[manager.active_idx].state))
     window.anchor_distance_sum += distance
     window.anchor_distance_count += 1
-    # Do not pay an O(NP) diagnostic scan at every event.  A funnel is needed
-    # only when this call crosses a requested diagnostic-window boundary.
-    pre_funnel = nothing
-    if time_now >= window.next_boundary
-        diagnostic_started = time_ns()
-        pre_funnel = _omrf_window_funnel(manager, state, flow)
-        window.diagnostic_seconds += (time_ns() - diagnostic_started) * 1e-9
-    end
     pre_distance = distance
     while time_now >= window.next_boundary
         elapsed = window.next_boundary - window.last_time
@@ -4282,8 +4166,6 @@ function _record_omrf_window!(manager::OMRFAnchorManager, state, flow, stats;
             name => current_pipeline[name] -
                 get(window.last_pipeline_values, name, 0.0)
             for name in keys(current_pipeline))
-        funnel = pre_funnel
-        pending_post = window.pending_post
         push!(window.rows, Dict{String,Any}(
             "window_start" => window.last_time - window.origin,
             "window_end" => window.next_boundary - window.origin,
@@ -4313,40 +4195,12 @@ function _record_omrf_window!(manager::OMRFAnchorManager, state, flow, stats;
                 NaN : allocated_delta / roof_delta,
             "allocated_bytes_per_subset_evaluation" => subset_delta == 0 ?
                 NaN : allocated_delta / subset_delta,
-            "anchor_distance" => pre_distance,
-            "compact_residual_bound" => funnel === nothing ? NaN : funnel.compact,
-            "signed_predictor_bound" => funnel === nothing ? NaN : funnel.signed,
-            "stochastic_bps_rate_mean" => funnel === nothing ? NaN : funnel.stochastic_rate_mean,
-            "exact_factor_rate_sum" => funnel === nothing ? NaN : funnel.exact_sum,
-            "exact_factor_rate_mean" => funnel === nothing ? NaN : funnel.exact_mean,
-            "full_gradient_bps_rate" => funnel === nothing ? NaN : funnel.full_rate,
-            "deterministic_rate" => funnel === nothing ? NaN : funnel.deterministic_rate,
-            "deterministic_grid_roof" => funnel === nothing ? NaN : funnel.deterministic_grid_roof,
-            "actual_stochastic_rate" => funnel === nothing ? NaN : funnel.actual_stochastic_rate,
-            "pre_anchor_distance" => pre_distance,
-            "pre_compact_residual_bound" => funnel === nothing ? NaN : funnel.compact,
-            "pre_signed_predictor_bound" => funnel === nothing ? NaN : funnel.signed,
-            "pre_stochastic_bps_rate_mean" => funnel === nothing ? NaN : funnel.stochastic_rate_mean,
-            "pre_exact_factor_rate_sum" => funnel === nothing ? NaN : funnel.exact_sum,
-            "pre_exact_factor_rate_mean" => funnel === nothing ? NaN : funnel.exact_mean,
-            "pre_full_gradient_bps_rate" => funnel === nothing ? NaN : funnel.full_rate,
-            "post_anchor_distance" => pending_post === nothing ? NaN : pending_post.distance,
-            "post_compact_residual_bound" => pending_post === nothing || pending_post.funnel === nothing ? NaN : pending_post.funnel.compact,
-            "post_signed_predictor_bound" => pending_post === nothing || pending_post.funnel === nothing ? NaN : pending_post.funnel.signed,
-            "post_stochastic_bps_rate_mean" => pending_post === nothing || pending_post.funnel === nothing ? NaN : pending_post.funnel.stochastic_rate_mean,
-            "post_exact_factor_rate_sum" => pending_post === nothing || pending_post.funnel === nothing ? NaN : pending_post.funnel.exact_sum,
-            "post_exact_factor_rate_mean" => pending_post === nothing || pending_post.funnel === nothing ? NaN : pending_post.funnel.exact_mean,
-            "post_full_gradient_bps_rate" => pending_post === nothing || pending_post.funnel === nothing ? NaN : pending_post.funnel.full_rate,
-            "post_deterministic_rate" => pending_post === nothing || pending_post.funnel === nothing ? NaN : pending_post.funnel.deterministic_rate,
-            "post_deterministic_grid_roof" => pending_post === nothing || pending_post.funnel === nothing ? NaN : pending_post.funnel.deterministic_grid_roof,
-            "post_actual_stochastic_rate" => pending_post === nothing || pending_post.funnel === nothing ? NaN : pending_post.funnel.actual_stochastic_rate))
+            "anchor_distance" => pre_distance))
         for name in keys(current_pipeline)
             row = window.rows[end]
             row[string(name)] = pipeline_delta[name]
             row[string(Symbol("cumulative_", name))] = current_pipeline[name]
         end
-        window.pending_post = nothing
-        window.row_pushed_this_call = true
         window.last_time = window.next_boundary
         window.next_boundary += window.width
         window.last_wall_ns = wall_now
@@ -4396,20 +4250,7 @@ function _omrf_window_matrix(manager::OMRFAnchorManager)
     append!(keys, [string(Symbol("cumulative_", name)) for name in
         window_fields])
     append!(keys, ["allocated_bytes", "allocated_bytes_per_roof_proposal",
-        "allocated_bytes_per_subset_evaluation", "compact_residual_bound",
-        "signed_predictor_bound", "exact_factor_rate_sum",
-        "exact_factor_rate_mean", "full_gradient_bps_rate",
-        "anchor_distance", "stochastic_bps_rate_mean",
-        "pre_anchor_distance", "pre_compact_residual_bound",
-        "pre_signed_predictor_bound", "pre_stochastic_bps_rate_mean",
-        "pre_exact_factor_rate_sum", "pre_exact_factor_rate_mean",
-        "pre_full_gradient_bps_rate", "post_anchor_distance",
-        "post_compact_residual_bound", "post_signed_predictor_bound",
-        "post_stochastic_bps_rate_mean", "post_exact_factor_rate_sum",
-        "post_exact_factor_rate_mean", "post_full_gradient_bps_rate"])
-    keys = (keys..., "deterministic_rate", "deterministic_grid_roof",
-        "actual_stochastic_rate", "post_deterministic_rate",
-        "post_deterministic_grid_roof", "post_actual_stochastic_rate")
+        "allocated_bytes_per_subset_evaluation", "anchor_distance"])
     out = Matrix{Float64}(undef, length(window.rows), length(keys))
     @inbounds for i in axes(out, 1), j in axes(out, 2)
         out[i, j] = Float64(window.rows[i][keys[j]])
@@ -5441,14 +5282,11 @@ function _build_stan_subsampling_model(ctx::StanSubsamplingContext,
             active_cv = live_grad isa PDMPSamplers.SubsampledControlVariate ?
                 live_grad : cv
             if phase === :main
-                _record_omrf_window!(manager, state, flow, stats; stage=:pre)
+                _record_omrf_window!(manager, state, flow, stats)
             end
             changed = _select_omrf_anchor!(manager, active_cv, state.ξ.x;
                 phase, state, flow, boundary_won=event_type === :anchor_selection_boundary,
                 event_type)
-            if phase === :main
-                _record_omrf_window!(manager, state, flow, stats; stage=:post)
-            end
             return changed
         end,
         (warmup_grad, trace) -> begin
@@ -6043,9 +5881,6 @@ function r_pdmp_stan_subsampling(prepared, subsampling, x0, flow_type::String,
             manager.selection_seconds - manager.warmup_finish_selection_seconds,
         "anchor_preparation_seconds" => manager === nothing ? 0.0 :
             manager.preparation_seconds - manager.warmup_finish_preparation_seconds,
-        "window_diagnostic_seconds" => manager === nothing ||
-            manager.window_diagnostics === nothing ? 0.0 :
-            manager.window_diagnostics.diagnostic_seconds,
         "retained_native_full_data_scans" => manager === nothing ?
             ctx.counts.native_full_data_scans - snapshot.native_full_data_scans :
             ctx.counts.native_full_data_scans -

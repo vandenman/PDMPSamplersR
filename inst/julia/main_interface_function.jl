@@ -1192,7 +1192,6 @@ function extract_stats(chains::PDMPChains)
         "residual_oracle_evaluations" => vals(:residual_oracle_evaluations),
         "final_thinning_acceptances" => vals(:final_thinning_acceptances),
         "reflection_events" => vals(:reflection_events),
-        "sticky_events" => vals(:sticky_events),
         "warmup_clock_candidates" => vals(:warmup_clock_candidates),
         "main_clock_candidates" => vals(:main_clock_candidates),
         "warmup_grid_bound_evaluations" => vals(:warmup_grid_bound_evaluations),

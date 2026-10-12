@@ -102,7 +102,7 @@ function _fill_subsampling_anchor_cache!(ctx::SubsamplingBridgeStanContext, anch
     end
     if ctx.family in (:bernoulli, :binomial, :independent_bernoulli)
         @inbounds for i in 1:N, k in 1:K
-            kernels[i, k] = _subsampling_logistic(predictors[i, k])
+            kernels[i, k] = LogExpFunctions.logistic(predictors[i, k])
         end
     elseif ctx.family === :poisson
         @inbounds for i in 1:N
@@ -172,14 +172,6 @@ function _new_subsampling_bss_context(lib_path_std::String,
     initial = _prepare_subsampling_anchor(ctx, anchor; count_preparation=false)
     _install_subsampling_anchor_state!(ctx, initial)
     return ctx
-end
-
-@inline function _subsampling_logistic(x::Float64)
-    if x >= 0
-        return inv(1 + exp(-x))
-    end
-    ex = exp(x)
-    return ex / (1 + ex)
 end
 
 function _subsampling_eta(ctx, i, k, x)
@@ -497,7 +489,7 @@ function _build_subsampling_bss_model(ctx::SubsamplingBridgeStanContext;
             if ctx.family in (:bernoulli, :binomial, :independent_bernoulli)
                 predictors = ctx.family === :independent_bernoulli ? (1:K) : (1:1)
                 for k in predictors
-                    Δη = multiplier * (_subsampling_logistic(_subsampling_eta(ctx, i, k, x)) -
+                    Δη = multiplier * (LogExpFunctions.logistic(_subsampling_eta(ctx, i, k, x)) -
                         ctx.anchor_kernel_values[i, k])
                     if ctx.use_hcv
                         predictor_delta = _subsampling_eta(ctx, i, k, x) -

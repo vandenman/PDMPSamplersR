@@ -1,3 +1,26 @@
+.validate_streaming_storage <- function(trace_storage, streaming_trace_directory,
+                                        streaming_trace_buffer_events) {
+  if (identical(trace_storage, "streaming")) {
+    if (is.null(streaming_trace_directory) ||
+        !is.character(streaming_trace_directory) ||
+        length(streaming_trace_directory) != 1L ||
+        is.na(streaming_trace_directory) ||
+        !nzchar(streaming_trace_directory)) {
+      cli::cli_abort(paste0(
+        "Argument {.arg streaming_trace_directory} must be one nonempty ",
+        "path when {.arg trace_storage = \"streaming\"}."))
+    }
+    if (!rlang::is_integerish(streaming_trace_buffer_events, n = 1L,
+                              finite = TRUE) ||
+        streaming_trace_buffer_events < 1L) {
+      cli::cli_abort(paste0(
+        "Argument {.arg streaming_trace_buffer_events} must be a positive ",
+        "integer."))
+    }
+  }
+  as.integer(streaming_trace_buffer_events)
+}
+
 with_seed <- function(code, seed = NULL) {
   if (is.null(seed)) {
     return(force(code))
@@ -591,25 +614,8 @@ pdmp_sample <- function(f, d,
   trace_storage <- match.arg(trace_storage)
   restore_online_env <- .set_online_summary_env(online_summaries, trace_storage)
   on.exit(restore_online_env(), add = TRUE)
-  if (identical(trace_storage, "streaming")) {
-    if (is.null(streaming_trace_directory) ||
-        !is.character(streaming_trace_directory) ||
-        length(streaming_trace_directory) != 1L ||
-        is.na(streaming_trace_directory) ||
-        !nzchar(streaming_trace_directory)) {
-      cli::cli_abort(paste0(
-        "Argument {.arg streaming_trace_directory} must be one nonempty ",
-        "path when {.arg trace_storage = \"streaming\"}."))
-    }
-    if (!rlang::is_integerish(streaming_trace_buffer_events, n = 1L,
-                              finite = TRUE) ||
-        streaming_trace_buffer_events < 1L) {
-      cli::cli_abort(paste0(
-        "Argument {.arg streaming_trace_buffer_events} must be a positive ",
-        "integer."))
-    }
-  }
-  streaming_trace_buffer_events <- as.integer(streaming_trace_buffer_events)
+  streaming_trace_buffer_events <- .validate_streaming_storage(
+    trace_storage, streaming_trace_directory, streaming_trace_buffer_events)
   params <- validate_pdmp_params(d, flow, algorithm, T, t0, t_warmup, flow_mean, flow_cov,
                                 c0, x0, theta0, show_progress,
                                 sticky, can_stick, model_prior, parameter_prior, slab_prior,
@@ -850,25 +856,8 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
   trace_storage <- match.arg(trace_storage)
   restore_online_env <- .set_online_summary_env(online_summaries, trace_storage)
   on.exit(restore_online_env(), add = TRUE)
-  if (identical(trace_storage, "streaming")) {
-    if (is.null(streaming_trace_directory) ||
-        !is.character(streaming_trace_directory) ||
-        length(streaming_trace_directory) != 1L ||
-        is.na(streaming_trace_directory) ||
-        !nzchar(streaming_trace_directory)) {
-      cli::cli_abort(paste0(
-        "Argument {.arg streaming_trace_directory} must be one nonempty ",
-        "path when {.arg trace_storage = \"streaming\"}."))
-    }
-    if (!rlang::is_integerish(streaming_trace_buffer_events, n = 1L,
-                              finite = TRUE) ||
-        streaming_trace_buffer_events < 1L) {
-      cli::cli_abort(paste0(
-        "Argument {.arg streaming_trace_buffer_events} must be a positive ",
-        "integer."))
-    }
-  }
-  streaming_trace_buffer_events <- as.integer(streaming_trace_buffer_events)
+  streaming_trace_buffer_events <- .validate_streaming_storage(
+    trace_storage, streaming_trace_directory, streaming_trace_buffer_events)
   algorithm <- match.arg(algorithm)
   adaptive_scheme <- match.arg(adaptive_scheme)
   flow_specification <- match.arg(flow_specification)

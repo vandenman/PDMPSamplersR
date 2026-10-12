@@ -90,7 +90,6 @@ test_that("dependent slab Stan validation happens before Julia setup", {
     pdmp_sample_from_stanmodel(
       model_file,
       data_file,
-      prior_standata = prior_data_file,
       sticky = FALSE,
       model_prior = bernoulli(0.5),
       slab_prior = dense_gaussian_slab(0, matrix(1, 1, 1), coef = 1)
@@ -102,7 +101,6 @@ test_that("dependent slab Stan validation happens before Julia setup", {
     pdmp_sample_from_stanmodel(
       model_file,
       data_file,
-      prior_standata = prior_data_file,
       sticky = TRUE,
       model_prior = bernoulli(0.5),
       slab_prior = dense_gaussian_slab(0, matrix(1, 1, 1), coef = 1)
@@ -159,7 +157,6 @@ test_that("pdmp_sample_from_stanmodel runs one-dimensional named independent sla
   result <- pdmp_sample_from_stanmodel(
       stan_file,
       data_file,
-      prior_standata = prior_data_file,
       flow = "ZigZag",
       algorithm = "GridThinningStrategy",
       T = 1.0,

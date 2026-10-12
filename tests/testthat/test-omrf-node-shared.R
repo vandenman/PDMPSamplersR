@@ -101,7 +101,6 @@ test_that("public node-shared OMRF samples all PDMP routes full and subsampled",
   for (flow in c("ZigZag", "BouncyParticle", "AdaptiveBoomerang")) {
     full_fit <- do.call(pdmp_sample_from_stanmodel, c(
       common, list(flow = flow,
-                  prior_standata = fixture$prior,
                   seed = if (flow == "ZigZag") 1801L else 1802L)))
     subsampling_fit <- do.call(pdmp_sample_from_stanmodel, c(
       common, list(flow = flow, subsampling = subsampling, t_warmup = 0.4,

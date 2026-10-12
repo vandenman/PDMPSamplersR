@@ -728,8 +728,6 @@ pdmp_sample <- function(f, d,
 #' @param standata Either a character path to the Stan data file (JSON format),
 #'   or a named list that will be written to a temporary JSON file via
 #'   [write_stan_json()].
-#' @param prior_standata Optional prior-only Stan data path or named list used
-#'   by \code{subsampling}; it is not needed for full-gradient slabs.
 #' @param curvature_backend Character string selecting directional curvature:
 #'   `"exact"` or `"finite_difference"`. Custom-Stan subsampling has no
 #'   deterministic exact HVP unless using the analytic dependent OMRF provider.
@@ -797,7 +795,6 @@ pdmp_sample <- function(f, d,
 #'
 #' @export
 pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
-                        prior_standata = NULL,
                         subsampling = NULL,
                         subsampling_anchor_updates = 0L,
                         subsampling_use_anchor_bank = FALSE,
@@ -1004,9 +1001,6 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
     if (!algorithm %in% c("GridThinningStrategy", "ThinningStrategy")) {
       cli::cli_abort("Subsampling custom-Stan sampling requires {.val GridThinningStrategy} or {.val ThinningStrategy}.")
     }
-    if (is.null(prior_standata)) {
-      prior_standata <- subsampling$prior_standata
-    }
   }
 
   if (!is.null(subsampling)) {
@@ -1055,7 +1049,8 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
   }
 
   prior_standata_path <- NULL
-  if (!is.null(prior_standata)) {
+  if (!is.null(subsampling)) {
+    prior_standata <- subsampling$prior_standata
     if (is.list(prior_standata)) {
       prior_standata_path <- tempfile(fileext = ".json")
       write_stan_json(prior_standata, prior_standata_path)

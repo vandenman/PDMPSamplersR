@@ -985,23 +985,11 @@ end
 
 function _r_factorized_trace(events, flow, initial_state)
     bounds_cache = Dict{Int, Tuple{Float64, Float64}}()
-    # Current constructor: the last state is marked invalid, so the trace replays
-    # the events to find it when it is first needed.
-    if applicable(PDMPSamplers.FactorizedTrace,
-                  events, flow, initial_state, initial_state, 0.0, false,
-                  bounds_cache, Ref(length(events)))
-        return PDMPSamplers.FactorizedTrace(
-            events, flow, initial_state, deepcopy(initial_state), 0.0, false,
-            bounds_cache, Ref(length(events))
-        )
-    elseif applicable(PDMPSamplers.FactorizedTrace,
-                      events, flow, initial_state, initial_state, false, bounds_cache)
-        return PDMPSamplers.FactorizedTrace(
-            events, flow, initial_state, initial_state, false, bounds_cache
-        )
-    else
-        return PDMPSamplers.FactorizedTrace(events, flow, initial_state)
-    end
+    # The cached state is invalid until the events are first replayed.
+    return PDMPSamplers.FactorizedTrace(
+        events, flow, initial_state, deepcopy(initial_state), 0.0, false,
+        bounds_cache, Ref(length(events))
+    )
 end
 
 function r_chain_times(chains::PDMPChains; chain::Int)

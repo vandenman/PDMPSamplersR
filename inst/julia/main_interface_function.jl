@@ -2210,7 +2210,7 @@ function _run_subsampling_brms_subsampled(lib_path_std::String,
 
     result = _pack_result(chains; requested_flow=flow_type,
         adaptive_scheme, initial_refresh_rate,
-        warmup_adaptation_interval, t_warmup)
+        t_warmup)
     result["csv_paths"] = csv_paths
     result["bridge_call_counts"] = [_subsampling_call_counts(ctx, manager)
         for (ctx, manager) in zip(contexts, anchor_managers)]
@@ -2345,7 +2345,6 @@ function r_pdmp_stan_for_brms(
                          progress = show_progress, n_chains, threaded, seed,
                          statistic_counter=PDMPSamplers.DevelStatisticCounter)
 
-    stats = extract_stats(chains)
     n_ch = length(chains.traces)
     csv_paths = String[]
     all_draws = [_draws_for_csv(chains, i, discretize_dt) for i in 1:n_ch]
@@ -2359,7 +2358,7 @@ function r_pdmp_stan_for_brms(
 
     result = _pack_result(chains; requested_flow=flow_type,
         adaptive_scheme, initial_refresh_rate,
-        warmup_adaptation_interval, t_warmup)
+        t_warmup)
     result["csv_paths"] = csv_paths
     if sticky
         incl = Dict{Int,Vector{Float64}}()

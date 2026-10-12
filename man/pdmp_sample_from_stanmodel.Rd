@@ -7,10 +7,7 @@
 pdmp_sample_from_stanmodel(
   path_to_stanmodel,
   standata,
-  prior_stanmodel = NULL,
-  prior_standata = NULL,
   subsampling = NULL,
-  full_gradient = NULL,
   subsampling_anchor_updates = 0L,
   subsampling_use_anchor_bank = FALSE,
   subsampling_anchor_bank_capacity = 8L,
@@ -68,20 +65,9 @@ BridgeStan will compile it automatically.}
 or a named list that will be written to a temporary JSON file via
 [write_stan_json()].}
 
-\item{prior_stanmodel}{Compatibility argument. The full-gradient
-dependent-slab path does not use it. Custom-Stan subsampling accepts only
-the same model as \code{path_to_stanmodel}; use \code{prior_standata} to
-disable likelihood contributions.}
-
-\item{prior_standata}{Optional prior-only Stan data path or named list used
-by \code{subsampling}; it is not needed for full-gradient slabs.}
-
 \item{subsampling}{Optional exact subsampling custom-Stan specification
 created by [stan_subsampling()]. The selected Stan branch must add
 the unscaled sum of the installed observations; Julia applies `N / m`.}
-
-\item{full_gradient}{Must be `NULL`. The native OMRF full-gradient backend
-was removed; full-data runs use the Stan model's gradient.}
 
 \item{subsampling_anchor_updates}{Number of prepared OMRF anchors added from
 continuous-time warmup means.}

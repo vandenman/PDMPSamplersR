@@ -113,7 +113,7 @@ Specifies exact subsampling for an ordinal Markov random field (OMRF)
 likelihood with one likelihood contribution per person. The residual of a
 person's gradient is taken relative to an analytic, undamped Hessian control
 variate at the anchor, and every grid cell gets a certified roof on the
-summed residual rates (geometry `"direct_factor_roof_person_hcv"`).
+summed residual rates.
 Threshold and interaction arguments are Stan unconstrained block names and
 are resolved at sampler initialization. The prior gradient is analytic, so
 `prior_standata` passed to [stan_subsampling()] must follow one of the

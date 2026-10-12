@@ -8,7 +8,7 @@
 \usage{
 dense_gaussian_slab(mean, cov, coef = NULL)
 
-exchangeable_gaussian_slab(mean = 0, u, v, zero_mean = TRUE, coef = NULL)
+exchangeable_gaussian_slab(mean = 0, u, v, coef = NULL)
 
 loglinear_gaussian_scale_slab(
   log_base_sd,
@@ -29,9 +29,6 @@ this slab. If omitted, the bridge uses \code{can_stick}.}
 \item{u}{Diagonal covariance component in \eqn{u I + v 11'}.}
 
 \item{v}{Rank-one covariance component in \eqn{u I + v 11'}.}
-
-\item{zero_mean}{Logical. If \code{TRUE}, use the optimized zero-mean
-exchangeable Julia provider.}
 
 \item{log_base_sd}{Numeric log base standard deviations. A scalar is
 recycled over the selected coefficients.}

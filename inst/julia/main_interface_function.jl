@@ -1916,6 +1916,7 @@ function r_pdmp_custom(
         T::Float64 = 10000.0,
         t_warmup::Float64 = 0.0,
         hessian = nothing,
+        theta0 = nothing,
         sticky::Bool = false,
         can_stick = nothing,
         model_prior = nothing,
@@ -1993,7 +1994,9 @@ function r_pdmp_custom(
         min_safe_time = support_boundary_min_safe_time,
     )
 
-    chains = pdmp_sample(x0_vec, flow, model, alg, t0, T, t_warmup;
+    initial = isnothing(theta0) ? x0_vec :
+        SkeletonPoint(x0_vec, _as_float_vector(theta0))
+    chains = pdmp_sample(initial, flow, model, alg, t0, T, t_warmup;
                          progress = show_progress, n_chains = n_chains, threaded = threaded,
                          seed = seed,
                          support_boundary_options = sbopts,

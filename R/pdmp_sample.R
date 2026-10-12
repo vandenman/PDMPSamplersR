@@ -662,6 +662,7 @@ pdmp_sample <- function(f, d,
   JuliaCall::julia_assign("f", f)
   JuliaCall::julia_command("grad!(out, x) = out .= f(x);")
   JuliaCall::julia_assign("hessian_f", hessian)
+  JuliaCall::julia_assign("refresh_rate", as.numeric(refresh_rate))
   JuliaCall::julia_assign("support_boundary_mode", support_boundary$mode)
   JuliaCall::julia_assign("support_boundary_max_bisection_steps", support_boundary$max_bisection_steps)
   JuliaCall::julia_assign("support_boundary_time_rtol", support_boundary$time_rtol)
@@ -682,6 +683,7 @@ pdmp_sample <- function(f, d,
     grid_curvature_bound = grid_curvature_bound,
     t0 = t0, T = T, t_warmup = t_warmup,
     hessian = hessian_f,
+    theta0 = theta0, refresh_rate = refresh_rate,
     sticky = sticky, can_stick = can_stick,
     model_prior = model_prior, parameter_prior = parameter_prior,
     slab_prior = slab_prior,

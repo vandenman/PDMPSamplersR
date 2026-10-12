@@ -241,3 +241,15 @@ test_that("pdmp_sample runs with PreconditionedBPS", {
   expect_s3_class(result, "pdmp_result")
   expect_equal(result$d, d)
 })
+
+test_that("custom gradients preserve explicit velocity and BPS refresh rate", {
+  skip_on_cran()
+  skip_if_no_pdmp_julia_backend()
+  velocity <- c(0.25, -0.75)
+  fit <- pdmp_sample(function(x) x, 2, flow = "BouncyParticle",
+    algorithm = "GridThinningStrategy", x0 = c(1, 2), theta0 = velocity,
+    refresh_rate = 0.7, T = 0.1, seed = 44L, show_progress = FALSE)
+  expect_equal(fit$initial_states[[1]]$position, c(1, 2))
+  expect_equal(fit$initial_states[[1]]$physical_velocity, velocity)
+  expect_equal(fit$stats$initial_refresh_rate, 0.7)
+})

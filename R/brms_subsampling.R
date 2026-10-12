@@ -42,8 +42,7 @@ subsampling_custom_code_reason <- function(stanvars) {
   NULL
 }
 
-subsampling_eligibility <- function(formula, family, stanvars = NULL,
-                                           sdata = NULL) {
+subsampling_eligibility <- function(formula, family, stanvars = NULL) {
   if (is.character(family)) family <- do.call(family, list())
   family_name <- family$family %||% ""
   link <- family$link %||% ""
@@ -86,9 +85,7 @@ subsampling_eligibility <- function(formula, family, stanvars = NULL,
       eligible = affine,
       reason = if (affine) NULL else
         "multivariate subsampling acceleration requires independent affine Bernoulli responses",
-      has_intercept = TRUE,
       family = if (affine) "independent_bernoulli" else family_name,
-      link = link,
       responses = terms$responses
     ))
   }
@@ -139,8 +136,8 @@ subsampling_eligibility <- function(formula, family, stanvars = NULL,
       return(list(eligible = FALSE,
                   reason = "the categorical predictor geometry is not purely affine"))
     }
-    return(list(eligible = TRUE, reason = NULL, has_intercept = TRUE,
-                family = family_name, link = link))
+    return(list(eligible = TRUE, reason = NULL,
+                family = family_name))
   }
 
   required_dpars <- if (identical(family_name, "gaussian")) {
@@ -167,24 +164,10 @@ subsampling_eligibility <- function(formula, family, stanvars = NULL,
                   reason = paste0("unsupported predictor component: ", label)))
     }
   }
-  mu_terms <- terms$dpars$mu
-  allowed_mu <- c("formula", "fe", "offset", "allvars", "family", "dpar",
-                  "resp", "respform", "adforms", "transform")
-  extra_mu <- setdiff(names(mu_terms), allowed_mu)
-  if (length(extra_mu) > 0L || isTRUE(mu_terms$transform) ||
-      is.null(mu_terms$fe)) {
-    label <- if (length(extra_mu)) paste(extra_mu, collapse = ", ") else "transformed predictor"
-    return(list(eligible = FALSE,
-                reason = paste0("unsupported predictor component: ", label)))
-  }
-
-  fe_terms <- stats::terms(mu_terms$fe)
   list(
     eligible = TRUE,
     reason = NULL,
-    has_intercept = identical(attr(fe_terms, "intercept"), 1L),
-    family = family_name,
-    link = link
+    family = family_name
   )
 }
 

@@ -591,3 +591,46 @@ test_that("build_sticky_inclusion_probs errors on length mismatch", {
     "unexpected length"
   )
 })
+
+test_that("brms resolves automatic warmup after eligibility and geometry", {
+  skip_if_not_installed("brms")
+  data <- data.frame(x = seq(-1, 1, length.out = 20), y = rep(0:1, 10))
+  stan_file <- tempfile(fileext = ".stan")
+  file.create(stan_file)
+  on.exit(unlink(stan_file), add = TRUE)
+  last_call <- NULL
+  geometry_fails <- FALSE
+  local_mocked_bindings(
+    brm = function(...) structure(list(), class = "brmsfit"),
+    .package = "brms")
+  local_mocked_bindings(
+    check_for_julia_setup = function() NULL,
+    cached_stan_model = function(...) stan_file,
+    build_subsampling_predictor_geometry = function(...) {
+      if (geometry_fails) stop("uncertified geometry")
+      list(designs = list(matrix(1, 20, 2)), design_indices = list(1:2),
+           dimension = 2L, offsets = list(rep(0, 20)), response = data$y,
+           se = numeric())
+    },
+    .pdmpsamplers_julia_call = function(name, ...) {
+      if (name == "r_get_param_unc_names") return(c("Intercept", "b.1"))
+      last_call <<- list(name = name, args = list(...))
+      stop("CAPTURED_SAMPLING_CALL")
+    }, .package = "PDMPSamplersR")
+  for (mode in c("eligible", "ineligible", "geometry_fallback")) {
+    geometry_fails <- mode == "geometry_fallback"
+    family <- brms::bernoulli(if (mode == "ineligible") "probit" else "logit")
+    for (flow in c("ZigZag", "AdaptiveBoomerang", "PreconditionedBPS")) {
+      for (requested in c(0, 0.3)) {
+        expect_error(suppressMessages(brm_pdmp(y ~ x, data, family,
+          flow = flow, T = 10, t_warmup = requested, subsample_size = 5L,
+          show_progress = FALSE)), "CAPTURED_SAMPLING_CALL")
+        expected <- if (requested > 0) requested else
+          if (mode == "eligible" || flow != "ZigZag") 2 else 0
+        expect_equal(last_call$args$t_warmup, expected)
+        expect_identical(last_call$name, if (mode == "eligible")
+          "r_pdmp_brms_subsampling" else "r_pdmp_stan_for_brms")
+      }
+    }
+  }
+})

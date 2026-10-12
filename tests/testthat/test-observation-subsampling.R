@@ -131,7 +131,7 @@ test_that("subsampling eligibility is capability based and custom U0 is exact", 
       block = "model"
     )
   expect_true(PDMPSamplersR:::subsampling_eligibility(
-    y ~ x, family, custom_observations, list(N = 4L))$eligible)
+    y ~ x, family, custom_observations)$eligible)
 
   conditional <- brms::stanvar(
     scode = "if (!prior_only) target += normal_lpdf(b[1] | 0, 0.5);",
@@ -364,7 +364,7 @@ test_that("first family batch closes against generated brms models", {
     case_data <- cases[[name]][[3L]]
     sdata <- brms::standata(formula, case_data, family = family)
     eligibility <- PDMPSamplersR:::subsampling_eligibility(
-      formula, family, sdata = sdata)
+      formula, family)
     expect_true(eligibility$eligible, info = name)
     stan_file <- PDMPSamplersR:::cached_stan_model(
       brms::stancode(formula, case_data, family = family))

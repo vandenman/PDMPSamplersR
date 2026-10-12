@@ -190,7 +190,6 @@ brm_pdmp <- function(
     }
   }
   subsampled <- !is.null(subsample_size)
-  requested_t_warmup <- t_warmup
   if (subsampled && !is.null(slab_prior)) {
     cli::cli_abort("Dependent {.arg slab_prior} is not yet supported together with {.arg subsample_size}.")
   }
@@ -219,28 +218,16 @@ brm_pdmp <- function(
         "{.arg use_anchor_bank} requires a positive {.arg n_anchor_updates}; ",
         "otherwise no additional anchors can be prepared."
       ))
-    if (t_warmup == 0) {
-      t_warmup <- (T - t0) / 5
-      cli::cli_inform("Setting {.arg t_warmup} to {t_warmup} (20% of sampling time) for subsampled gradients.")
-    }
   }
 
   if (flow == "AdaptiveBoomerang") {
     if (!algorithm %in% c("GridThinningStrategy", "ThinningStrategy"))
       cli::cli_abort("{.val AdaptiveBoomerang} requires a thinning algorithm with a certified trajectory bound.")
-    if (t_warmup == 0) {
-      t_warmup <- (T - t0) / 5
-      cli::cli_inform("Setting {.arg t_warmup} to {t_warmup} (20% of sampling time) for {.val AdaptiveBoomerang}.")
-    }
   }
   if (flow %in% c("PreconditionedZigZag", "PreconditionedBPS",
                   "DensePreconditionedZigZag", "DensePreconditionedBPS")) {
     if (!algorithm %in% c("GridThinningStrategy", "ThinningStrategy"))
       cli::cli_abort("{.val {flow}} requires a thinning algorithm with a certified trajectory bound.")
-    if (t_warmup == 0) {
-      t_warmup <- (T - t0) / 5
-      cli::cli_inform("Setting {.arg t_warmup} to {t_warmup} (20% of sampling time) for {.val {flow}}.")
-    }
   }
 
   check_for_julia_setup()
@@ -253,7 +240,7 @@ brm_pdmp <- function(
                           sample_prior = sample_prior, ...)
 
   if (subsampled) {
-    eligibility <- subsampling_eligibility(formula, family, stanvars, sdata)
+    eligibility <- subsampling_eligibility(formula, family, stanvars)
     runtime_supported <- flow %in% c(
       "BouncyParticle", "ZigZag", "PreconditionedBPS",
       "PreconditionedZigZag", "DensePreconditionedBPS",
@@ -291,13 +278,6 @@ brm_pdmp <- function(
         "i" = eligibility$reason
       ))
       subsampled <- FALSE
-      use_hcv <- FALSE
-      use_anchor_bank <- FALSE
-      if (!flow %in% c("AdaptiveBoomerang", "PreconditionedZigZag",
-                       "PreconditionedBPS", "DensePreconditionedZigZag",
-                       "DensePreconditionedBPS")) {
-        t_warmup <- requested_t_warmup
-      }
     } else {
       N <- as.integer(sdata$N)
       if (subsample_size >= N) {
@@ -316,32 +296,22 @@ brm_pdmp <- function(
     }
   }
 
-  if (subsampled || !is.null(slab_prior)) {
-    sdata_prior <- if (subsampled) {
-      make_opaque_deterministic_standata(sdata)
-    } else {
-      make_prior_standata(sdata)
-    }
-  }
-
   empty_fit <- brms::brm(formula, data = data, family = family,
                          prior = prior, stanvars = stanvars,
                          sample_prior = sample_prior,
                          empty = TRUE, ...)
 
   stan_file <- cached_stan_model(scode)
+  data_file <- tempfile(fileext = ".json")
+  write_stan_json(sdata, data_file)
 
   if (subsampled) {
-    data_full_file <- tempfile(fileext = ".json")
-    write_stan_json(sdata, data_full_file)
-    data_prior_file <- tempfile(fileext = ".json")
-    write_stan_json(sdata_prior, data_prior_file)
     geometry_error <- NULL
     tryCatch({
       subsampling_unc_names <- .pdmpsamplers_julia_call(
         "r_get_param_unc_names",
         normalizePath(stan_file, mustWork = TRUE),
-        normalizePath(data_full_file, mustWork = TRUE)
+        normalizePath(data_file, mustWork = TRUE)
       )
       subsampling_geometry <- build_subsampling_predictor_geometry(
         sdata, subsampling_unc_names, eligibility
@@ -356,15 +326,6 @@ brm_pdmp <- function(
         "i" = geometry_error
       ))
       subsampled <- FALSE
-      use_hcv <- FALSE
-      use_anchor_bank <- FALSE
-      if (!flow %in% c("AdaptiveBoomerang", "PreconditionedZigZag",
-                       "PreconditionedBPS", "DensePreconditionedZigZag",
-                       "DensePreconditionedBPS")) {
-        t_warmup <- requested_t_warmup
-      }
-      data_file <- tempfile(fileext = ".json")
-      write_stan_json(sdata, data_file)
     } else if (identical(algorithm, "ThinningStrategy") &&
                !flow %in% c("Boomerang", "AdaptiveBoomerang") &&
                identical(eligibility$family, "gaussian") &&
@@ -378,22 +339,20 @@ brm_pdmp <- function(
         )
       ))
       subsampled <- FALSE
-      use_hcv <- FALSE
-      use_anchor_bank <- FALSE
-      if (!flow %in% c("PreconditionedZigZag", "PreconditionedBPS",
-                       "DensePreconditionedZigZag", "DensePreconditionedBPS")) {
-        t_warmup <- requested_t_warmup
-      }
-      data_file <- tempfile(fileext = ".json")
-      write_stan_json(sdata, data_file)
     }
-  } else {
-    data_file <- tempfile(fileext = ".json")
-    write_stan_json(sdata, data_file)
-    if (!is.null(slab_prior)) {
-      data_prior_file <- tempfile(fileext = ".json")
-      write_stan_json(sdata_prior, data_prior_file)
-    }
+  }
+  if (subsampled || !is.null(slab_prior)) {
+    sdata_prior <- if (subsampled) make_opaque_deterministic_standata(sdata) else
+      make_prior_standata(sdata)
+    data_prior_file <- tempfile(fileext = ".json")
+    write_stan_json(sdata_prior, data_prior_file)
+  }
+
+  adaptive <- flow %in% c("AdaptiveBoomerang", "PreconditionedZigZag",
+    "PreconditionedBPS", "DensePreconditionedZigZag", "DensePreconditionedBPS")
+  if (t_warmup == 0 && (subsampled || adaptive)) {
+    t_warmup <- (T - t0) / 5
+    cli::cli_inform("Setting {.arg t_warmup} to {t_warmup} (20% of sampling time).")
   }
 
   if (!is.null(save_model))
@@ -414,11 +373,10 @@ brm_pdmp <- function(
       data = data
     )
 
-    data_for_names <- if (subsampled) data_full_file else data_file
     unc_names <- .pdmpsamplers_julia_call(
       "r_get_param_unc_names",
       normalizePath(stan_file, mustWork = TRUE),
-      normalizePath(data_for_names, mustWork = TRUE)
+      normalizePath(data_file, mustWork = TRUE)
     )
     if (!is.null(slab_prior)) {
       if (!is.null(kappa)) {
@@ -466,7 +424,7 @@ brm_pdmp <- function(
     jl_result <- .pdmpsamplers_julia_call(
       "r_pdmp_brms_subsampling",
       normalizePath(stan_file, mustWork = TRUE),
-      normalizePath(data_full_file, mustWork = TRUE),
+      normalizePath(data_file, mustWork = TRUE),
       normalizePath(data_prior_file, mustWork = TRUE),
       as.integer(N), subsample_size,
       eligibility$family, subsampling_geometry$designs,

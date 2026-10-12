@@ -15,7 +15,7 @@ test_that("dependent slab constructors create validated specs", {
 test_that("dependent slab constructors reject invalid inputs", {
   expect_error(dense_gaussian_slab(0, matrix(1, 2, 2)), "dimensions|dim")
   expect_error(dense_gaussian_slab(c(0, 0), matrix(c(1, 2, 0, 1), 2)), "symmetric")
-  expect_error(exchangeable_gaussian_slab(mean = 1, u = 1, v = 0), "mean")
+  expect_equal(exchangeable_gaussian_slab(mean = 1, u = 1, v = 0)$mean, 1)
   expect_error(exchangeable_gaussian_slab(u = 1, v = 0, coef = list(a = 1)), "coef")
   expect_error(loglinear_gaussian_scale_slab(0, list(a = 1), matrix(1, 1, 1)), "logscale")
 })

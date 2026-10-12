@@ -54,10 +54,6 @@ test_that("unsupported custom-Stan controls fail before model construction", {
   expect_error(do.call(pdmp_sample_from_stanmodel, c(base, list(
     support_boundary = support_boundary_control(mode = "line_search")
   ))), "requires.*support_boundary.*error")
-  expect_error(do.call(pdmp_sample_from_stanmodel, c(base, list(
-    prior_stanmodel = testthat::test_path(
-      "..", "stan", "subsampling_gaussian_nuisance.stan")
-  ))), "requires.*prior_stanmodel.*same model")
 })
 
 test_that("OMRF provider specifies the whole-person direct HCV envelope", {

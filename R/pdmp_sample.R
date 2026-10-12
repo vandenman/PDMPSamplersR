@@ -728,10 +728,6 @@ pdmp_sample <- function(f, d,
 #' @param standata Either a character path to the Stan data file (JSON format),
 #'   or a named list that will be written to a temporary JSON file via
 #'   [write_stan_json()].
-#' @param prior_stanmodel Compatibility argument. The full-gradient
-#'   dependent-slab path does not use it. Custom-Stan subsampling accepts only
-#'   the same model as \code{path_to_stanmodel}; use \code{prior_standata} to
-#'   disable likelihood contributions.
 #' @param prior_standata Optional prior-only Stan data path or named list used
 #'   by \code{subsampling}; it is not needed for full-gradient slabs.
 #' @param curvature_backend Character string selecting directional curvature:
@@ -745,8 +741,6 @@ pdmp_sample <- function(f, d,
 #' @param subsampling Optional exact subsampling custom-Stan specification
 #'   created by [stan_subsampling()]. The selected Stan branch must add
 #'   the unscaled sum of the installed observations; Julia applies `N / m`.
-#' @param full_gradient Must be `NULL`. The native OMRF full-gradient backend
-#'   was removed; full-data runs use the Stan model's gradient.
 #' @param theta0 Optional initial velocity forwarded to both full-gradient and
 #'   custom-Stan subsampling initialization.
 #' @param free0,stored_velocity0 Optional sticky state to continue a previous
@@ -803,9 +797,8 @@ pdmp_sample <- function(f, d,
 #'
 #' @export
 pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
-                        prior_stanmodel = NULL, prior_standata = NULL,
+                        prior_standata = NULL,
                         subsampling = NULL,
-                        full_gradient = NULL,
                         subsampling_anchor_updates = 0L,
                         subsampling_use_anchor_bank = FALSE,
                         subsampling_anchor_bank_capacity = 8L,
@@ -914,9 +907,6 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
   if (!is.null(subsampling) &&
       !inherits(subsampling, "stan_subsampling")) {
     cli::cli_abort("Argument {.arg subsampling} must be created by {.fn stan_subsampling}.")
-  }
-  if (!is.null(full_gradient)) {
-    cli::cli_abort("Argument {.arg full_gradient} must be NULL; the native OMRF full-gradient backend was removed.")
   }
   if (!rlang::is_integerish(subsampling_anchor_updates, n = 1L, finite = TRUE) ||
       subsampling_anchor_updates < 0L) {
@@ -1079,11 +1069,6 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
   .validate_dependent_slab_early(
     slab_prior, sticky, flow, algorithm, model_prior, parameter_prior
   )
-  if (is.null(prior_stanmodel)) {
-    prior_stanmodel <- path_to_stanmodel
-  } else {
-    validate_type(prior_stanmodel, type = "character", n = 1)
-  }
 
   if (!is.null(subsampling) && is.null(prior_standata_path)) {
     cli::cli_abort("Subsampling custom-Stan sampling requires prior-only Stan data.")
@@ -1105,24 +1090,12 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
       "i" = "Use {.fn write_stan_json} to create a data file or pass a list directly."
     ))
   if (!is.null(prior_standata_path)) {
-    if (!file.exists(prior_stanmodel))
-      cli::cli_abort("Prior Stan model file not found: {.path {prior_stanmodel}}")
     if (!file.exists(prior_standata_path))
       cli::cli_abort("Prior Stan data file not found: {.path {prior_standata_path}}")
-    if (!grepl("\\.(so|dll|dylib|stan)$", prior_stanmodel))
-      cli::cli_abort("{.arg prior_stanmodel} should point to a Stan model or compiled Stan library.")
     if (!grepl("\\.json$", prior_standata_path))
       cli::cli_abort("{.arg prior_standata} should be a JSON file path or a named list.")
   }
 
-  if (!is.null(subsampling) &&
-      !identical(normalizePath(prior_stanmodel, mustWork = TRUE),
-                 normalizePath(path_to_stanmodel, mustWork = TRUE))) {
-    cli::cli_abort(c(
-      "Custom-Stan subsampling requires {.arg prior_stanmodel} to be the same model as {.arg path_to_stanmodel}.",
-      "i" = "Use prior-only data to switch off likelihood contributions."
-    ))
-  }
 
   check_for_julia_setup()
   bridge_profile_mark("julia_setup_and_validation_seconds")
@@ -1131,7 +1104,6 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
   path_to_stanmodel <- normalizePath(path_to_stanmodel, mustWork = TRUE)
   standata_path     <- normalizePath(standata_path,     mustWork = TRUE)
   if (!is.null(prior_standata_path)) {
-    prior_stanmodel <- normalizePath(prior_stanmodel, mustWork = TRUE)
     prior_standata_path <- normalizePath(prior_standata_path, mustWork = TRUE)
   }
 
@@ -1145,12 +1117,8 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
       "_compile_model_with_header", path_to_stanmodel,
       pdmp_subsample_hpp_path()
     )
-    prior_stanmodel <- path_to_stanmodel
   } else if (compile_control_enabled && grepl("\\.stan$", path_to_stanmodel)) {
     path_to_stanmodel <- .pdmpsamplers_julia_call("_compile_model", path_to_stanmodel)
-  }
-  if (is.null(subsampling) && compile_control_enabled && !is.null(prior_standata_path) && grepl("\\.stan$", prior_stanmodel)) {
-    prior_stanmodel <- .pdmpsamplers_julia_call("_compile_model", prior_stanmodel)
   }
   bridge_profile_mark("stan_compile_seconds")
 

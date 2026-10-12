@@ -77,8 +77,8 @@ end
             eta_x = X[subset, :] * theta[1:2] .+ offsets[collect(subset)]
             eta_a = X[subset, :] * anchor[1:2] .+ offsets[collect(subset)]
             direct = zeros(3)
-            direct[1:2] .= X[subset, :]' * (RB._subsampling_logistic.(eta_x) .-
-                                             RB._subsampling_logistic.(eta_a))
+            direct[1:2] .= X[subset, :]' * (RB.LogExpFunctions.logistic.(eta_x) .-
+                                             RB.LogExpFunctions.logistic.(eta_a))
             @test residual ≈ direct atol=1e-12 rtol=1e-12
 
             residual_bound = 2 * sum(weights[collect(subset)]) *
@@ -116,8 +116,8 @@ end
             for i in subset
                 eta_x = dot(X[i, :], theta[1:2]) + offsets[i]
                 eta_a = dot(X[i, :], anchor[1:2]) + offsets[i]
-                p_a = RB._subsampling_logistic(eta_a)
-                coefficient = RB._subsampling_logistic(eta_x) - p_a -
+                p_a = RB.LogExpFunctions.logistic(eta_a)
+                coefficient = RB.LogExpFunctions.logistic(eta_x) - p_a -
                     α * p_a * (1 - p_a) * (eta_x - eta_a)
                 direct[1:2] .+= X[i, :] .* coefficient
             end
@@ -253,7 +253,7 @@ end
         eta_a = X[1:2, :] * anchor[1:2] .+ offsets[1:2]
         direct = zeros(3)
         direct[1:2] .= X[1:2, :]' * (multiplier[1:2] .*
-            (RB._subsampling_logistic.(eta_x) .- RB._subsampling_logistic.(eta_a)))
+            (RB.LogExpFunctions.logistic.(eta_x) .- RB.LogExpFunctions.logistic.(eta_a)))
         @test residual ≈ direct atol=1e-12 rtol=1e-12
 
         threaded_contexts = [

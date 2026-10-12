@@ -6,7 +6,6 @@ test_that("dependent slab constructors create validated specs", {
 
   exch <- exchangeable_gaussian_slab(u = 2, v = 0.1)
   expect_equal(exch$type, "exchangeable_gaussian")
-  expect_true(exch$zero_mean)
 
   logscale <- loglinear_gaussian_scale_slab(c(0, 1), logscale = "log_tau",
     logscale_design = matrix(1, 2, 1), coef = c("b.x1", "b.x2"))

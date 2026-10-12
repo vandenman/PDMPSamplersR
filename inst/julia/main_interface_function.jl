@@ -404,7 +404,7 @@ function build_slab_provider(slab_prior, unc_names::AbstractVector{<:AbstractStr
         return DenseGaussianSlab(_as_float_vector(_rget(slab_prior, :mean)),
             _as_float_matrix(_rget(slab_prior, :cov)), beta_idx)
     elseif t == "exchangeable_gaussian"
-        mean = Bool(_rget(slab_prior, :zero_mean)) ? 0.0 : Float64(_rget(slab_prior, :mean))
+        mean = Float64(_rget(slab_prior, :mean))
         return ExchangeableGaussianSlab(beta_idx, mean,
             Float64(_rget(slab_prior, :u)), Float64(_rget(slab_prior, :v)))
     elseif t == "loglinear_gaussian_scale"

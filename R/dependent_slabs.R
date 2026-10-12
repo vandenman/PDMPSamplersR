@@ -33,20 +33,14 @@ dense_gaussian_slab <- function(mean, cov, coef = NULL) {
 #' @param mean Common mean for an exchangeable Gaussian slab.
 #' @param u Diagonal covariance component in \eqn{u I + v 11'}.
 #' @param v Rank-one covariance component in \eqn{u I + v 11'}.
-#' @param zero_mean Logical. If \code{TRUE}, use the optimized zero-mean
-#'   exchangeable Julia provider.
 #' @export
-exchangeable_gaussian_slab <- function(mean = 0, u, v, zero_mean = TRUE, coef = NULL) {
+exchangeable_gaussian_slab <- function(mean = 0, u, v, coef = NULL) {
   validate_type(mean, type = "double", n = 1)
   validate_type(u, type = "double", n = 1, positive = TRUE)
   validate_type(v, type = "double", n = 1)
-  validate_type(zero_mean, type = "logical", n = 1)
-  if (isTRUE(zero_mean) && !isTRUE(all.equal(mean, 0))) {
-    cli::cli_abort("Argument {.arg mean} must be 0 when {.arg zero_mean} is TRUE.")
-  }
   .new_slab_prior(
     "exchangeable_gaussian",
-    list(mean = mean, u = u, v = v, zero_mean = zero_mean),
+    list(mean = mean, u = u, v = v),
     coef = coef
   )
 }

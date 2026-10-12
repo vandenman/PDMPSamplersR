@@ -64,11 +64,6 @@ test_that("OMRF provider specifies the whole-person direct HCV envelope", {
     interactions = "interactions_0"
   )
   expect_s3_class(envelope, "omrf_residual_envelope")
-  expect_identical(envelope$bound_type, "direct_factor_roof_person_hcv")
-  expect_identical(envelope$backend, "analytic")
-  expect_identical(envelope$factorization, "person")
-  expect_true(envelope$use_hcv)
-  expect_identical(envelope$hcv_damping, Inf)
   expect_equal(ncol(envelope$weights), nrow(X))
   expect_equal(dim(envelope$node_weights), c(ncol(X), nrow(X)))
   expect_equal(unname(envelope$edge_order),

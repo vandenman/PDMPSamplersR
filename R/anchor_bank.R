@@ -70,13 +70,11 @@ position_anchor_bank <- function(standata, subsampling, parameter_names,
     chosen <- c(chosen, which.max(min_distance))
   }
 
-  envelope <- subsampling$residual_envelope
-  envelope$categorical_residual_cap <- NULL
   list(version = 1L, selection_policy = "position",
        tie_policy = "lowest_index_outgoing", requested_capacity = k,
        ordered_anchor_positions = states[, chosen, drop = FALSE],
        distance_scales = scales, distance_metric = metric,
        parameter_order = as.character(parameter_names),
        dataset_identity = list(hash = .pdmp_dataset_hash(standata)),
-       envelope_identity = list(hash = .pdmp_object_hash(envelope)))
+       envelope_identity = list(hash = .pdmp_object_hash(subsampling$residual_envelope)))
 }

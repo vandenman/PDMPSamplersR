@@ -5,12 +5,8 @@ using .PDMPSamplersRBridge
 
 function direct_spec(X, seen)
     Dict{String,Any}(
-        "type"=>"omrf", "backend"=>"analytic", "X"=>X, "seen"=>seen,
+        "type"=>"omrf", "X"=>X, "seen"=>seen,
         "thresholds"=>"thresholds_0", "interactions"=>"interactions_0",
-        "bound_type"=>"direct_factor_roof_person_hcv",
-        "factorization"=>"person", "factor_sampling"=>"size_biased",
-        "prior_backend"=>"analytic", "use_hcv"=>true, "hcv_damping"=>Inf,
-        "hcv_scope"=>"global",
         "analytic_prior"=>Dict{String,Any}("type"=>"gaussian",
             "threshold_alpha"=>1.0, "threshold_beta"=>1.0,
             "interaction_scale"=>1.0),

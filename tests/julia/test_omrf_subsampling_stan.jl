@@ -76,7 +76,7 @@ end
 function omrf_factor_residual!(out, oracle, x, person, node)
     context = oracle.residual_context
     fill!(out, 0.0)
-    context.hcv_active && (@. context.displacement = x - oracle.anchor)
+    @. context.displacement = x - oracle.anchor
     PDMPSamplersRBridge._omrf_node_residual!(
         context, out, x, person, node, 1.0)
     return out
@@ -148,6 +148,33 @@ function omrf_person_loglik_variable(q, x, seen)
     return result
 end
 
+function omrf_person_hessian(q, x, seen)
+    P = length(seen)
+    starts = cumsum(vcat(1, seen[1:(end - 1)] .- 1))
+    n_thresholds = sum(seen .- 1)
+    edges = [(j, k) for j in 1:(P - 1) for k in (j + 1):P]
+    H = zeros(length(q), length(q))
+    for node in 1:P
+        B = zeros(seen[node] - 1, length(q))
+        for u in axes(B, 1)
+            B[u, starts[node] + u - 1] = 1
+            for (e, (j, k)) in enumerate(edges)
+                if node == j
+                    B[u, n_thresholds + e] = u * x[k]
+                elseif node == k
+                    B[u, n_thresholds + e] = u * x[j]
+                end
+            end
+        end
+        logits = [0.0; B * q]
+        probabilities = exp.(logits .- maximum(logits))
+        probabilities ./= sum(probabilities)
+        p = probabilities[2:end]
+        H .+= B' * (Diagonal(p) - p * p') * B
+    end
+    return H
+end
+
 function finite_difference_person_neggrad_variable(q, x, seen)
     result = similar(q)
     step = 1e-6
@@ -184,6 +211,7 @@ end
     context = PDMPSamplersRBridge._omrf_residual_context(
         envelope_spec, names, anchor, counts)
     residual = zeros(d)
+    context.displacement .= position - anchor
     for person in axes(X, 1)
         PDMPSamplersRBridge.omrf_residual!(
             context, residual, position, [person])
@@ -191,6 +219,9 @@ end
             position[1:(no_thresholds + no_edges)], view(X, person, :), seen) -
             finite_difference_person_neggrad_variable(
                 anchor[1:(no_thresholds + no_edges)], view(X, person, :), seen)
+        H = omrf_person_hessian(anchor[1:length(expected)],
+            view(X, person, :), seen)
+        expected -= H * (position[1:length(expected)] - anchor[1:length(expected)])
         @test residual[1:(no_thresholds + no_edges)] ≈ expected atol=2e-9
         @test residual[(no_thresholds + no_edges + 1):end] == zeros(2)
     end
@@ -378,7 +409,6 @@ end
     position = collect(range(0.21, -0.17; length=9))
     envelope_spec = Dict{String,Any}(
         "type" => "omrf",
-        "backend" => "analytic",
         "X" => [0 1 2; 2 0 1; 1 2 0],
         "seen" => [3, 3, 3],
         "thresholds" => "thresholds_0",
@@ -407,9 +437,10 @@ end
             prior_position, position)
         PDMPSamplersRBridge._clear_gradient!(ctx, :prior,
             prior_anchor, anchor)
+        H = omrf_person_hessian(anchor, X[only(subset)], [3, 3, 3])
         @test analytic_residual ≈
             (selected_position - prior_position) -
-            (selected_anchor - prior_anchor) atol=3e-10 rtol=3e-10
+            (selected_anchor - prior_anchor) - H * (position - anchor) atol=3e-10 rtol=3e-10
     end
     analytic(analytic_residual, anchor, [1], anchor)
     @test iszero(norm(analytic_residual))
@@ -449,10 +480,6 @@ end
     # The undamped global HCV splits the full gradient exactly into its
     # deterministic part and the residual summed over every person.
     hcv_spec = copy(analytic_prior_spec)
-    hcv_spec["use_hcv"] = true
-    hcv_spec["hcv_scope"] = "global"
-    hcv_spec["hcv_damping"] = Inf
-    hcv_spec["hcv_after_warmup"] = false
     hcv_oracle = PDMPSamplersRBridge.OMRFAnalyticSubsamplingOracle(
         analytic_prior_ctx, hcv_spec, analytic_prior_names, anchor)
     hcv_deterministic = zeros(9)
@@ -488,12 +515,6 @@ end
 
     @testset "direct factor-roof person HCV cell certificate" begin
         direct_spec = copy(analytic_prior_spec)
-        direct_spec["use_hcv"] = true
-        direct_spec["hcv_scope"] = "global"
-        direct_spec["hcv_damping"] = Inf
-        direct_spec["hcv_after_warmup"] = false
-        direct_spec["factorization"] = "person"
-        direct_spec["bound_type"] = "direct_factor_roof_person_hcv"
         direct_spec["exact_selected_refinement"] = true
         direct_spec["weights"] = zeros(1, 3)
         direct_oracle = PDMPSamplersRBridge.OMRFAnalyticSubsamplingOracle(
@@ -991,12 +1012,6 @@ end
     # person's residual once, caches it for the candidate rate, and the
     # cached residual equals a direct oracle evaluation.
     exact_spec = copy(analytic_prior_spec)
-    exact_spec["use_hcv"] = true
-    exact_spec["hcv_scope"] = "global"
-    exact_spec["hcv_damping"] = Inf
-    exact_spec["hcv_after_warmup"] = false
-    exact_spec["factorization"] = "person"
-    exact_spec["bound_type"] = "direct_factor_roof_person_hcv"
     exact_spec["exact_selected_refinement"] = true
     exact_spec["weights"] = zeros(1, 3)
     exact_ctx, exact_names =

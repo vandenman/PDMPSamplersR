@@ -92,66 +92,15 @@ stan_subsampling <- function(n_observations, subsample_size,
   if (inherits(residual_envelope, "omrf_residual_envelope")) {
     n_persons <- residual_envelope$n_persons
     n_nodes <- residual_envelope$n_nodes
-    factorization <- residual_envelope$factorization
     if (!rlang::is_integerish(n_persons, n = 1L, finite = TRUE) ||
         n_persons < 1L ||
         !rlang::is_integerish(n_nodes, n = 1L, finite = TRUE) ||
-        n_nodes < 1L ||
-        !is.character(factorization) || length(factorization) != 1L ||
-        !factorization %in% c("person", "person_node")) {
-      cli::cli_abort(paste0(
-        "Specialized OMRF envelopes require positive integer {.field n_persons} ",
-        "and {.field n_nodes} metadata and a supported {.field factorization}."))
+        n_nodes < 1L) {
+      cli::cli_abort("OMRF envelopes require positive integer n_persons and n_nodes metadata.")
     }
-    expected <- if (factorization == "person") {
-      as.integer(n_persons)
-    } else {
-      as.integer(n_persons) * as.integer(n_nodes)
-    }
-    if (n_observations != expected) {
-      cli::cli_abort(paste0(
-        "OMRF {.field ", factorization, "} factorization requires ", expected,
+    if (n_observations != n_persons) {
+      cli::cli_abort(paste0("OMRF person factorization requires ", n_persons,
         " likelihood contributions; received ", n_observations, "."))
-    }
-    compact_norm <- factorization == "person_node" && isTRUE(
-      residual_envelope$bound_type %in%
-        c("node_local_norm_low_rank", "norm_local_hcv_compact"))
-    if (compact_norm) {
-      powers <- if (identical(residual_envelope$bound_type,
-                              "norm_local_hcv_compact")) 4L else 3L
-      weights <- residual_envelope$norm_weights
-      if (!is.matrix(weights) || !is.numeric(weights) ||
-          !identical(dim(weights), c(powers * as.integer(n_nodes),
-                                     as.integer(n_persons))) ||
-          any(!is.finite(weights)) || any(weights < 0)) {
-        cli::cli_abort(paste0(
-          "Compact OMRF norm weights must be a finite nonnegative ",
-          powers, "P by N matrix matching {.field n_nodes} and ",
-          "{.field n_persons}."))
-      }
-    }
-    if (factorization == "person_node" &&
-        residual_envelope$bound_type %in%
-          c("node_box_first_order", "cell_marked_node_box_first_order")) {
-      membership <- residual_envelope$node_box_membership
-      nodes <- residual_envelope$node_box_nodes
-      minima <- residual_envelope$node_box_minima
-      maxima <- residual_envelope$node_box_maxima
-      if (!is.matrix(membership) ||
-          !identical(dim(membership), c(as.integer(n_nodes),
-                                        as.integer(n_persons))) ||
-          !is.numeric(membership) || any(!is.finite(membership)) ||
-          any(membership != floor(membership)) || !length(nodes) ||
-          any(membership < 1L | membership > length(nodes)) ||
-          !is.matrix(minima) || !is.matrix(maxima) ||
-          !identical(dim(minima), c(length(nodes), as.integer(n_nodes))) ||
-          !identical(dim(maxima), dim(minima)) ||
-          any(!is.finite(minima)) || any(!is.finite(maxima)) ||
-          any(minima > maxima)) {
-        cli::cli_abort(paste0(
-          "Compact OMRF node-box specifications require P-by-N integer ",
-          "membership and matching finite component-by-P extrema."))
-      }
     }
   } else if (is.null(residual_envelope$weights) ||
              ncol(residual_envelope$weights) != n_observations) {
@@ -160,8 +109,7 @@ stan_subsampling <- function(n_observations, subsample_size,
   if (!is.null(anchor) && (!is.numeric(anchor) || any(!is.finite(anchor)))) {
     cli::cli_abort("Argument {.arg anchor} must be NULL or a finite numeric vector.")
   }
-  if (inherits(residual_envelope, "omrf_residual_envelope") &&
-      identical(residual_envelope$prior_backend, "analytic")) {
+  if (inherits(residual_envelope, "omrf_residual_envelope")) {
     residual_envelope <- .attach_omrf_analytic_prior(
       residual_envelope, prior_standata, "prior_standata")
   }
@@ -337,13 +285,9 @@ omrf_residual_envelope <- function(X, seen, thresholds, interactions,
     matrix(integer(), nrow = 0L, ncol = 2L)
   }
 
-  # The fields, their order and their values are part of the envelope
-  # identity hashed into anchor-bank specifications, so the constant fields
-  # below are kept although the Julia bridge supports only these values.
   factor_weights <- matrix(1, nrow = P, ncol = nrow(X))
   envelope <- stan_residual_envelope(factor_weights)
   envelope$type <- "omrf"
-  envelope$bound_type <- "direct_factor_roof_person_hcv"
   envelope$person_signed_roof <- person_signed_roof
   if (signed_only_person_roof)
     envelope$signed_only_person_roof <- TRUE
@@ -355,26 +299,11 @@ omrf_residual_envelope <- function(X, seen, thresholds, interactions,
   envelope$seen <- seen
   envelope$thresholds <- thresholds
   envelope$interactions <- interactions
-  envelope$backend <- "analytic"
-  envelope$factorization <- "person"
-  envelope$factor_sampling <- "size_biased"
-  envelope$prior_backend <- "analytic"
   envelope$n_persons <- nrow(X)
   envelope$n_nodes <- P
   envelope$edge_order <- edges
   envelope$node_weights <- unname(factor_weights)
-  envelope$covariate_compact <- FALSE
-  envelope$use_hcv <- TRUE
-  envelope$hcv_after_warmup <- FALSE
-  envelope$hcv_damping <- Inf
-  envelope$hcv_scope <- "global"
-  envelope$hcv_bank_learning <- "geometric"
-  envelope$zigzag_sign_aware <- FALSE
   envelope$exact_selected_refinement <- exact_selected_refinement
-  envelope$categorical_residual_cap <- TRUE
-  envelope$signed_bps <- FALSE
-  envelope$signed_harmonic <- FALSE
-  envelope$direct_cv_cell_scope <- "cell"
   class(envelope) <- c("omrf_residual_envelope", "stan_residual_envelope")
   envelope
 }

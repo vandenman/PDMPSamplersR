@@ -990,8 +990,7 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
     cli::cli_abort("Subsampling anchor controls require {.arg subsampling}.")
   }
   if (subsampling_anchor_updates > 0L &&
-      (!inherits(subsampling$residual_envelope, "omrf_residual_envelope") ||
-       !identical(subsampling$residual_envelope$backend, "analytic"))) {
+      !inherits(subsampling$residual_envelope, "omrf_residual_envelope")) {
     cli::cli_abort("Subsampling anchor updates currently require an analytic OMRF residual envelope.")
   }
   if (subsampling_anchor_updates > 0L && t_warmup <= 0) {
@@ -1006,7 +1005,6 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
   if (!is.null(subsampling)) {
     analytic_omrf_hvp <- inherits(subsampling$residual_envelope,
       "omrf_residual_envelope") &&
-      identical(subsampling$residual_envelope$backend, "analytic") &&
       identical(subsampling$residual_envelope$analytic_prior$type,
                 "node_scale_gaussian") &&
       is.list(slab_prior) && identical(slab_prior$type,
@@ -1214,13 +1212,7 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
       list(subsampling_position_anchor_bank_spec) else
       subsampling_position_anchor_bank_spec
     dataset_hash <- dataset_identity_hash(standata)
-    # The categorical residual cap changes only retained thinning roofs; it
-    # does not change bank positions, grouping, metric, or preparation.  Keep
-    # it outside the mathematical bank identity so a frozen bank can be used
-    # in the declared before/after certificate intervention.
-    bank_envelope_spec <- subsampling$residual_envelope
-    bank_envelope_spec$categorical_residual_cap <- NULL
-    envelope_hash <- flow_hash(bank_envelope_spec)
+    envelope_hash <- flow_hash(subsampling$residual_envelope)
     for (spec in specs_to_check) {
       if (!identical(as.integer(spec$version), 1L) ||
           !identical(spec$selection_policy, subsampling_anchor_selection_policy) ||
@@ -1476,9 +1468,7 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
   if (!is.null(subsampling) &&
       identical(subsampling_anchor_selection_policy, "position")) {
     dataset_hash <- dataset_identity_hash(standata)
-    bank_envelope_spec <- subsampling$residual_envelope
-    bank_envelope_spec$categorical_residual_cap <- NULL
-    envelope_hash <- flow_hash(bank_envelope_spec)
+    envelope_hash <- flow_hash(subsampling$residual_envelope)
     supplied_bank_specs <- if (is.null(subsampling_position_anchor_bank_spec))
       NULL else if (!is.null(subsampling_position_anchor_bank_spec$version))
         rep(list(subsampling_position_anchor_bank_spec), params$n_chains) else

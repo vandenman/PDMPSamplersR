@@ -212,6 +212,12 @@ end
         envelope_spec, names, anchor, counts)
     residual = zeros(d)
     context.displacement .= position - anchor
+    expected_support = [1, 7, 8, 2, 3, 9, 4, 5, 6]
+    @test context.likelihood_support == expected_support
+    @test all(<=(no_thresholds + no_edges), context.likelihood_support)
+    PDMPSamplersRBridge.omrf_residual!(context, residual, position, Int[])
+    @test iszero(residual)
+    @test context.likelihood_support == expected_support
     for person in axes(X, 1)
         PDMPSamplersRBridge.omrf_residual!(
             context, residual, position, [person])

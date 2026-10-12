@@ -489,9 +489,7 @@ mutable struct OMRFResidualContext
     likelihood_hessian::Union{Nothing,Matrix{Float64}}
     displacement::Vector{Float64}
     hcv_product::Vector{Float64}
-    node_supports::Vector{Vector{Int}}
-    touched_positions::Vector{Int}
-    touched_mask::BitVector
+    likelihood_support::Vector{Int}
     counts::StanSubsamplingCallCounts
     active_free::BitVector
     active_generation::Int
@@ -1367,10 +1365,10 @@ function _omrf_residual_context(envelope_spec, unc_names, anchor,
         zeros(N, P), zeros(P, P), observed_threshold_counts,
         observed_interaction_sums, zeros(maximum(seen) - 1),
         zeros(maximum(seen) - 1), nothing,
-        zeros(d), zeros(d), Vector{Vector{Int}}(),
-        sizehint!(Int[], d), falses(d), counts, trues(d), 0,
+        zeros(d), zeros(d),
+        Int[], counts, trues(d), 0,
         OMRFHCVProductCache(d))
-    context.node_supports = _omrf_node_supports(context)
+    context.likelihood_support = _omrf_likelihood_support(context)
     _cache_omrf_anchor!(context, anchor)
     context.likelihood_hessian = _omrf_likelihood_hessian(context, anchor)
     return context
@@ -1539,19 +1537,9 @@ end
 function omrf_residual!(context::OMRFResidualContext, out, x, subset)
     started = time_ns()
     fill!(out, 0.0)
-    @inbounds for index in context.touched_positions
-        context.touched_mask[index] = false
-    end
-    empty!(context.touched_positions)
     N, P = size(context.X)
     # Weight of the (undamped) Hessian correction.
     α = 1.0
-    # A person touches the support of every node; record it once.
-    if !isempty(subset)
-        @inbounds for node in 1:P
-            _record_omrf_touched_support!(context, node)
-        end
-    end
     @inbounds for n in subset
         1 <= n <= N || throw(BoundsError(context.X, (n, :)))
         for node in 1:P
@@ -1565,26 +1553,6 @@ function omrf_residual!(context::OMRFResidualContext, out, x, subset)
     return out
 end
 
-
-function _record_omrf_touched_support!(context::OMRFResidualContext, node::Int)
-    q = context.seen[node] - 1
-    start = context.threshold_starts[node]
-    @inbounds for u in 1:q
-        _record_omrf_touched!(context,
-            context.threshold_indices[start + u - 1])
-    end
-    @inbounds for edge in context.incident_edges[node]
-        _record_omrf_touched!(context, context.interaction_indices[edge])
-    end
-    return nothing
-end
-
-@inline function _record_omrf_touched!(context::OMRFResidualContext, index::Int)
-    context.touched_mask[index] && return nothing
-    context.touched_mask[index] = true
-    push!(context.touched_positions, index)
-    return nothing
-end
 
 mutable struct OMRFAnalyticSubsamplingOracle
     ctx::StanSubsamplingContext
@@ -1713,7 +1681,7 @@ function PDMPSamplers.subsampling_candidate_rate!(
         oracle::OMRFAnalyticSubsamplingOracle, state, gradient, residual,
         scale, flow::ZigZag, deterministic_rate, subset)
     actual = deterministic_rate
-    @inbounds for index in oracle.residual_context.touched_positions
+    @inbounds for index in oracle.residual_context.likelihood_support
         velocity = state.ξ.θ[index]
         old_gradient = gradient[index]
         new_gradient = old_gradient + scale * residual[index]
@@ -3763,15 +3731,15 @@ end
 
 @inline function _omrf_exact_selected_residual_abs_rate(
         state, residual, flow::PDMPSamplers.PreconditionedDynamics,
-        touched_positions)
+        likelihood_support)
     return _omrf_exact_selected_residual_abs_rate(
-        state, residual, flow.dynamics, touched_positions)
+        state, residual, flow.dynamics, likelihood_support)
 end
 
 @inline function _omrf_exact_selected_residual_abs_rate(
-        state, residual, ::ZigZag, touched_positions)
+        state, residual, ::ZigZag, likelihood_support)
     result = 0.0
-    @inbounds for index in touched_positions
+    @inbounds for index in likelihood_support
         result += abs(state.ξ.θ[index] * residual[index])
     end
     return result
@@ -3780,9 +3748,9 @@ end
 @inline function _omrf_exact_selected_residual_abs_rate(
         state, residual,
         ::Union{BouncyParticle,PDMPSamplers.AnyBoomerang},
-        touched_positions)
+        likelihood_support)
     result = 0.0
-    @inbounds for index in touched_positions
+    @inbounds for index in likelihood_support
         result += state.ξ.θ[index] * residual[index]
     end
     return abs(result)
@@ -3816,7 +3784,7 @@ function PDMPSamplers.subsampling_subset_bound(
     residual_rate_bound = scale *
         _omrf_exact_selected_residual_abs_rate(
             state, oracle.cached_residual, flow,
-            oracle.residual_context.touched_positions)
+            oracle.residual_context.likelihood_support)
     deterministic_actual = gradient === nothing ?
         max(0.0, oracle.cached_deterministic_signed_rate) :
         λ(state, gradient, flow)
@@ -3891,21 +3859,20 @@ end
 end
 
 
-function _omrf_node_supports(context::OMRFResidualContext)
+function _omrf_likelihood_support(context::OMRFResidualContext)
     P = length(context.seen)
-    supports = [Int[] for _ in 1:P]
+    support = Int[]
     @inbounds for node in 1:P
         q = context.seen[node] - 1
         start = context.threshold_starts[node]
         for u in 1:q
-            push!(supports[node], context.threshold_indices[start + u - 1])
+            push!(support, context.threshold_indices[start + u - 1])
         end
         for edge in context.incident_edges[node]
-            push!(supports[node], context.interaction_indices[edge])
+            push!(support, context.interaction_indices[edge])
         end
-        sort!(supports[node])
     end
-    return supports
+    return unique!(support)
 end
 
 function _build_stan_residual_envelope(envelope_spec, anchor,

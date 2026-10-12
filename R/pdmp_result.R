@@ -40,51 +40,15 @@ materialize <- function(x) {
   has_live_states <- vapply(seq_len(n), function(i)
     isTRUE(.pdmpsamplers_julia_call("r_chain_has_live_state_provenance",
       chains, chain = as.integer(i))), logical(1L))
-  x$initial_states <- if (all(has_live_states)) lapply(seq_len(n), function(i) {
-    i_int <- as.integer(i)
-    list(
-      time = .pdmpsamplers_julia_call("r_chain_initial_time", chains, chain = i_int),
-      position = .pdmpsamplers_julia_call("r_chain_initial_position", chains, chain = i_int),
-      physical_velocity = .pdmpsamplers_julia_call(
-        "r_chain_initial_physical_velocity", chains, chain = i_int),
-      stored_frozen_velocity = .pdmpsamplers_julia_call(
-        "r_chain_initial_stored_velocity", chains, chain = i_int),
-      free_mask = .pdmpsamplers_julia_call(
-        "r_chain_initial_free_mask", chains, chain = i_int),
-      flow = .pdmpsamplers_julia_call(
-        "r_chain_initial_flow_spec", chains, chain = i_int)
-    )
-  }) else NULL
-  x$retained_initial_states <- if (all(has_live_states)) lapply(seq_len(n), function(i) {
-    i_int <- as.integer(i)
-    list(
-      time = .pdmpsamplers_julia_call("r_chain_retained_initial_time", chains, chain = i_int),
-      position = .pdmpsamplers_julia_call("r_chain_retained_initial_position", chains, chain = i_int),
-      physical_velocity = .pdmpsamplers_julia_call(
-        "r_chain_retained_initial_physical_velocity", chains, chain = i_int),
-      stored_frozen_velocity = .pdmpsamplers_julia_call(
-        "r_chain_retained_initial_stored_velocity", chains, chain = i_int),
-      free_mask = .pdmpsamplers_julia_call(
-        "r_chain_retained_initial_free_mask", chains, chain = i_int),
-      flow = .pdmpsamplers_julia_call(
-        "r_chain_retained_initial_flow_spec", chains, chain = i_int)
-    )
-  }) else NULL
-  x$terminal_states <- if (all(has_live_states)) lapply(seq_len(n), function(i) {
-    i_int <- as.integer(i)
-    list(
-      time = .pdmpsamplers_julia_call("r_chain_terminal_time", chains, chain = i_int),
-      position = .pdmpsamplers_julia_call("r_chain_terminal_position", chains, chain = i_int),
-      physical_velocity = .pdmpsamplers_julia_call(
-        "r_chain_terminal_physical_velocity", chains, chain = i_int),
-      stored_frozen_velocity = .pdmpsamplers_julia_call(
-        "r_chain_terminal_stored_velocity", chains, chain = i_int),
-      free_mask = .pdmpsamplers_julia_call(
-        "r_chain_terminal_free_mask", chains, chain = i_int),
-      flow = .pdmpsamplers_julia_call(
-        "r_chain_terminal_flow_spec", chains, chain = i_int)
-    )
-  }) else NULL
+  x$initial_states <- if (all(has_live_states)) lapply(seq_len(n), function(i)
+    .pdmpsamplers_julia_call("r_chain_initial_state",
+      chains, chain = as.integer(i))) else NULL
+  x$retained_initial_states <- if (all(has_live_states)) lapply(seq_len(n), function(i)
+    .pdmpsamplers_julia_call("r_chain_retained_initial_state",
+      chains, chain = as.integer(i))) else NULL
+  x$terminal_states <- if (all(has_live_states)) lapply(seq_len(n), function(i)
+    .pdmpsamplers_julia_call("r_chain_terminal_state",
+      chains, chain = as.integer(i))) else NULL
   bank_specs <- attr(x, "position_anchor_bank_spec", exact = TRUE)
   if (!is.null(bank_specs) && !is.null(x$terminal_states)) {
     specs <- if (!is.null(bank_specs$version)) list(bank_specs) else bank_specs

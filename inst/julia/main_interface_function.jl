@@ -19,16 +19,7 @@ export build_model_prior_odds, build_slab_provider, wrap_dependent_sticky
 export r_discretize, r_mean, r_var, r_std, r_cov, r_cor, r_quantile, r_median, r_cdf, r_ess, r_summary_all
 export r_inclusion_probs, extract_stats
 export r_chain_times, r_chain_positions, r_chain_velocities, r_chain_free_masks, r_chain_is_boomerang, r_chain_is_mutable_boomerang, r_chain_mu, r_chain_flow_cov
-export r_chain_terminal_time, r_chain_terminal_position,
-    r_chain_terminal_physical_velocity, r_chain_terminal_stored_velocity,
-    r_chain_terminal_free_mask, r_chain_terminal_flow_spec
-export r_chain_initial_time, r_chain_initial_position,
-    r_chain_initial_physical_velocity, r_chain_initial_stored_velocity,
-    r_chain_initial_free_mask, r_chain_initial_flow_spec
-export r_chain_retained_initial_time, r_chain_retained_initial_position,
-    r_chain_retained_initial_physical_velocity,
-    r_chain_retained_initial_stored_velocity,
-    r_chain_retained_initial_free_mask, r_chain_retained_initial_flow_spec
+export r_chain_initial_state, r_chain_retained_initial_state, r_chain_terminal_state
 export r_resolve_flow_spec, r_chain_flow_spec
 export r_from_skeleton
 export r_chain_is_factorized
@@ -1376,50 +1367,22 @@ function r_chain_flow_cov(chains::PDMPChains; chain::Int)
     Matrix{Float64}(_resolved_flow_covariance(chains.traces[chain].flow))
 end
 
-_terminal(chains::PDMPChains, chain::Int) =
-    PDMPSamplers.terminal_state(chains, chain)
-r_chain_terminal_time(chains::PDMPChains; chain::Int) =
-    Float64(_terminal(chains, chain).t)
-r_chain_terminal_position(chains::PDMPChains; chain::Int) =
-    Vector{Float64}(_terminal(chains, chain).position)
-r_chain_terminal_physical_velocity(chains::PDMPChains; chain::Int) =
-    Vector{Float64}(_terminal(chains, chain).physical_velocity)
-r_chain_terminal_stored_velocity(chains::PDMPChains; chain::Int) =
-    Vector{Float64}(_terminal(chains, chain).stored_frozen_velocity)
-r_chain_terminal_free_mask(chains::PDMPChains; chain::Int) =
-    BitVector(_terminal(chains, chain).free)
-r_chain_terminal_flow_spec(chains::PDMPChains; chain::Int) =
-    _flow_spec(_terminal(chains, chain).flow)
+function _state_spec(state)
+    Dict(
+        "time" => Float64(state.t),
+        "position" => Vector{Float64}(state.position),
+        "physical_velocity" => Vector{Float64}(state.physical_velocity),
+        "stored_frozen_velocity" => Vector{Float64}(state.stored_frozen_velocity),
+        "free_mask" => Vector{Bool}(state.free),
+        "flow" => _flow_spec(state.flow))
+end
 
-_installed_initial(chains::PDMPChains, chain::Int) =
-    PDMPSamplers.initial_state(chains, chain)
-r_chain_initial_time(chains::PDMPChains; chain::Int) =
-    Float64(_installed_initial(chains, chain).t)
-r_chain_initial_position(chains::PDMPChains; chain::Int) =
-    Vector{Float64}(_installed_initial(chains, chain).position)
-r_chain_initial_physical_velocity(chains::PDMPChains; chain::Int) =
-    Vector{Float64}(_installed_initial(chains, chain).physical_velocity)
-r_chain_initial_stored_velocity(chains::PDMPChains; chain::Int) =
-    Vector{Float64}(_installed_initial(chains, chain).stored_frozen_velocity)
-r_chain_initial_free_mask(chains::PDMPChains; chain::Int) =
-    BitVector(_installed_initial(chains, chain).free)
-r_chain_initial_flow_spec(chains::PDMPChains; chain::Int) =
-    _flow_spec(_installed_initial(chains, chain).flow)
-
-_retained_initial(chains::PDMPChains, chain::Int) =
-    PDMPSamplers.retained_initial_state(chains, chain)
-r_chain_retained_initial_time(chains::PDMPChains; chain::Int) =
-    Float64(_retained_initial(chains, chain).t)
-r_chain_retained_initial_position(chains::PDMPChains; chain::Int) =
-    Vector{Float64}(_retained_initial(chains, chain).position)
-r_chain_retained_initial_physical_velocity(chains::PDMPChains; chain::Int) =
-    Vector{Float64}(_retained_initial(chains, chain).physical_velocity)
-r_chain_retained_initial_stored_velocity(chains::PDMPChains; chain::Int) =
-    Vector{Float64}(_retained_initial(chains, chain).stored_frozen_velocity)
-r_chain_retained_initial_free_mask(chains::PDMPChains; chain::Int) =
-    BitVector(_retained_initial(chains, chain).free)
-r_chain_retained_initial_flow_spec(chains::PDMPChains; chain::Int) =
-    _flow_spec(_retained_initial(chains, chain).flow)
+r_chain_initial_state(chains::PDMPChains; chain::Int) =
+    _state_spec(PDMPSamplers.initial_state(chains, chain))
+r_chain_retained_initial_state(chains::PDMPChains; chain::Int) =
+    _state_spec(PDMPSamplers.retained_initial_state(chains, chain))
+r_chain_terminal_state(chains::PDMPChains; chain::Int) =
+    _state_spec(PDMPSamplers.terminal_state(chains, chain))
 
 r_chain_flow_spec(chains::PDMPChains; chain::Int) =
     _flow_spec(chains.traces[chain].flow)

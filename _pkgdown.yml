@@ -68,8 +68,6 @@ reference:
   - title: brms interface
     contents:
       - brm_pdmp
-      - brm_stancode
-      - brm_standata
   - title: Variable selection
     contents:
       - model_averaged_mean

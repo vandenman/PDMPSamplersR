@@ -38,6 +38,13 @@ test_that("subsampling integer controls are validated before coercion", {
 })
 
 test_that("analytic subsampling HCV rejects uncertified variants", {
+  skip_if_not_installed("brms")
+  # This is R-side validation, not a Julia integration test.
+  local_mocked_bindings(
+    check_for_julia_setup = function() NULL,
+    .pdmpsamplers_julia_call = function(...) stop("Unexpected Julia call"),
+    .package = "PDMPSamplersR"
+  )
   data <- data.frame(y = c(0L, 1L), count = c(1L, 2L), x = c(-1, 1))
   expect_error(
     PDMPSamplersR::brm_pdmp(

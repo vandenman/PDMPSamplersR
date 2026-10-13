@@ -8,22 +8,20 @@ cache_get_or_set <- function(key, expr) {
 }
 
 is_julia_available <- function() {
-  cache_get_or_set("julia_available", tryCatch({
+  if (identical(Sys.getenv("PDMPSAMPLERSR_TEST_JULIA"), "false")) return(FALSE)
+  cache_get_or_set("julia_available", suppressWarnings(tryCatch({
     JuliaCall::julia_setup(verbose = FALSE)
     TRUE
-  }, error = function(e) FALSE))
+  }, error = function(e) FALSE)))
 }
 
 is_pdmp_julia_backend_available <- function() {
-  cache_get_or_set("pdmp_julia_backend_available", tryCatch({
+  if (!is_julia_available()) return(FALSE)
+  cache_get_or_set("pdmp_julia_backend_available", suppressWarnings(tryCatch({
     PDMPSamplersR:::check_for_julia_setup()
     TRUE
-  }, error = function(e) FALSE))
+  }, error = function(e) FALSE)))
 }
-
-# run these immediately so they are cached
-is_julia_available()
-is_pdmp_julia_backend_available()
 
 skip_if_no_julia <- function() {
   testthat::skip_if_not(is_julia_available(), "Julia is not available")
@@ -62,9 +60,9 @@ skip_if_no_brms_backend <- function() {
 skip_if_no_brms_setup <- function() {
   testthat::skip_if_not_installed("brms")
   skip_if_no_brms_backend()
+  skip_if_no_pdmp_julia_backend()
 
   bridge_available <- cache_get_or_set("brms_bridge_setup_available", tryCatch({
-    PDMPSamplersR:::check_for_julia_setup()
     # Check if the BridgeStan extension was triggered and thus this method is available.
     isTRUE(JuliaCall::julia_eval("hasmethod(PDMPModel, Tuple{String, String})"))
   }, error = function(e) FALSE))

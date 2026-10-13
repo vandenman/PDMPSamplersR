@@ -32,6 +32,8 @@ jobs:
       GITHUB_PAT: ${{ secrets.GITHUB_TOKEN }}
       R_KEEP_PKG_SOURCE: yes
       JULIA_NUM_PRECOMPILE_TASKS: "1"
+      # The no-Julia job must not probe an incidental runner installation.
+      PDMPSAMPLERSR_TEST_JULIA: ${{ matrix.config.julia && 'true' || 'false' }}
 
     steps:
       - uses: actions/checkout@v7

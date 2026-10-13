@@ -3636,11 +3636,8 @@ end
 @inline _omrf_coordinate_free(state::StickyPDMPState, j) = state.free[j]
 @inline _omrf_coordinate_free(state::PDMPSamplers.AbstractPDMPState, j) = true
 
-@inline function _omrf_coordinate_at(state, ::Union{ZigZag,BouncyParticle},
-        anchor, j, t)
-    displacement = state.ξ.x[j] + t * state.ξ.θ[j] - anchor[j]
-    velocity = _omrf_coordinate_free(state, j) ? state.ξ.θ[j] : 0.0
-    return displacement, velocity
+@inline function _omrf_coordinate_at(state, flow, anchor, j, t)
+    return _omrf_coordinate_at_anchor_value(state, flow, anchor[j], j, t)
 end
 
 @inline function _omrf_coordinate_at_anchor_value(
@@ -3648,12 +3645,6 @@ end
     displacement = state.ξ.x[j] + t * state.ξ.θ[j] - anchor_value
     velocity = _omrf_coordinate_free(state, j) ? state.ξ.θ[j] : 0.0
     return displacement, velocity
-end
-
-@inline function _omrf_coordinate_at(state, flow::PDMPSamplers.AnyBoomerang,
-        anchor, j, t)
-    return _omrf_coordinate_at_anchor_value(
-        state, flow, anchor[j], j, t)
 end
 
 @inline function _omrf_coordinate_at_anchor_value(
@@ -3668,9 +3659,6 @@ end
     velocity = -centered * s + state.ξ.θ[j] * c
     return displacement, velocity
 end
-
-@inline _omrf_coordinate_at(state, flow::PDMPSamplers.PreconditionedDynamics,
-    anchor, j, t) = _omrf_coordinate_at(state, flow.dynamics, anchor, j, t)
 
 @inline _omrf_coordinate_at_anchor_value(state,
     flow::PDMPSamplers.PreconditionedDynamics, anchor_value, j, t) =

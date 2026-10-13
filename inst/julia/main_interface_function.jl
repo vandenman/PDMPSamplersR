@@ -1708,6 +1708,22 @@ function r_constrain_and_write_csv(sm::BridgeStan.StanModel, draws_unc::Matrix{F
     return output_csv
 end
 
+function _write_brms_chain_csvs(chains::PDMPChains, models, output_csv::String,
+        discretize_dt::Float64; compute_lp::Bool=false)
+    n_ch = length(chains.traces)
+    all_draws = [_draws_for_csv(chains, i, discretize_dt) for i in 1:n_ch]
+    min_rows = minimum(size(draws, 1) for draws in all_draws)
+    csv_paths = String[]
+    for chain_idx in 1:n_ch
+        draws_unc = all_draws[chain_idx][1:min_rows, :]
+        csv_path = n_ch == 1 ? output_csv : replace(output_csv, r"\.csv$" => "_chain$(chain_idx).csv")
+        r_constrain_and_write_csv(models[chain_idx], draws_unc, csv_path;
+            chain_id=chain_idx, compute_lp)
+        push!(csv_paths, csv_path)
+    end
+    return csv_paths
+end
+
 include(joinpath(@__DIR__, "family_subsampling_provider.jl"))
 include(joinpath(@__DIR__, "stan_subsampling_provider.jl"))
 
@@ -1803,17 +1819,8 @@ function _run_subsampling_brms_subsampled(lib_path_std::String,
             getindex.(chain_results, 5))
     end
 
-    n_ch = length(chains.traces)
-    all_draws = [_draws_for_csv(chains, i, discretize_dt) for i in 1:n_ch]
-    min_rows = minimum(size(draws, 1) for draws in all_draws)
-    csv_paths = String[]
-    for chain_idx in 1:n_ch
-        draws_unc = all_draws[chain_idx][1:min_rows, :]
-        csv_path = n_ch == 1 ? output_csv : replace(output_csv, r"\.csv$" => "_chain$(chain_idx).csv")
-        r_constrain_and_write_csv(contexts[chain_idx].sm_full, draws_unc, csv_path;
-            chain_id=chain_idx, compute_lp)
-        push!(csv_paths, csv_path)
-    end
+    csv_paths = _write_brms_chain_csvs(chains, [ctx.sm_full for ctx in contexts],
+        output_csv, discretize_dt; compute_lp)
 
     result = _pack_result(chains; requested_flow=flow_type,
         adaptive_scheme, initial_refresh_rate,
@@ -1953,15 +1960,8 @@ function r_pdmp_stan_for_brms(
                          statistic_counter=PDMPSamplers.DevelStatisticCounter)
 
     n_ch = length(chains.traces)
-    csv_paths = String[]
-    all_draws = [_draws_for_csv(chains, i, discretize_dt) for i in 1:n_ch]
-    min_rows = minimum(size(m, 1) for m in all_draws)
-    for chain_idx in 1:n_ch
-        draws_unc = all_draws[chain_idx][1:min_rows, :]
-        csv_path = n_ch == 1 ? output_csv : replace(output_csv, r"\.csv$" => "_chain$(chain_idx).csv")
-        r_constrain_and_write_csv(sm, draws_unc, csv_path; chain_id = chain_idx, compute_lp)
-        push!(csv_paths, csv_path)
-    end
+    csv_paths = _write_brms_chain_csvs(chains, fill(sm, n_ch),
+        output_csv, discretize_dt; compute_lp)
 
     result = _pack_result(chains; requested_flow=flow_type,
         adaptive_scheme, initial_refresh_rate,

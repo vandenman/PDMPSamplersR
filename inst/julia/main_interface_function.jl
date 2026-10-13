@@ -1666,14 +1666,12 @@ end
 
 function _draws_for_csv(chains::PDMPChains, chain_idx::Int, discretize_dt::Float64)
     trace = chains.traces[chain_idx]
-    try
-        if discretize_dt > 0
-            return Matrix(PDMPDiscretize(trace, discretize_dt))
-        else
-            return adaptive_discretize(chains; chain=chain_idx)[1]
-        end
-    catch
+    if first_event_time(trace) == last_event_time(trace)
         return reshape(Vector{Float64}(first(trace).position), 1, :)
+    elseif discretize_dt > 0
+        return Matrix(PDMPDiscretize(trace, discretize_dt))
+    else
+        return adaptive_discretize(chains; chain=chain_idx)[1]
     end
 end
 

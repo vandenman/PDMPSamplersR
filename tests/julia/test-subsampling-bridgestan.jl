@@ -1,4 +1,4 @@
-using Test, LinearAlgebra, BridgeStan, PDMPSamplers
+using Test, LinearAlgebra, Random, BridgeStan, PDMPSamplers
 
 include(joinpath(@__DIR__, "..", "..", "inst", "julia", "main_interface_function.jl"))
 const RB = PDMPSamplersRBridge
@@ -153,7 +153,7 @@ end
 
         bank_ctx = _new_test_context(lib_standard,
             data_path, prior_path, likelihood_design, offsets, 4, 2, 3, anchor)
-        bank_model, _, manager = RB._build_subsampling_bss_model(
+        bank_model, bank_adapter, manager = RB._build_subsampling_bss_model(
             bank_ctx; anchor_capacity=2)
         second_anchor = [0.2, -0.15, 0.1]
         prepared = RB._prepare_subsampling_anchor(bank_ctx, second_anchor)
@@ -179,10 +179,30 @@ end
         @test estimate_mean ≈ -full_log_gradient atol=1e-10 rtol=1e-10
 
         full_calls_before_selection = bank_ctx.calls.full_gradient
-        RB._select_subsampling_anchor!(manager, bank_model.grad, anchor)
+        # Force a beneficial main-phase switch through the actual adapter.
+        # A random short trajectory need not ever prefer another bank entry.
+        isolated_ctx = _new_test_context(lib_standard,
+            data_path, prior_path, likelihood_design, offsets, 4, 2, 3, anchor)
+        isolated_model, _, isolated_manager = RB._build_subsampling_bss_model(
+            isolated_ctx; anchor_capacity=2)
+        selection_state = PDMPState(0.0, SkeletonPoint(copy(anchor), ones(3)))
+        PDMPSamplers.adapt!(Xoshiro(804), bank_adapter, selection_state,
+            nothing, bank_model.grad, nothing; phase=:main)
         @test bank_model.grad.anchor == anchor
         @test bank_ctx.calls.full_gradient == full_calls_before_selection
         @test bank_ctx.calls.anchor_activations == 2
+        @test manager.main_activations == 1
+        @test RB._subsampling_call_counts(bank_ctx, manager)["anchor_main_activations"] == 1
+        @test isolated_manager.main_activations == 0
+        @test isolated_ctx.calls.anchor_activations == 0
+        @test length(isolated_manager.entries) == 1
+        @test isolated_model.grad.anchor == anchor
+        # Keeping the nearest entry is a no-op, including both counters.
+        PDMPSamplers.adapt!(Xoshiro(805), bank_adapter, selection_state,
+            nothing, bank_model.grad, nothing; phase=:main)
+        @test manager.main_activations == 1
+        @test bank_ctx.calls.anchor_activations == 2
+        @test bank_ctx.calls.full_gradient == full_calls_before_selection
 
         # Replace an inactive LRU slot: the active provider must not change.
         third_anchor = [-0.3, 0.25, -0.05]
@@ -199,8 +219,10 @@ end
 
         # Select the replacement, then replace that active LRU slot. Active
         # replacement must atomically install the newly prepared state.
-        RB._select_subsampling_anchor!(manager, bank_model.grad, third_anchor)
+        RB._select_subsampling_anchor!(manager, bank_model.grad, third_anchor;
+            phase=:warmup)
         @test bank_model.grad.anchor == third_anchor
+        @test manager.main_activations == 1
         fourth_anchor = [0.45, 0.1, -0.2]
         fourth = RB._prepare_subsampling_anchor(bank_ctx, fourth_anchor)
         manager.entries[1].age = 0

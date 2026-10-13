@@ -1,70 +1,66 @@
 # Persistent selected-gradient backend for public custom-Stan subsampling sampling.
 
 
-mutable struct StanSubsamplingCallCounts
-    full_gradient::Int
-    prior_gradient::Int
-    selected_gradient::Int
-    persons_evaluated::Int
-    anchor_cache_gradient::Int
-    anchor_cache_persons::Int
-    analytic_residual::Int
-    selected_refinement_calls::Int
-    analytic_persons::Int
-    analytic_node_conditionals::Int
-    model_constructions::Int
-    data_constructions::Int
-    native_full_data_scans::Int
-    analytic_residual_seconds::Float64
-    proposal_deterministic_bound_sum::Float64
-    proposal_aggregate_residual_bound_sum::Float64
-    proposal_subset_bound_sum::Float64
-    proposal_deterministic_actual_sum::Float64
-    proposal_exact_residual_rate_sum::Float64
-    proposal_actual_rate_sum::Float64
-    accepted_proposal_bound_sum::Float64
-    accepted_actual_rate_sum::Float64
-    proposal_count::Int
-    proposal_acceptance_probability_sum::Float64
-    proposal_certificate_ratio_sum::Float64
-    proposal_intrinsic_ratio_sum::Float64
-    compact_anchor_likelihood_seconds::Float64
-    direct_factor_bound_scans::Int
-    direct_factors_evaluated::Int
-    direct_cell_certificate_seconds::Float64
-    direct_cached_cell_hits::Int
-    direct_selected_factor_exact_evaluations::Int
-    direct_path_preparations::Int
-    direct_path_factors_prepared::Int
-    direct_path_preparation_seconds::Float64
-    direct_adjacent_endpoint_reuses::Int
-    direct_left_endpoint_evaluations::Int
-    direct_right_endpoint_evaluations::Int
-    direct_residual_table_constructions::Int
-    direct_internal_cell_uses::Int
-    deterministic_hvp_calls::Int
-    deterministic_hvp_seconds::Float64
-    last_mark_residual::Bool
-    deterministic_source_proposals::Int
-    residual_source_proposals::Int
-    deterministic_source_acceptances::Int
-    residual_source_acceptances::Int
-    shared_current_pattern_evaluations::Int
-    shared_current_cell_evaluations::Int
-    shared_current_rebuilt_nodes::Int
-    shared_current_rebuild_seconds::Float64
-    shared_current_dense_fallback_cells::Int
-    joint_cell_width_bins::Vector{Int}
-    direct_path_anchor_changes::Int
-    direct_path_mask_changes::Int
-    direct_path_flow_changes::Int
-    direct_path_state_changes::Int
-    direct_path_forced_rebuilds::Int
+Base.@kwdef mutable struct StanSubsamplingCallCounts
+    full_gradient::Int = 0
+    prior_gradient::Int = 0
+    selected_gradient::Int = 0
+    persons_evaluated::Int = 0
+    anchor_cache_gradient::Int = 0
+    anchor_cache_persons::Int = 0
+    analytic_residual::Int = 0
+    selected_refinement_calls::Int = 0
+    analytic_persons::Int = 0
+    analytic_node_conditionals::Int = 0
+    model_constructions::Int = 0
+    data_constructions::Int = 0
+    native_full_data_scans::Int = 0
+    analytic_residual_seconds::Float64 = 0.0
+    proposal_deterministic_bound_sum::Float64 = 0.0
+    proposal_aggregate_residual_bound_sum::Float64 = 0.0
+    proposal_subset_bound_sum::Float64 = 0.0
+    proposal_deterministic_actual_sum::Float64 = 0.0
+    proposal_exact_residual_rate_sum::Float64 = 0.0
+    proposal_actual_rate_sum::Float64 = 0.0
+    accepted_proposal_bound_sum::Float64 = 0.0
+    accepted_actual_rate_sum::Float64 = 0.0
+    proposal_count::Int = 0
+    proposal_acceptance_probability_sum::Float64 = 0.0
+    proposal_certificate_ratio_sum::Float64 = 0.0
+    proposal_intrinsic_ratio_sum::Float64 = 0.0
+    compact_anchor_likelihood_seconds::Float64 = 0.0
+    direct_factor_bound_scans::Int = 0
+    direct_factors_evaluated::Int = 0
+    direct_cell_certificate_seconds::Float64 = 0.0
+    direct_cached_cell_hits::Int = 0
+    direct_selected_factor_exact_evaluations::Int = 0
+    direct_path_preparations::Int = 0
+    direct_path_factors_prepared::Int = 0
+    direct_path_preparation_seconds::Float64 = 0.0
+    direct_adjacent_endpoint_reuses::Int = 0
+    direct_left_endpoint_evaluations::Int = 0
+    direct_right_endpoint_evaluations::Int = 0
+    direct_residual_table_constructions::Int = 0
+    direct_internal_cell_uses::Int = 0
+    deterministic_hvp_calls::Int = 0
+    deterministic_hvp_seconds::Float64 = 0.0
+    last_mark_residual::Bool = false
+    deterministic_source_proposals::Int = 0
+    residual_source_proposals::Int = 0
+    deterministic_source_acceptances::Int = 0
+    residual_source_acceptances::Int = 0
+    shared_current_pattern_evaluations::Int = 0
+    shared_current_cell_evaluations::Int = 0
+    shared_current_rebuilt_nodes::Int = 0
+    shared_current_rebuild_seconds::Float64 = 0.0
+    shared_current_dense_fallback_cells::Int = 0
+    joint_cell_width_bins::Vector{Int} = zeros(Int, 10)
+    direct_path_anchor_changes::Int = 0
+    direct_path_mask_changes::Int = 0
+    direct_path_flow_changes::Int = 0
+    direct_path_state_changes::Int = 0
+    direct_path_forced_rebuilds::Int = 0
 end
-StanSubsamplingCallCounts() = StanSubsamplingCallCounts(
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
-    0.0, 0.0, 0, 0.0, 0.0, 0.0, 0.0, 0, 0, 0.0, 0, 0, 0, 0, 0.0, 0, 0, 0, 0, 0,
-    0, 0.0, false, 0, 0, 0, 0, 0, 0, 0, 0.0, 0, zeros(Int, 10), 0, 0, 0, 0, 0)
 
 mutable struct StanSubsamplingContext
     full::PDMPModel

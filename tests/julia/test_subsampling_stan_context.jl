@@ -4,6 +4,17 @@ include(normpath(joinpath(@__DIR__, "..", "..", "inst", "julia",
     "main_interface_function.jl")))
 using .PDMPSamplersRBridge
 
+@testset "subsampling counters have independent default storage" begin
+    first_counts = PDMPSamplersRBridge.StanSubsamplingCallCounts()
+    second_counts = PDMPSamplersRBridge.StanSubsamplingCallCounts()
+    @test all(name -> name === :joint_cell_width_bins ||
+        iszero(getfield(first_counts, name)), fieldnames(typeof(first_counts)))
+    @test first_counts.joint_cell_width_bins == zeros(Int, 10)
+    @test first_counts.joint_cell_width_bins !== second_counts.joint_cell_width_bins
+    first_counts.joint_cell_width_bins[1] = 3
+    @test second_counts.joint_cell_width_bins == zeros(Int, 10)
+end
+
 @testset "persistent custom-Stan selected gradient closure" begin
     root = normpath(joinpath(@__DIR__, "..", ".."))
     stan = joinpath(root, "tests", "stan", "subsampling_gaussian.stan")

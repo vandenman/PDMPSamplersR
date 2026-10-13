@@ -11,10 +11,9 @@ mutable struct SubsamplingBridgeCallCounts
 end
 SubsamplingBridgeCallCounts() = SubsamplingBridgeCallCounts(0, 0, 0, 0, 0, 0)
 
-mutable struct SubsamplingBridgeStanContext
+mutable struct SubsamplingBridgeStanContext{F}
     sm_full::BridgeStan.StanModel
     sm_prior::BridgeStan.StanModel
-    family::Symbol
     predictor_designs::Vector{Matrix{Float64}}
     predictor_indices::Vector{Vector{Int}}
     predictor_operator_norms::Vector{Float64}
@@ -57,8 +56,8 @@ mutable struct SubsamplingBridgeAnchorEntry
     age::Int
 end
 
-mutable struct SubsamplingBridgeAnchorManager
-    ctx::SubsamplingBridgeStanContext
+mutable struct SubsamplingBridgeAnchorManager{C}
+    ctx::C
     entries::Vector{SubsamplingBridgeAnchorEntry}
     active_idx::Int
     capacity::Int
@@ -106,21 +105,21 @@ end
     return out
 end
 
-function _fill_subsampling_anchor_cache!(ctx::SubsamplingBridgeStanContext, anchor,
-        predictors::AbstractMatrix, kernels::AbstractMatrix)
+function _fill_subsampling_anchor_cache!(ctx::SubsamplingBridgeStanContext{F}, anchor,
+        predictors::AbstractMatrix, kernels::AbstractMatrix) where {F}
     N, K = ctx.N, length(ctx.predictor_designs)
     @inbounds for i in 1:N, k in 1:K
         predictors[i, k] = _subsampling_eta(ctx, i, k, anchor)
     end
-    if ctx.family in (:bernoulli, :binomial, :independent_bernoulli)
+    if F in (:bernoulli, :binomial, :independent_bernoulli)
         @inbounds for i in 1:N, k in 1:K
             kernels[i, k] = LogExpFunctions.logistic(predictors[i, k])
         end
-    elseif ctx.family === :poisson
+    elseif F === :poisson
         @inbounds for i in 1:N
             kernels[i, 1] = exp(predictors[i, 1])
         end
-    elseif ctx.family in (:categorical, :multinomial)
+    elseif F in (:categorical, :multinomial)
         @inbounds for i in 1:N
             _reference_category_softmax!(@view(kernels[i, :]), @view(predictors[i, :]))
         end
@@ -161,14 +160,14 @@ function _new_subsampling_bss_context(lib_path_std::String,
         "analytic subsampling HCV damping must be finite and positive"))
     operator_norms = _subsampling_predictor_operator_norms(
         predictor_designs, predictor_indices, N, d)
-    ctx = SubsamplingBridgeStanContext(
+    ctx = SubsamplingBridgeStanContext{family}(
         lock(_BRIDGESTAN_CALL_LOCK) do
             BridgeStan.StanModel(lib_path_std, data_full_file; warn=false)
         end,
         lock(_BRIDGESTAN_CALL_LOCK) do
             BridgeStan.StanModel(lib_path_std, data_prior_file; warn=false)
         end,
-        family, predictor_designs, predictor_indices, operator_norms, d,
+        predictor_designs, predictor_indices, operator_norms, d,
         offsets, response, known_se,
         observation_multipliers, N, m, copy(anchor),
         zeros(N, K), zeros(N, K), nothing, nothing, use_hcv,
@@ -225,8 +224,8 @@ function _subsampling_growth_envelope(weights_by_observation, growth, anchor)
     return TrajectoryResidualEnvelope(weights, anchor; growth_rates=edges)
 end
 
-function _subsampling_family_envelope(ctx::SubsamplingBridgeStanContext,
-        anchor=ctx.anchor, anchor_predictors=ctx.anchor_predictors)
+function _subsampling_family_envelope(ctx::SubsamplingBridgeStanContext{F},
+        anchor=ctx.anchor, anchor_predictors=ctx.anchor_predictors) where {F}
     designs = ctx.predictor_designs
     N, K = ctx.N, length(designs)
     weights = zeros(N)
@@ -235,21 +234,21 @@ function _subsampling_family_envelope(ctx::SubsamplingBridgeStanContext,
     for i in 1:N
         Bnorm = ctx.predictor_operator_norms[i]
         multiplier = ctx.observation_multipliers[i]
-        if ctx.family in (:bernoulli, :binomial, :independent_bernoulli)
+        if F in (:bernoulli, :binomial, :independent_bernoulli)
             weights[i] = multiplier * Bnorm^2 / 4
             ctx.use_hcv && (hcv_remainder_weights[i] =
                 multiplier * Bnorm^3 / (12sqrt(3.0)))
-        elseif ctx.family in (:categorical, :multinomial)
+        elseif F in (:categorical, :multinomial)
             weights[i] = multiplier * Bnorm^2 / 2
-        elseif ctx.family === :poisson
+        elseif F === :poisson
             ηa = anchor_predictors[i, 1]
             weights[i] = multiplier * exp(ηa) * Bnorm^2
             growth[i] = Bnorm
-        elseif ctx.family === :gaussian && K == 1
+        elseif F === :gaussian && K == 1
             isempty(ctx.known_se) && throw(ArgumentError(
                 "fixed-scale Gaussian subsampling sampling requires known standard errors"))
             weights[i] = multiplier * Bnorm^2 / ctx.known_se[i]^2
-        elseif ctx.family === :gaussian && K == 2
+        elseif F === :gaussian && K == 2
             μa = anchor_predictors[i, 1]
             sa = anchor_predictors[i, 2]
             q0 = abs(ctx.response[i, 1] - μa) + 1
@@ -260,7 +259,7 @@ function _subsampling_family_envelope(ctx::SubsamplingBridgeStanContext,
             bs = norm(@view designs[2][i, :])
             growth[i] = 2 * (bμ + bs)
         else
-            throw(ArgumentError("no subsampling family envelope for $(ctx.family) with $K predictors"))
+            throw(ArgumentError("no subsampling family envelope for $(F) with $K predictors"))
         end
     end
     ctx.use_hcv && return PDMPSamplers.DampedHCVResidualEnvelope(
@@ -430,8 +429,8 @@ function _store_prepared_subsampling_anchor!(manager::SubsamplingBridgeAnchorMan
     return idx
 end
 
-function _build_subsampling_bss_model(ctx::SubsamplingBridgeStanContext;
-        curvature_backend::String="exact", anchor_capacity::Integer=0)
+function _build_subsampling_bss_model(ctx::SubsamplingBridgeStanContext{F};
+        curvature_backend::String="exact", anchor_capacity::Integer=0) where {F}
     designs = ctx.predictor_designs
     N, d, K = ctx.N, ctx.d, length(designs)
     d == length(ctx.anchor) || throw(DimensionMismatch("likelihood design column count must equal the unconstrained dimension"))
@@ -491,8 +490,8 @@ function _build_subsampling_bss_model(ctx::SubsamplingBridgeStanContext;
         end
         @inbounds for i in subset
             multiplier = ctx.observation_multipliers[i]
-            if ctx.family in (:bernoulli, :binomial, :independent_bernoulli)
-                predictors = ctx.family === :independent_bernoulli ? (1:K) : (1:1)
+            if F in (:bernoulli, :binomial, :independent_bernoulli)
+                predictors = F === :independent_bernoulli ? (1:K) : (1:1)
                 for k in predictors
                     eta = _subsampling_eta(ctx, i, k, x)
                     Δη = multiplier * (LogExpFunctions.logistic(eta) -
@@ -505,15 +504,15 @@ function _build_subsampling_bss_model(ctx::SubsamplingBridgeStanContext;
                     end
                     _add_subsampling_predictor!(out, ctx, i, k, Δη)
                 end
-            elseif ctx.family === :poisson
+            elseif F === :poisson
                 Δη = multiplier * (exp(_subsampling_eta(ctx, i, 1, x)) -
                     ctx.anchor_kernel_values[i, 1])
                 _add_subsampling_predictor!(out, ctx, i, 1, Δη)
-            elseif ctx.family === :gaussian && K == 1
+            elseif F === :gaussian && K == 1
                 Δη = multiplier * (_subsampling_eta(ctx, i, 1, x) -
                     ctx.anchor_predictors[i, 1]) / ctx.known_se[i]^2
                 _add_subsampling_predictor!(out, ctx, i, 1, Δη)
-            elseif ctx.family === :gaussian && K == 2
+            elseif F === :gaussian && K == 2
                 μx = _subsampling_eta(ctx, i, 1, x); sx = _subsampling_eta(ctx, i, 2, x)
                 μa = ctx.anchor_predictors[i, 1]; sa = ctx.anchor_predictors[i, 2]
                 qx = ctx.response[i, 1] - μx; qa = ctx.response[i, 1] - μa
@@ -526,7 +525,7 @@ function _build_subsampling_bss_model(ctx::SubsamplingBridgeStanContext;
                     (ea / va) * (1 - qa^2 / va))
                 _add_subsampling_predictor!(out, ctx, i, 1, Δμ)
                 _add_subsampling_predictor!(out, ctx, i, 2, Δs)
-            elseif ctx.family in (:categorical, :multinomial)
+            elseif F in (:categorical, :multinomial)
                 predictor_buffer = ctx.predictor_buffer
                 for k in 1:K
                     predictor_buffer[k] = _subsampling_eta(ctx, i, k, x)

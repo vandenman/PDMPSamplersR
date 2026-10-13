@@ -94,6 +94,18 @@ function _subsampling_predictor_operator_norms(
     return operator_norms
 end
 
+@inline function _reference_category_softmax!(out, logits)
+    maximum_eta = max(0.0, maximum(logits))
+    denominator = exp(-maximum_eta)
+    for k in eachindex(logits)
+        denominator += exp(logits[k] - maximum_eta)
+    end
+    for k in eachindex(out, logits)
+        out[k] = exp(logits[k] - maximum_eta) / denominator
+    end
+    return out
+end
+
 function _fill_subsampling_anchor_cache!(ctx::SubsamplingBridgeStanContext, anchor,
         predictors::AbstractMatrix, kernels::AbstractMatrix)
     N, K = ctx.N, length(ctx.predictor_designs)
@@ -110,14 +122,7 @@ function _fill_subsampling_anchor_cache!(ctx::SubsamplingBridgeStanContext, anch
         end
     elseif ctx.family in (:categorical, :multinomial)
         @inbounds for i in 1:N
-            maximum_eta = max(0.0, maximum(@view predictors[i, :]))
-            denominator = exp(-maximum_eta)
-            for k in 1:K
-                denominator += exp(predictors[i, k] - maximum_eta)
-            end
-            for k in 1:K
-                kernels[i, k] = exp(predictors[i, k] - maximum_eta) / denominator
-            end
+            _reference_category_softmax!(@view(kernels[i, :]), @view(predictors[i, :]))
         end
     end
     return nothing
@@ -523,22 +528,13 @@ function _build_subsampling_bss_model(ctx::SubsamplingBridgeStanContext;
                 _add_subsampling_predictor!(out, ctx, i, 2, Δs)
             elseif ctx.family in (:categorical, :multinomial)
                 predictor_buffer = ctx.predictor_buffer
-                max_x = 0.0
                 for k in 1:K
                     predictor_buffer[k] = _subsampling_eta(ctx, i, k, x)
-                    max_x = max(max_x, predictor_buffer[k])
                 end
-                # Include the reference category's zero logit and normalize
-                # after subtracting the maximum. This is the ordinary stable
-                # softmax and remains finite for extreme affine predictors.
-                denom_x = exp(-max_x)
-                for k in 1:K
-                    denom_x += exp(predictor_buffer[k] - max_x)
-                end
+                _reference_category_softmax!(predictor_buffer, predictor_buffer)
                 for k in 1:K
                     Δp = multiplier * (
-                        exp(predictor_buffer[k] - max_x) / denom_x -
-                        ctx.anchor_kernel_values[i, k])
+                        predictor_buffer[k] - ctx.anchor_kernel_values[i, k])
                     _add_subsampling_predictor!(out, ctx, i, k, Δp)
                 end
             end

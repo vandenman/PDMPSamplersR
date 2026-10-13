@@ -489,11 +489,11 @@ function _build_subsampling_bss_model(ctx::SubsamplingBridgeStanContext;
             if ctx.family in (:bernoulli, :binomial, :independent_bernoulli)
                 predictors = ctx.family === :independent_bernoulli ? (1:K) : (1:1)
                 for k in predictors
-                    Δη = multiplier * (LogExpFunctions.logistic(_subsampling_eta(ctx, i, k, x)) -
+                    eta = _subsampling_eta(ctx, i, k, x)
+                    Δη = multiplier * (LogExpFunctions.logistic(eta) -
                         ctx.anchor_kernel_values[i, k])
                     if ctx.use_hcv
-                        predictor_delta = _subsampling_eta(ctx, i, k, x) -
-                            ctx.anchor_predictors[i, k]
+                        predictor_delta = eta - ctx.anchor_predictors[i, k]
                         p_anchor = ctx.anchor_kernel_values[i, k]
                         Δη -= α * multiplier * p_anchor * (1 - p_anchor) *
                             predictor_delta

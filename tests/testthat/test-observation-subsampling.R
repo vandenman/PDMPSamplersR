@@ -1,4 +1,5 @@
 test_that("an enabled subsampling bank requires anchor updates", {
+  skip_if_not_installed("brms")
   data <- data.frame(y = c(0L, 1L), x = c(-1, 1))
   expect_error(
     PDMPSamplersR::brm_pdmp(
@@ -11,6 +12,7 @@ test_that("an enabled subsampling bank requires anchor updates", {
 })
 
 test_that("subsampling integer controls are validated before coercion", {
+  skip_if_not_installed("brms")
   data <- data.frame(y = c(0L, 1L), x = c(-1, 1))
   for (value in list(0, -1, 0.5, NA_real_, c(1, 2))) {
     expect_error(
@@ -66,6 +68,7 @@ test_that("R thinning c0 remains a global bound", {
 })
 
 test_that("subsampling eligibility is capability based and custom U0 is exact", {
+  skip_if_not_installed("brms")
   family <- brms::bernoulli(link = "logit")
   accepted <- list(
     y ~ 1, y ~ 0 + x, y ~ x, y ~ x + z,

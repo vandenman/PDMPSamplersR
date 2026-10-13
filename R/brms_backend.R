@@ -160,10 +160,8 @@ brm_pdmp <- function(
     save_model = NULL,
     ...
 ) {
-  if (!requireNamespace("brms", quietly = TRUE))
-    cli::cli_abort("Package {.pkg brms} is required for {.fn brm_pdmp}.")
-  if (!requireNamespace("rstan", quietly = TRUE))
-    cli::cli_abort("Package {.pkg rstan} is required for {.fn brm_pdmp}.")
+  require_brm_pdmp_namespace("brms")
+  require_brm_pdmp_namespace("rstan")
 
   if (sample_prior != "no")
     cli::cli_abort("{.fn brm_pdmp} only supports {.code sample_prior = \"no\"}.")
@@ -578,4 +576,20 @@ cached_stan_model <- function(scode) {
   stan_path <- file.path(cache_dir, paste0(hash, ".stan"))
   writeLines(scode, stan_path)
   stan_path
+}
+
+# Load a package that brm_pdmp() needs. Distinguishes a missing package from
+# one that is installed but cannot be loaded in this session (e.g. on macOS,
+# RcppParallel cannot load once BridgeStan's TBB library is loaded).
+require_brm_pdmp_namespace <- function(pkg) {
+  if (!nzchar(system.file(package = pkg)))
+    cli::cli_abort("Package {.pkg {pkg}} is required for {.fn brm_pdmp}.",
+                   call = NULL)
+  tryCatch(loadNamespace(pkg), error = function(e) {
+    reason <- conditionMessage(e)
+    cli::cli_abort(c(
+      "Package {.pkg {pkg}} is installed but could not be loaded for {.fn brm_pdmp}.",
+      "i" = "{reason}"), call = NULL)
+  })
+  invisible(TRUE)
 }

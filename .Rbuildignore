@@ -2,8 +2,6 @@
 ^renv\.lock$
 ^.*\.Rproj$
 ^\.Rproj\.user$
-^examples/mvnormal_cmdstan0\.R$
-^examples/omrf\.R$
 ^gradient_test_helper\.jl$
 ^playground$
 ^inst/julia/cv_gradient_diagnostics\.jl$
@@ -24,3 +22,6 @@
 ^pkgdown$
 ^\.positai$
 ^\.claude$
+^examples$
+^LICENSE\.md$
+^stan$

@@ -42,22 +42,8 @@ online_summary_options <- function(batches = 400L, grid_spacing = NA_real_,
             class = "pdmp_online_summaries")
 }
 
-# The Julia bridge reads these settings from the environment when it builds
-# the streaming trace storage; set them for the duration of one sampler call.
-.set_online_summary_env <- function(online_summaries, trace_storage) {
-  vars <- c("PDMPSAMPLERS_ONLINE_BATCHES", "PDMPSAMPLERS_ONLINE_GRID_SPACING",
-            "PDMPSAMPLERS_STREAM_EVENTS", "PDMPSAMPLERS_ONLINE_WARMUP_BATCHES")
-  old <- Sys.getenv(vars, unset = NA_character_, names = TRUE)
-  restore <- function() {
-    for (v in vars) {
-      if (is.na(old[[v]])) Sys.unsetenv(v) else
-        do.call(Sys.setenv, stats::setNames(list(old[[v]]), v))
-    }
-  }
-  if (is.null(online_summaries)) {
-    Sys.unsetenv(vars)
-    return(restore)
-  }
+.validate_online_summaries <- function(online_summaries, trace_storage) {
+  if (is.null(online_summaries)) return(invisible(NULL))
   if (!inherits(online_summaries, "pdmp_online_summaries")) {
     cli::cli_abort(
       "{.arg online_summaries} must come from {.fn online_summary_options}.")
@@ -66,13 +52,7 @@ online_summary_options <- function(batches = 400L, grid_spacing = NA_real_,
     cli::cli_abort(
       "{.arg online_summaries} requires {.code trace_storage = \"streaming\"}.")
   }
-  Sys.setenv(
-    PDMPSAMPLERS_ONLINE_BATCHES = online_summaries$batches,
-    PDMPSAMPLERS_ONLINE_GRID_SPACING = if (is.na(online_summaries$grid_spacing))
-      "NaN" else format(online_summaries$grid_spacing, digits = 17),
-    PDMPSAMPLERS_STREAM_EVENTS = if (online_summaries$write_events) "1" else "0",
-    PDMPSAMPLERS_ONLINE_WARMUP_BATCHES = online_summaries$warmup_batches %||% 0L)
-  restore
+  invisible(NULL)
 }
 
 #' Read online summaries written by a streaming chain

@@ -11,7 +11,7 @@
 \usage{
 pdmp_subsample_hpp_path()
 
-compile_pdmp_stan_model(path)
+compile_pdmp_stan_model(path, compile_options = stan_compile_options())
 
 stan_residual_envelope(weights, growth_rates = NULL)
 
@@ -39,6 +39,8 @@ stan_parameter_mapping(path_to_stanmodel, standata, parameters = NULL)
 }
 \arguments{
 \item{path}{Path to a Stan source file.}
+
+\item{compile_options}{Settings from \code{\link{stan_compile_options}}.}
 
 \item{weights}{Nonnegative component-by-observation curvature weights.}
 

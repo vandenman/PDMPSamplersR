@@ -4,12 +4,6 @@ using PDMPSamplers, LinearAlgebra, BridgeStan, Random, SparseArrays, Statistics,
 using FileWatching
 const LogExpFunctions = PDMPSamplers.LogExpFunctions
 
-# Research-only timing/allocation diagnostics are deliberately opt-in.  The
-# ordinary production path still retains event/provenance counters, but does
-# not query Julia's GC allocator counters at every instrumented operation.
-const _OMRF_RESEARCH_DIAGNOSTICS = lowercase(get(ENV,
-    "OMRF_RESEARCH_DIAGNOSTICS", "false")) in ("1", "true", "yes", "on")
-
 # BridgeStan/Stan Math autodiff state is serialized consistently for every
 # Stan-backed provider used by this bridge.
 const _BRIDGESTAN_CALL_LOCK = ReentrantLock()
@@ -56,7 +50,7 @@ const _WORKER_STATE_ROOTS = (
     :flow_cov, :flow_mean, :c0, :grid_n, :grid_t_max,
     :grid_bound, :grid_curvature_bound, :t0, :T, :t_warmup, :f, :hessian_f, :hessian, :sticky, :can_stick, :model_prior,
     :parameter_prior, :slab_prior, :show_progress, :seed, :adaptive_scheme,
-    :refresh_rate, :unc_names, :_unc_names, :subsampling_anchor_updates,
+    :control, :online_summaries, :refresh_rate, :unc_names, :_unc_names, :subsampling_anchor_updates,
     :subsampling_use_anchor_bank,
     :subsampling_anchor_bank_capacity, :subsampling_main_anchor_refresh_distance,
     :subsampling_require_no_main_full_data, :subsampling_diagnostic_window,
@@ -100,7 +94,7 @@ _subsampling_float_vector(value::Number) = [Float64(value)]
 _subsampling_float_vector(values) = collect(Float64, vec(values))
 
 function build_flow(flow_type::String, prec::AbstractMatrix{Float64}, flow_mean::AbstractVector{Float64};
-                    adaptive_scheme::String="diagonal", refresh_rate::Float64=1.0)
+                    adaptive_scheme::String="diagonal", refresh_rate::Float64=1.0, control=nothing)
     if flow_type == "ZigZag"
         return ZigZag(prec, flow_mean)
     elseif flow_type == "BouncyParticle"
@@ -108,7 +102,7 @@ function build_flow(flow_type::String, prec::AbstractMatrix{Float64}, flow_mean:
     elseif flow_type == "Boomerang"
         return Boomerang(prec, flow_mean)
     elseif flow_type == "AdaptiveBoomerang"
-        λref = parse(Float64, get(ENV, "PDMP_ADAPTIVE_BOOMERANG_LAMBDA_REF", "0.1"))
+        λref = Float64(_control_value(control, :adaptive_boomerang_refresh_rate, 0.1))
         # `flow_mean` and `prec` are an initial adaptive specification, not a
         # promise that warmup leaves the flow unchanged.  Starting from the
         # supplied values is nevertheless essential for honest provenance and
@@ -191,27 +185,27 @@ function _flow_spec(flow)
          "covariance" => _resolved_flow_covariance(flow))
 end
 
-function r_resolve_flow_spec(flow_type::String, flow_mean, flow_cov;
+function r_resolve_flow_spec(flow_type::String, flow_mean, flow_cov; control=nothing,
         adaptive_scheme::String="diagonal", refresh_rate::Float64=1.0)
     d = length(flow_mean)
     covariance = _as_flow_cov(flow_cov, d)
     mean = _as_flow_mean(flow_mean, d)
-    flow = build_flow(flow_type, _to_precision(covariance, d), mean;
+    flow = build_flow(flow_type, _to_precision(covariance, d), mean; control,
                       adaptive_scheme, refresh_rate)
     return _flow_spec(flow)
 end
 
-function build_algorithm(algorithm_type::String; c0::Float64, d::Integer, grid_n::Int, grid_t_max::Float64,
+function build_algorithm(algorithm_type::String; control=nothing, c0::Float64, d::Integer, grid_n::Int, grid_t_max::Float64,
         curvature_backend::String="auto",
         grid_bound::String="value_quadratic",
         grid_curvature_bound::Union{Nothing,Float64}=nothing)
     if algorithm_type == "ThinningStrategy"
         return ThinningStrategy(GlobalBounds(c0, d))
     elseif algorithm_type == "GridThinningStrategy"
-        grid_n_min = parse(Int, get(ENV, "PDMP_GRID_N_MIN", string(min(grid_n, 5))))
-        bound_violation_value = get(ENV, "PDMP_GRID_BOUND_VIOLATION", "")
-        bound_violation = isempty(bound_violation_value) ? nothing :
-            Symbol(bound_violation_value)
+        requested_min = _control_value(control, :grid_n_min, nothing)
+        grid_n_min = isnothing(requested_min) ? min(grid_n, 5) : Int(requested_min)
+        requested_violation = _control_value(control, :grid_bound_violation, nothing)
+        bound_violation = isnothing(requested_violation) ? nothing : Symbol(requested_violation)
         return GridThinningStrategy(; N = grid_n, t_max = grid_t_max,
             N_min = grid_n_min,
             curvature_backend = Symbol(curvature_backend),
@@ -239,20 +233,20 @@ function wrap_sticky(alg::PDMPSamplers.PoissonTimeStrategy, sticky::Bool, model_
     return Sticky(alg, κ, BitVector(can_stick))
 end
 
-function build_warmup_stop(t_warmup::Float64)
-    enabled = parse(Bool, get(ENV, "PDMP_ADAPTIVE_WARMUP_STOP", "false"))
-    enabled || return nothing
-    min_time = parse(Float64, get(ENV, "PDMP_ADAPTIVE_WARMUP_MIN_TIME", string(0.25 * t_warmup)))
-    max_time = parse(Float64, get(ENV, "PDMP_ADAPTIVE_WARMUP_MAX_TIME", string(t_warmup)))
-    stable_time = parse(Float64, get(ENV, "PDMP_ADAPTIVE_WARMUP_STABLE_TIME", string(0.25 * t_warmup)))
-    min_events = parse(Int, get(ENV, "PDMP_ADAPTIVE_WARMUP_MIN_EVENTS", "100"))
-    check_every = parse(Int, get(ENV, "PDMP_ADAPTIVE_WARMUP_CHECK_EVERY", "25"))
+function build_warmup_stop(t_warmup::Float64, control=nothing)
+    settings = _control_value(control, :warmup_stop, nothing)
+    isnothing(settings) && return nothing
     return PDMPSamplers.AdaptiveWarmupCriterion(;
-        min_time, max_time, stable_time, min_events, check_every)
+        min_time=Float64(_control_value(settings, :min_time, 0.25t_warmup)),
+        max_time=Float64(_control_value(settings, :max_time, t_warmup)),
+        stable_time=Float64(_control_value(settings, :stable_time, 0.25t_warmup)),
+        min_events=Int(_control_value(settings, :min_events, 100)),
+        check_every=Int(_control_value(settings, :check_every, 25)))
 end
 
 _haskey(x, key::Symbol) = haskey(x, key) || haskey(x, String(key))
 _rget(x, key::Symbol) = haskey(x, key) ? x[key] : x[String(key)]
+_control_value(control, key, default) = isnothing(control) || isempty(control) || !_haskey(control, key) ? default : _rget(control, key)
 _as_float_vector(x::Number) = [Float64(x)]
 _as_float_vector(x) = Vector{Float64}(x)
 _as_int_vector(x::Number) = [Int(x)]
@@ -481,8 +475,6 @@ function _as_flow_cov(flow_cov, d::Int)
     return Matrix{Float64}(flow_cov)
 end
 
-_compile_env_enabled(name::String) = lowercase(get(ENV, name, "false")) in ("1", "true", "yes", "y")
-
 function _compile_cache_checksum(bytes::Vector{UInt8})
     value = UInt64(0xcbf29ce484222325)
     @inbounds for byte in bytes
@@ -498,9 +490,8 @@ end
 const _BRIDGESTAN_CACHE_SCHEMA = "pdmpsamplersr-bridgestan-cache-v2"
 
 function _cache_build_dir(path_to_stan_model::String,
-        stanc_args::Vector{String}, make_args::Vector{String})
-    cache_root = get(ENV, "PDMPSAMPLERSR_BRIDGESTAN_CACHE_DIR",
-        joinpath(first(DEPOT_PATH), "pdmpsamplersr", "bridgestan"))
+        stanc_args::Vector{String}, make_args::Vector{String}; cache_root=nothing)
+    cache_root = isnothing(cache_root) ? joinpath(first(DEPOT_PATH), "pdmpsamplersr", "bridgestan") : String(cache_root)
     source_bytes = read(path_to_stan_model)
     option_bytes = Vector{UInt8}(codeunits(join([stanc_args; make_args], '\0')))
     schema_bytes = Vector{UInt8}(codeunits(_BRIDGESTAN_CACHE_SCHEMA))
@@ -528,16 +519,17 @@ function _cached_stan_source(path_to_stan_model::String,
     return cached_source
 end
 
-function _compile_model(path_to_stan_model::String)
+function _compile_model(path_to_stan_model::String; compile_options=nothing)
     !endswith(path_to_stan_model, ".stan") && return path_to_stan_model
-    optimize = _compile_env_enabled("PDMPSAMPLERSR_BRIDGESTAN_STANC_O1")
+    optimize = Bool(_control_value(compile_options, :optimize, false))
     stanc_flags = optimize ? "--O1" : ""
     stanc_args = isempty(stanc_flags) ? String[] : [stanc_flags]
     make_args = String[]
-    _compile_env_enabled("PDMPSAMPLERSR_BRIDGESTAN_NATIVE") &&
+    Bool(_control_value(compile_options, :native, false)) &&
         push!(make_args, "CXXFLAGS+=-march=native")
-    if _compile_env_enabled("PDMPSAMPLERSR_BRIDGESTAN_CACHE")
-        build_dir = _cache_build_dir(path_to_stan_model, stanc_args, make_args)
+    if Bool(_control_value(compile_options, :cache, false))
+        build_dir = _cache_build_dir(path_to_stan_model, stanc_args, make_args;
+            cache_root=_control_value(compile_options, :cache_dir, nothing))
         return _with_compile_lock(joinpath(build_dir, ".compile.lock")) do
             source = _cached_stan_source(path_to_stan_model, stanc_args, make_args, build_dir)
             library = replace(source, r"\.stan$" => "_model.$(Libdl.dlext)")
@@ -552,17 +544,18 @@ function _compile_model(path_to_stan_model::String)
     end
 end
 
-function _compile_model_with_header(path_to_stan_model::String, hpp_path::String)
+function _compile_model_with_header(path_to_stan_model::String, hpp_path::String; compile_options=nothing)
     !endswith(path_to_stan_model, ".stan") && return path_to_stan_model
     header = replace(abspath(normpath(hpp_path)), "\\" => "/")
     stanc_args = ["--allow-undefined"]
-    _compile_env_enabled("PDMPSAMPLERSR_BRIDGESTAN_STANC_O1") &&
+    Bool(_control_value(compile_options, :optimize, false)) &&
         push!(stanc_args, "--O1")
     make_args = ["USER_HEADER=$(header)"]
-    _compile_env_enabled("PDMPSAMPLERSR_BRIDGESTAN_NATIVE") &&
+    Bool(_control_value(compile_options, :native, false)) &&
         push!(make_args, "CXXFLAGS+=-march=native")
-    if _compile_env_enabled("PDMPSAMPLERSR_BRIDGESTAN_CACHE")
-        build_dir = _cache_build_dir(path_to_stan_model, stanc_args, make_args)
+    if Bool(_control_value(compile_options, :cache, false))
+        build_dir = _cache_build_dir(path_to_stan_model, stanc_args, make_args;
+            cache_root=_control_value(compile_options, :cache_dir, nothing))
         return _with_compile_lock(joinpath(build_dir, ".compile.lock")) do
             source = _cached_stan_source(path_to_stan_model, stanc_args, make_args, build_dir)
             library = replace(source, r"\.stan$" => "_model.$(Libdl.dlext)")
@@ -614,22 +607,16 @@ function _flow_provenance(chains::PDMPChains, requested_flow::String,
     )
 end
 
-# Streaming storage for the bridge. Online retained-phase summaries are opt-in
-# through the environment, so research runners need no new arguments:
-# PDMPSAMPLERS_ONLINE_BATCHES (0 = off), PDMPSAMPLERS_ONLINE_GRID_SPACING
-# (physical time; NaN = no snapshots) and PDMPSAMPLERS_STREAM_EVENTS ("0" =
-# write no retained-phase event chunks), PDMPSAMPLERS_ONLINE_WARMUP_BATCHES
-# (0 = no warmup summaries). `T` is the absolute end time.
-function _bridge_trace_storage(directory, buffer_events, T)
-    batches = parse(Int, get(ENV, "PDMPSAMPLERS_ONLINE_BATCHES", "0"))
+# Online summary settings belong to this call, never to the worker process.
+function _bridge_trace_storage(directory, buffer_events, T, online_summaries=nothing)
+    enabled = !isnothing(online_summaries)
+    batches = enabled ? Int(_rget(online_summaries, :batches)) : 0
     return PDMPSamplers.StreamingTraceStorage(directory; buffer_events,
-        write_events=get(ENV, "PDMPSAMPLERS_STREAM_EVENTS", "1") != "0",
+        write_events=enabled ? Bool(_rget(online_summaries, :write_events)) : true,
         online_batches=batches,
         online_end_time=batches > 0 ? Float64(T) : NaN,
-        online_grid_spacing=parse(Float64,
-            get(ENV, "PDMPSAMPLERS_ONLINE_GRID_SPACING", "NaN")),
-        online_warmup_batches=parse(Int,
-            get(ENV, "PDMPSAMPLERS_ONLINE_WARMUP_BATCHES", "0")))
+        online_grid_spacing=enabled ? Float64(coalesce(_rget(online_summaries, :grid_spacing), NaN)) : NaN,
+        online_warmup_batches=enabled ? Int(_control_value(online_summaries, :warmup_batches, 0)) : 0)
 end
 
 function _pack_result(chains::PDMPChains; requested_flow::String="",
@@ -713,7 +700,8 @@ workspace before moving to the next coordinate so peak memory is bounded by
 one marginal rather than by the full parameter dimension.
 """
 function r_quantile(chains::PDMPChains, p::AbstractVector{<:Real};
-        chain::Int = 1, coordinate::Int = -1)
+        chain::Int = 1, coordinate::Int = -1, gc_interval::Int=16)
+    gc_interval >= 1 || throw(ArgumentError("gc_interval must be positive"))
     trace = chains.traces[chain]
     probabilities = collect(Float64, p)
     if coordinate != -1
@@ -722,9 +710,6 @@ function r_quantile(chains::PDMPChains, p::AbstractVector{<:Real};
 
     d = length(first(trace).position)
     result = Matrix{Float64}(undef, length(probabilities), d)
-    gc_interval = max(1, tryparse(Int, get(ENV,
-        "OMRF_QUANTILE_GC_INTERVAL", "16")) === nothing ? 16 :
-        tryparse(Int, get(ENV, "OMRF_QUANTILE_GC_INTERVAL", "16")))
     for j in 1:d
         result[:, j] .= Statistics.quantile(trace, probabilities; coordinate=j)
         # Sweep events can be O(length(trace)) and are not reused by another
@@ -1378,7 +1363,7 @@ function r_pdmp_stan(
         flow_type::String,
         algorithm_type::String,
         flow_mean,
-        flow_cov;
+        flow_cov; control=nothing,
         theta0 = nothing,
         free0 = nothing,
         stored_velocity0 = nothing,
@@ -1414,6 +1399,7 @@ function r_pdmp_stan(
         support_boundary_refresh_probe_time::Float64 = 1e-4,
         support_boundary_min_safe_time::Float64 = 1e-12,
         streaming_trace_directory::Union{Nothing,String}=nothing,
+        online_summaries=nothing,
         streaming_trace_buffer_events::Int=4096
     )
 
@@ -1429,7 +1415,7 @@ function r_pdmp_stan(
         can_stick_vec, unc_names_vec)
 
     prec = _to_precision(flow_cov_mat, d)
-    flow = build_flow(flow_type, prec, flow_mean_vec; adaptive_scheme, refresh_rate)
+    flow = build_flow(flow_type, prec, flow_mean_vec; control, adaptive_scheme, refresh_rate)
     isfinite(boomerang_variance_floor_fraction) &&
         boomerang_variance_floor_fraction >= 0 || throw(ArgumentError(
             "boomerang_variance_floor_fraction must be finite and nonnegative"))
@@ -1437,7 +1423,7 @@ function r_pdmp_stan(
         initial_variance_floor_fraction=boomerang_variance_floor_fraction)
     boom_floor_mask = _boomerang_logscale_floor_mask(unc_names_vec, d)
     initial_refresh_rate = try Float64(PDMPSamplers.refresh_rate(flow)) catch; NaN end
-    alg0 = build_algorithm(algorithm_type; c0, d, grid_n, grid_t_max, curvature_backend,
+    alg0 = build_algorithm(algorithm_type; control, c0, d, grid_n, grid_t_max, curvature_backend,
         grid_bound, grid_curvature_bound)
     alg = _build_sticky_event_algorithm(alg0, sticky, model_prior,
         parameter_prior_vec, slab_prior, can_stick_vec, flow, unc_names_vec)
@@ -1480,7 +1466,7 @@ function r_pdmp_stan(
                          progress = show_progress, n_chains = n_chains, threaded = threaded,
                          seed = seed,
                          adapter = adapter,
-                         warmup_stop = build_warmup_stop(t_warmup),
+                         warmup_stop = build_warmup_stop(t_warmup, control),
                          support_boundary_options = sbopts,
                          statistic_counter = PDMPSamplers.DevelStatisticCounter,
                          initial_free=isnothing(free0) ? nothing : _as_bool_vector(free0),
@@ -1488,12 +1474,12 @@ function r_pdmp_stan(
                             _as_float_vector(stored_velocity0),
                          trace_storage=isnothing(streaming_trace_directory) ?
                             nothing : _bridge_trace_storage(streaming_trace_directory,
-                                streaming_trace_buffer_events, T))
+                                streaming_trace_buffer_events, T, online_summaries))
     bridge_profile_after_sample_ns = time_ns()
     packed = _pack_result(chains; requested_flow=flow_type,
         adaptive_scheme, initial_refresh_rate,
         warmup_adaptation_interval, t_warmup)
-    if get(ENV, "OMRF_PROFILE_EXCLUSIVE", "") == "1"
+    if Bool(_control_value(control, :profile, false))
         packed["bridge_profile"] = Dict(
             "julia_construction_seconds" =>
                 (bridge_profile_before_sample_ns - bridge_profile_start_ns) / 1e9,
@@ -1512,7 +1498,7 @@ function r_pdmp_custom(
         flow_type::String,
         algorithm_type::String,
         flow_mean,
-        flow_cov;
+        flow_cov; control=nothing,
         c0::Float64 = 1e-2,
         grid_n::Int = 30,
         grid_t_max::Float64 = 2.0,
@@ -1543,6 +1529,7 @@ function r_pdmp_custom(
         support_boundary_refresh_probe_time::Float64 = 1e-4,
         support_boundary_min_safe_time::Float64 = 1e-12,
         streaming_trace_directory::Union{Nothing,String}=nothing,
+        online_summaries=nothing,
         streaming_trace_buffer_events::Int=4096
     )
 
@@ -1580,9 +1567,9 @@ function r_pdmp_custom(
     end
 
     prec = _to_precision(flow_cov_mat, d)
-    flow = build_flow(flow_type, prec, flow_mean_vec; adaptive_scheme, refresh_rate)
+    flow = build_flow(flow_type, prec, flow_mean_vec; control, adaptive_scheme, refresh_rate)
     initial_refresh_rate = try Float64(PDMPSamplers.refresh_rate(flow)) catch; NaN end
-    alg0 = build_algorithm(algorithm_type; c0, d, grid_n, grid_t_max,
+    alg0 = build_algorithm(algorithm_type; control, c0, d, grid_n, grid_t_max,
         grid_bound, grid_curvature_bound)
     alg = isnothing(slab_prior) ?
         wrap_sticky(alg0, sticky, model_prior, parameter_prior_vec, can_stick_vec) :
@@ -1608,7 +1595,7 @@ function r_pdmp_custom(
                          support_boundary_options = sbopts,
                          trace_storage=isnothing(streaming_trace_directory) ?
                             nothing : _bridge_trace_storage(streaming_trace_directory,
-                                streaming_trace_buffer_events, T))
+                                streaming_trace_buffer_events, T, online_summaries))
     return _pack_result(chains; requested_flow=flow_type,
         adaptive_scheme, initial_refresh_rate,
         warmup_adaptation_interval=nothing, t_warmup)
@@ -1735,7 +1722,7 @@ function _run_subsampling_brms_subsampled(lib_path_std::String,
         offsets::Matrix{Float64}, response::Matrix{Float64}, known_se::Vector{Float64},
         observation_multipliers::Vector{Float64},
         flow_type::String, algorithm_type::String, flow_mean, flow_cov,
-        output_csv::String; c0::Float64, grid_n::Int, grid_t_max::Float64,
+        output_csv::String; control=nothing, c0::Float64, grid_n::Int, grid_t_max::Float64,
         grid_bound::String, grid_curvature_bound::Union{Nothing,Float64},
         t0::Float64, T::Float64, t_warmup::Float64,
         adaptive_scheme::String, discretize_dt::Float64,
@@ -1783,9 +1770,9 @@ function _run_subsampling_brms_subsampled(lib_path_std::String,
     end
 
     prec = inv(Symmetric(_as_flow_cov(flow_cov, d)))
-    flow = build_flow(flow_type, prec, fmean; adaptive_scheme)
+    flow = build_flow(flow_type, prec, fmean; control, adaptive_scheme)
     initial_refresh_rate = try Float64(PDMPSamplers.refresh_rate(flow)) catch; NaN end
-    alg = build_algorithm(algorithm_type; c0, d, grid_n, grid_t_max,
+    alg = build_algorithm(algorithm_type; control, c0, d, grid_n, grid_t_max,
         curvature_backend, grid_bound, grid_curvature_bound)
     alg = wrap_sticky(alg, sticky, model_prior, parameter_prior, can_stick)
     if anchor_capacity == 0
@@ -1850,7 +1837,7 @@ function r_pdmp_brms_subsampling(
         algorithm_type::String,
         flow_mean,
         flow_cov,
-        output_csv::String;
+        output_csv::String; control=nothing, compile_options=nothing,
         c0::Float64 = 1e-2,
         grid_n::Int = 30,
         grid_t_max::Float64 = 2.0,
@@ -1876,7 +1863,7 @@ function r_pdmp_brms_subsampling(
         bank_capacity::Int = 20,
         use_hcv::Bool = false
     )
-    lib_path_std = _compile_model(stan_file)
+    lib_path_std = _compile_model(stan_file; compile_options)
 
     N_int = Int(N)
     m = Int(subsample_size)
@@ -1892,7 +1879,7 @@ function r_pdmp_brms_subsampling(
         Matrix{Float64}(offsets), Matrix{Float64}(response), Vector{Float64}(known_se),
         Vector{Float64}(observation_multipliers),
         flow_type, algorithm_type,
-        flow_mean, flow_cov, output_csv;
+        flow_mean, flow_cov, output_csv; control,
         c0, grid_n, grid_t_max, grid_bound, grid_curvature_bound, t0, T, t_warmup,
         adaptive_scheme, discretize_dt, show_progress, n_chains, threaded,
         seed, compute_lp, curvature_backend, sticky, can_stick, model_prior, parameter_prior,
@@ -1906,7 +1893,7 @@ function r_pdmp_stan_for_brms(
         algorithm_type::String,
         flow_mean,
         flow_cov,
-        output_csv::String;
+        output_csv::String; control=nothing,
         c0::Float64 = 1e-2,
         grid_n::Int = 30,
         grid_t_max::Float64 = 2.0,
@@ -1947,9 +1934,9 @@ function r_pdmp_stan_for_brms(
     flow_cov_mat = _as_flow_cov(flow_cov, d)
     prec = _to_precision(flow_cov_mat, d)
 
-    flow = build_flow(flow_type, prec, fmean; adaptive_scheme)
+    flow = build_flow(flow_type, prec, fmean; control, adaptive_scheme)
     initial_refresh_rate = try Float64(PDMPSamplers.refresh_rate(flow)) catch; NaN end
-    alg0 = build_algorithm(algorithm_type; c0, d, grid_n, grid_t_max,
+    alg0 = build_algorithm(algorithm_type; control, c0, d, grid_n, grid_t_max,
         curvature_backend, grid_bound, grid_curvature_bound)
     alg = isnothing(slab_prior) ?
         wrap_sticky(alg0, sticky, model_prior, parameter_prior_vec, can_stick_vec) :

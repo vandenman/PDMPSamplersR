@@ -28,6 +28,8 @@ reference:
     contents:
       - pdmp_sample
       - pdmp_sample_from_stanmodel
+      - sampler_control
+      - stan_compile_options
       - support_boundary_control
       - write_stan_json
       - stan_subsampling

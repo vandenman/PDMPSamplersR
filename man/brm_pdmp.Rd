@@ -42,6 +42,8 @@ brm_pdmp(
   stanvars = NULL,
   sample_prior = "no",
   save_model = NULL,
+  control = sampler_control(),
+  compile_options = stan_compile_options(),
   ...
 )
 }
@@ -173,6 +175,10 @@ is supported with `GridThinningStrategy` and requires positive warmup
 \item{sample_prior}{Currently only `"no"` is supported.}
 
 \item{save_model}{Optional file path to save the generated Stan code.}
+
+\item{control}{Additional call-local settings from \code{\link{sampler_control}}.}
+
+\item{compile_options}{Settings from \code{\link{stan_compile_options}}.}
 
 \item{...}{Additional arguments passed to [brms::brm()] for model setup.}
 }

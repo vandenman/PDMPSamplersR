@@ -5,6 +5,7 @@
 #' `--allow-undefined` and `USER_HEADER` settings.
 #'
 #' @param path Path to a Stan source file.
+#' @param compile_options Settings from \code{\link{stan_compile_options}}.
 #' @return The header path, or the compiled shared-library path.
 #' @name stan_subsampling
 #' @export
@@ -22,7 +23,8 @@ pdmp_subsample_hpp_path <- function() {
 
 #' @rdname stan_subsampling
 #' @export
-compile_pdmp_stan_model <- function(path) {
+compile_pdmp_stan_model <- function(path, compile_options = stan_compile_options()) {
+  compile_options <- .validate_compile_options(compile_options)
   validate_type(path, type = "character", n = 1)
   if (!file.exists(path) || !grepl("\\.stan$", path)) {
     cli::cli_abort("Argument {.arg path} must identify an existing Stan source file.")
@@ -30,7 +32,7 @@ compile_pdmp_stan_model <- function(path) {
   check_for_julia_setup()
   .pdmpsamplers_julia_call(
     "_compile_model_with_header",
-    normalizePath(path), pdmp_subsample_hpp_path()
+    normalizePath(path), pdmp_subsample_hpp_path(), compile_options = unclass(compile_options)
   )
 }
 

@@ -212,7 +212,7 @@ end
 # answers any displacement in that affine span in O(d); a linear flight needs
 # one direction and survives one velocity change, a harmonic flight needs two.
 # Entries are tied to the Hessian generation, which `_omrf_likelihood_hessian!`
-# advances.  `PDMPSAMPLERS_HCV_CACHE=0` disables reuse for comparison.
+# advances.  `enabled=false` disables reuse for comparison.
 # ---------------------------------------------------------------------------
 mutable struct OMRFHMemo
     generation::Int
@@ -238,6 +238,9 @@ OMRFHAffine(d::Int) = OMRFHAffine(-1, zeros(d), zeros(d), zeros(d, 2),
 
 mutable struct OMRFHCVProductCache
     enabled::Bool
+    research_diagnostics::Bool
+    check_fast_deterministic::Bool
+    max_deterministic_error::Float64
     generation::Int
     velocity::OMRFHMemo      # H * (free part of v)
     state::OMRFHMemo         # H * (x - anchor)
@@ -249,8 +252,8 @@ mutable struct OMRFHCVProductCache
     direct::Int
     reused::Int
 end
-OMRFHCVProductCache(d::Int) = OMRFHCVProductCache(
-    get(ENV, "PDMPSAMPLERS_HCV_CACHE", "1") != "0", 0,
+OMRFHCVProductCache(d::Int; enabled=true, research_diagnostics=false, check_fast_deterministic=false) = OMRFHCVProductCache(
+    enabled, research_diagnostics, check_fast_deterministic, 0.0, 0,
     OMRFHMemo(d), OMRFHMemo(d), OMRFHMemo(d), OMRFHMemo(d), OMRFHMemo(d),
     OMRFHAffine(d), OMRFHAffine(d), 0, 0)
 
@@ -2737,20 +2740,16 @@ function PDMPSamplers.deterministic_gradient!(out,
         PDMPSamplers.active_slab_potential_gradient!(slab.slab, slab.active_buf, x, slab.active)
         @. out = out - slab.all_buf + slab.active_buf
     end
-    _OMRF_CHECK_FAST_DETERMINISTIC[] && _omrf_check_fast_deterministic(out, cv, state)
+    context.hcv_cache.check_fast_deterministic && _omrf_check_fast_deterministic(out, cv, state, context.hcv_cache)
     return out
 end
 
-# Verification switch: compare the fast deterministic gradient with the
-# generic (full Hessian-product) evaluation at every call.
-const _OMRF_CHECK_FAST_DETERMINISTIC = Ref(
-    get(ENV, "PDMPSAMPLERSR_CHECK_FAST_DETERMINISTIC", "0") == "1")
-const _OMRF_FAST_DETERMINISTIC_MAXERR = Ref(0.0)
-function _omrf_check_fast_deterministic(out, cv, state)
+# Compare against the generic evaluation when explicitly requested for this oracle.
+function _omrf_check_fast_deterministic(out, cv, state, cache)
     reference = similar(out)
     cv.deterministic_gradient!(reference, state.ξ.x)
     err = maximum(abs.(reference .- out)) / max(1.0, maximum(abs.(reference)))
-    _OMRF_FAST_DETERMINISTIC_MAXERR[] = max(_OMRF_FAST_DETERMINISTIC_MAXERR[], err)
+    cache.max_deterministic_error = max(cache.max_deterministic_error, err)
     return nothing
 end
 
@@ -3932,7 +3931,7 @@ function OMRFWindowDiagnostics(width::Real)
         Dict{String,Any}[], Dict{Symbol,Float64}())
 end
 
-@inline _omrf_allocated_bytes() = _OMRF_RESEARCH_DIAGNOSTICS ? begin
+@inline _omrf_allocated_bytes(enabled::Bool) = enabled ? begin
     gc = Base.gc_num()
     UInt(gc.total_allocd + gc.allocd)
 end : UInt(0)
@@ -4038,7 +4037,7 @@ function _record_omrf_window!(manager::OMRFAnchorManager, state, flow, stats)
         window.last_subset_evaluations = subsets
         window.last_proposal_count = proposal_count
         window.last_certificate_sum = certificate_sum
-        window.last_allocated_bytes = _omrf_allocated_bytes()
+        window.last_allocated_bytes = _omrf_allocated_bytes(manager.oracle.residual_context.hcv_cache.research_diagnostics)
         empty!(window.last_pipeline_values)
         merge!(window.last_pipeline_values, _omrf_window_values(manager, stats))
     end
@@ -4058,7 +4057,7 @@ function _record_omrf_window!(manager::OMRFAnchorManager, state, flow, stats)
         proposal_delta = proposal_count - window.last_proposal_count
         certificate_delta = certificate_sum - window.last_certificate_sum
         intrinsic_delta = intrinsic_sum - window.last_intrinsic_sum
-        allocated_now = _omrf_allocated_bytes()
+        allocated_now = _omrf_allocated_bytes(manager.oracle.residual_context.hcv_cache.research_diagnostics)
         allocated_delta = allocated_now - window.last_allocated_bytes
         current_pipeline = _omrf_window_values(manager, stats)
         pipeline_delta = Dict{Symbol,Float64}(
@@ -4986,7 +4985,7 @@ end
 function (target::StanSubsamplingSlabDeterministic{
         <:OMRFAnalyticSubsamplingOracle,<:LogLinearGaussianScaleSlab})(
         out, x, direction)
-    started = _OMRF_RESEARCH_DIAGNOSTICS ? time_ns() : UInt64(0)
+    started = target.oracle.residual_context.hcv_cache.research_diagnostics ? time_ns() : UInt64(0)
     oracle = target.oracle
     _omrf_prior_hvp!(out, something(oracle.analytic_prior), x, direction)
     PDMPSamplers.active_prior_hvp!(target.slab, target.all_buf, x,
@@ -4994,7 +4993,7 @@ function (target::StanSubsamplingSlabDeterministic{
     PDMPSamplers.active_prior_hvp!(target.slab, target.active_buf, x,
         direction, target.active)
     @. out = out - target.all_buf + target.active_buf
-    if _OMRF_RESEARCH_DIAGNOSTICS
+    if target.oracle.residual_context.hcv_cache.research_diagnostics
         target.oracle.residual_context.counts.deterministic_hvp_calls += 1
         target.oracle.residual_context.counts.deterministic_hvp_seconds +=
             (time_ns() - started) * 1e-9
@@ -5062,7 +5061,7 @@ end
 
 
 function _build_stan_subsampling_model(ctx::StanSubsamplingContext,
-        unc_names, subsampling, anchor, slab_prior, can_stick;
+        unc_names, subsampling, anchor, slab_prior, can_stick; control=nothing,
         anchor_capacity::Integer=0, manage_during_warmup::Bool=true)
     N = Int(_rget(subsampling, :n_observations))
     m = Int(_rget(subsampling, :subsample_size))
@@ -5084,6 +5083,10 @@ function _build_stan_subsampling_model(ctx::StanSubsamplingContext,
         StanSubsamplingOracle(ctx, anchor, N)
     if oracle isa OMRFAnalyticSubsamplingOracle
         residual_context = oracle.residual_context
+        cache = residual_context.hcv_cache
+        cache.enabled = Bool(_control_value(control, :hcv_cache, true))
+        cache.research_diagnostics = Bool(_control_value(control, :research_diagnostics, false))
+        cache.check_fast_deterministic = Bool(_control_value(control, :check_fast_deterministic, false))
         people = size(residual_context.X, 1)
         N == people || throw(DimensionMismatch(
             "the OMRF person factorization requires $people likelihood " *
@@ -5350,7 +5353,7 @@ function r_stan_subsampling_diagnostics(lib_path::String, full_data::String,
 end
 
 function r_pdmp_stan_subsampling(prepared, subsampling, x0, flow_type::String,
-        algorithm_type::String, flow_mean, flow_cov;
+        algorithm_type::String, flow_mean, flow_cov; control=nothing,
         theta0=nothing,
         free0=nothing,
         stored_velocity0=nothing,
@@ -5384,6 +5387,7 @@ function r_pdmp_stan_subsampling(prepared, subsampling, x0, flow_type::String,
         support_boundary_min_safe_time::Float64=1e-12,
         diagnostic_window_width::Float64=0.0,
         streaming_trace_directory::Union{Nothing,String}=nothing,
+        online_summaries=nothing,
         streaming_trace_buffer_events::Int=4096)
     bridge_profile_start_ns = time_ns()
     algorithm_type in ("GridThinningStrategy", "ThinningStrategy") ||
@@ -5441,7 +5445,7 @@ function r_pdmp_stan_subsampling(prepared, subsampling, x0, flow_type::String,
     for ctx in contexts
         built = _build_stan_subsampling_model(ctx, unc_names,
             subsampling, anchor, slab_prior, can_stick_vec; anchor_capacity,
-            manage_during_warmup=true)
+            manage_during_warmup=true, control)
         if length(built) == 5
             model, _, _, adapter, manager = built
             adapter.update_dt = n_anchor_updates > 0 ?
@@ -5478,11 +5482,11 @@ function r_pdmp_stan_subsampling(prepared, subsampling, x0, flow_type::String,
     ) for ctx in contexts]
     d = first(models).d
     flow = build_flow(flow_type, _to_precision(_as_flow_cov(flow_cov, d), d),
-        _as_flow_mean(flow_mean, d); adaptive_scheme, refresh_rate)
+        _as_flow_mean(flow_mean, d); control, adaptive_scheme, refresh_rate)
     boom_options = PDMPSamplers.BoomerangAdaptationOptions(
         initial_variance_floor_fraction=boomerang_variance_floor_fraction)
     boom_floor_mask = _boomerang_logscale_floor_mask(unc_names, d)
-    alg0 = build_algorithm(algorithm_type; c0, d, grid_n, grid_t_max,
+    alg0 = build_algorithm(algorithm_type; control, c0, d, grid_n, grid_t_max,
         curvature_backend,
         grid_bound, grid_curvature_bound)
     parameter_prior_vec = isnothing(parameter_prior) ? nothing :
@@ -5513,7 +5517,7 @@ function r_pdmp_stan_subsampling(prepared, subsampling, x0, flow_type::String,
         pdmp_sample(initial, flow, models, alg, t0, T, t_warmup;
             progress=show_progress, threaded, seed,
             adapter,
-            warmup_stop=build_warmup_stop(t_warmup),
+            warmup_stop=build_warmup_stop(t_warmup, control),
             support_boundary_options=sbopts,
             statistic_counter=PDMPSamplers.DevelStatisticCounter,
             initial_free=isnothing(free0) ? nothing : _as_bool_vector(free0),
@@ -5521,7 +5525,7 @@ function r_pdmp_stan_subsampling(prepared, subsampling, x0, flow_type::String,
                 _as_float_vector(stored_velocity0),
             trace_storage=isnothing(streaming_trace_directory) ? nothing :
                 _bridge_trace_storage(streaming_trace_directory,
-                    streaming_trace_buffer_events, T))
+                    streaming_trace_buffer_events, T, online_summaries))
     else
         run_chain = function(i)
             seed_i = isnothing(seed) ? nothing : seed + i - 1
@@ -5539,7 +5543,7 @@ function r_pdmp_stan_subsampling(prepared, subsampling, x0, flow_type::String,
             chain = pdmp_sample(initial, flow_i, [models[i]], alg,
                 t0, T, t_warmup; progress=show_progress && i == 1,
                 adapter=adapter_i, seed=seed_i,
-                warmup_stop=build_warmup_stop(t_warmup),
+                warmup_stop=build_warmup_stop(t_warmup, control),
                 support_boundary_options=sbopts,
                 statistic_counter=PDMPSamplers.DevelStatisticCounter,
                 initial_free=isnothing(free0) ? nothing : _as_bool_vector(free0),
@@ -5549,7 +5553,7 @@ function r_pdmp_stan_subsampling(prepared, subsampling, x0, flow_type::String,
                     _bridge_trace_storage(joinpath(
                         streaming_trace_directory,
                         "chain_" * lpad(string(i), 4, '0')),
-                        streaming_trace_buffer_events, T))
+                        streaming_trace_buffer_events, T, online_summaries))
             return chain.traces[1], chain.stats[1], chain.initial_states[1],
                 chain.retained_initial_states[1], chain.terminal_states[1]
         end
@@ -5867,7 +5871,7 @@ function r_pdmp_stan_subsampling(prepared, subsampling, x0, flow_type::String,
         result["stats"]["main_full_gradient_calls"],
         subsampling_context_counters)
     result["subsampling"] = true
-    if get(ENV, "OMRF_PROFILE_EXCLUSIVE", "") == "1"
+    if Bool(_control_value(control, :profile, false))
         result["bridge_profile"] = Dict(
             "julia_construction_seconds" =>
                 (bridge_profile_before_sample_ns - bridge_profile_start_ns) / 1e9,

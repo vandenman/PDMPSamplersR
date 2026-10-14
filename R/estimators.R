@@ -251,9 +251,14 @@ cor.pdmp_result <- function(x, chain = 1L, ...) {
 #'
 #' @returns Numeric matrix (\code{length(probs)} x d) when \code{coordinate = -1},
 #'   or a numeric vector of length \code{length(probs)} for a single coordinate.
+#' @param gc_interval Collect temporary Julia workspaces after this many
+#'   coordinates when computing multiple untransformed quantiles (default 16).
 #' @importFrom stats quantile
 #' @export
-quantile.pdmp_result <- function(x, probs, transforms = NULL, chain = NULL, coordinate = -1L, ...) {
+quantile.pdmp_result <- function(x, probs, transforms = NULL, chain = NULL, coordinate = -1L, gc_interval = 16L, ...) {
+  if (!rlang::is_integerish(gc_interval, n = 1L, finite = TRUE) || gc_interval < 1L)
+    cli::cli_abort("{.arg gc_interval} must be a positive integer.")
+  gc_interval <- as.integer(gc_interval)
   .check_pdmp(x)
   chains <- .ensure_chains(x)
   specs  <- .transform_specs(transforms)
@@ -263,7 +268,7 @@ quantile.pdmp_result <- function(x, probs, transforms = NULL, chain = NULL, coor
     n <- length(chains)
     result_list <- lapply(seq_len(n), function(ch) {
       quantile.pdmp_result(x, probs = probs, transforms = transforms,
-                           chain = as.integer(ch), coordinate = coordinate)
+                           chain = as.integer(ch), coordinate = coordinate, gc_interval = gc_interval)
     })
     pooled <- Reduce(`+`, result_list) / n
     if (is.matrix(pooled)) rownames(pooled) <- NULL
@@ -278,7 +283,7 @@ quantile.pdmp_result <- function(x, probs, transforms = NULL, chain = NULL, coor
   if (length(probs) > 1L) {
     if (is.null(specs)) {
       return(.pdmpsamplers_julia_call(
-        "r_quantile", chains, as.numeric(probs),
+        "r_quantile", chains, as.numeric(probs), gc_interval = gc_interval,
         chain = chain, coordinate = coordinate
       ))
     }

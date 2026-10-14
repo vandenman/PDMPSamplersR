@@ -1,3 +1,9 @@
+# The test runner may configure a project through its environment; package
+# code itself accepts an R option or the setup argument, never that variable.
+.test_project_dir <- Sys.getenv("PDMPSAMPLERSR_CONFIG_JULIA_PROJECT_DIR", "")
+if (nzchar(.test_project_dir) && is.null(getOption("pdmpsamplersr_config_julia_project_dir")))
+  options(pdmpsamplersr_config_julia_project_dir = .test_project_dir)
+
 .test_availability_cache <- new.env(parent = emptyenv())
 
 cache_get_or_set <- function(key, expr) {

@@ -39,7 +39,8 @@ pdmp_sample(
   streaming_trace_directory = NULL,
   streaming_trace_buffer_events = 4096L,
   online_summaries = NULL,
-  support_boundary = support_boundary_control()
+  support_boundary = support_boundary_control(),
+  control = sampler_control()
 )
 }
 \arguments{
@@ -155,6 +156,8 @@ the summaries are read with \code{read_online_summaries()}.}
 
 \item{support_boundary}{A list created by \code{support_boundary_control()} that
 controls support-boundary diagnostics and heuristic event/refresh recovery.}
+
+\item{control}{Additional call-local settings from \code{\link{sampler_control}}.}
 }
 \value{
 A \code{pdmp_result} object. Use \code{mean}, \code{var},

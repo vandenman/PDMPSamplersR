@@ -157,7 +157,7 @@ validate_pdmp_params <- function(d, flow, algorithm, T, t0 = 0.0, t_warmup = 0.0
   validate_type(threaded, type = "logical", n = 1)
 
   if (threaded && rlang::is_false(.pdmpsamplers_julia_eval("PDMPSamplersRBridge.r_threading_available()"))) {
-    cli::cli_warn("Argument {.arg threaded} is set to TRUE but Julia was started with only one thread so this has no effect. Call Sys.setenv(\"JULIA_NUM_THREADS\"=<number>) to set the desired number of threads at the start of an analysis.")
+    cli::cli_warn("Argument {.arg threaded} is set to TRUE but Julia was started with only one thread so this has no effect. Set JULIA_NUM_THREADS before starting R to select the number of Julia threads.")
   }
 
   if (!is.null(seed)) {
@@ -556,6 +556,7 @@ validate_support_boundary_control <- function(support_boundary) {
 #'   \code{readRDS()} work without any extra steps. Set to \code{FALSE} to skip
 #'   the extraction and keep only the live Julia reference.
 #'   This can save time and memory if you don't need to save the result or if you plan to call \code{materialize()} manually later.
+#' @param control Additional call-local settings from \code{\link{sampler_control}}.
 #' @param online_summaries \code{NULL} (default) or options from
 #'   \code{online_summary_options()}. Requires \code{trace_storage = "streaming"};
 #'   the summaries are read with \code{read_online_summaries()}.
@@ -600,7 +601,8 @@ pdmp_sample <- function(f, d,
                         streaming_trace_directory = NULL,
                         streaming_trace_buffer_events = 4096L,
                         online_summaries = NULL,
-                        support_boundary = support_boundary_control()) {
+                        support_boundary = support_boundary_control(),
+                        control = sampler_control()) {
 
   # Validate function argument (fail fast before Julia setup)
   if (!rlang::is_function(f)) {
@@ -612,8 +614,8 @@ pdmp_sample <- function(f, d,
 
   # Use common validation function
   trace_storage <- match.arg(trace_storage)
-  restore_online_env <- .set_online_summary_env(online_summaries, trace_storage)
-  on.exit(restore_online_env(), add = TRUE)
+  control <- .validate_sampler_control(control)
+  .validate_online_summaries(online_summaries, trace_storage)
   streaming_trace_buffer_events <- .validate_streaming_storage(
     trace_storage, streaming_trace_directory, streaming_trace_buffer_events)
   params <- validate_pdmp_params(d, flow, algorithm, T, t0, t_warmup, flow_mean, flow_cov,
@@ -680,6 +682,8 @@ pdmp_sample <- function(f, d,
   JuliaCall::julia_assign("streaming_trace_directory",
     if (identical(trace_storage, "streaming"))
       normalizePath(streaming_trace_directory, mustWork = FALSE) else NULL)
+  JuliaCall::julia_assign("control", unclass(control))
+  JuliaCall::julia_assign("online_summaries", unclass(online_summaries))
   JuliaCall::julia_assign("streaming_trace_buffer_events",
                           streaming_trace_buffer_events)
   result <- .pdmpsamplers_julia_eval("PDMPSamplersRBridge.r_pdmp_custom(
@@ -705,6 +709,7 @@ pdmp_sample <- function(f, d,
     support_boundary_refresh_probe_time = support_boundary_refresh_probe_time,
     support_boundary_min_safe_time = support_boundary_min_safe_time,
     streaming_trace_directory = streaming_trace_directory,
+    control = control, online_summaries = online_summaries,
     streaming_trace_buffer_events = streaming_trace_buffer_events
   );")
   if (is.environment(result)) result <- as.list(result)
@@ -799,6 +804,7 @@ pdmp_sample <- function(f, d,
 #'   \code{quantile}, etc. for continuous-time estimators, or
 #'   \code{discretize} to obtain a sample matrix.
 #'
+#' @param compile_options Settings from \code{\link{stan_compile_options}}.
 #' @export
 pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
                         subsampling = NULL,
@@ -835,10 +841,13 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
                         streaming_trace_directory = NULL,
                         streaming_trace_buffer_events = 4096L,
                         online_summaries = NULL,
-                        support_boundary = support_boundary_control()) {
+                        support_boundary = support_boundary_control(),
+                        control = sampler_control(),
+                        compile_options = stan_compile_options()) {
 
-  bridge_profile_enabled <- identical(
-    Sys.getenv("OMRF_PROFILE_EXCLUSIVE", "0"), "1")
+  control <- .validate_sampler_control(control)
+  compile_options <- .validate_compile_options(compile_options)
+  bridge_profile_enabled <- control$profile
   bridge_profile_started <- proc.time()[["elapsed"]]
   bridge_profile_last <- bridge_profile_started
   bridge_profile <- list()
@@ -854,8 +863,7 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
   validate_type(path_to_stanmodel, type = "character", n = 1)
   flow <- match.arg(flow)
   trace_storage <- match.arg(trace_storage)
-  restore_online_env <- .set_online_summary_env(online_summaries, trace_storage)
-  on.exit(restore_online_env(), add = TRUE)
+  .validate_online_summaries(online_summaries, trace_storage)
   streaming_trace_buffer_events <- .validate_streaming_storage(
     trace_storage, streaming_trace_directory, streaming_trace_buffer_events)
   algorithm <- match.arg(algorithm)
@@ -1089,18 +1097,14 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
     prior_standata_path <- normalizePath(prior_standata_path, mustWork = TRUE)
   }
 
-  compile_control_enabled <- any(tolower(Sys.getenv(c(
-    "PDMPSAMPLERSR_BRIDGESTAN_CACHE",
-    "PDMPSAMPLERSR_BRIDGESTAN_NATIVE",
-    "PDMPSAMPLERSR_BRIDGESTAN_STANC_O1"
-  ), "false")) %in% c("1", "true", "yes", "y"))
-  if (!is.null(subsampling) && grepl("\\.stan$", path_to_stanmodel)) {
-    path_to_stanmodel <- .pdmpsamplers_julia_call(
-      "_compile_model_with_header", path_to_stanmodel,
-      pdmp_subsample_hpp_path()
-    )
-  } else if (compile_control_enabled && grepl("\\.stan$", path_to_stanmodel)) {
-    path_to_stanmodel <- .pdmpsamplers_julia_call("_compile_model", path_to_stanmodel)
+  if (grepl("\\.stan$", path_to_stanmodel)) {
+    path_to_stanmodel <- if (!is.null(subsampling)) {
+      .pdmpsamplers_julia_call("_compile_model_with_header", path_to_stanmodel,
+        pdmp_subsample_hpp_path(), compile_options = unclass(compile_options))
+    } else if (any(unlist(compile_options[c("cache", "native", "optimize")]))) {
+      .pdmpsamplers_julia_call("_compile_model", path_to_stanmodel,
+        compile_options = unclass(compile_options))
+    } else path_to_stanmodel
   }
   bridge_profile_mark("stan_compile_seconds")
 
@@ -1213,7 +1217,7 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
       parameter_order_ok <- identical(as.character(spec$parameter_order),
                                       as.character(unc_names))
       if (!dataset_ok || !envelope_ok || !parameter_order_ok) {
-        if (identical(Sys.getenv("OMRF_PROFILE_EXCLUSIVE", "0"), "1") &&
+        if (control$profile &&
             !envelope_ok) {
           message("OMRF bank envelope diagnostic: expected=",
                   spec$envelope_identity$hash, " actual=", envelope_hash,
@@ -1247,6 +1251,7 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
   if (verify_flow_specification) {
     resolved_preflight <- .pdmpsamplers_julia_call(
       "r_resolve_flow_spec", params$flow, params$flow_mean, params$flow_cov,
+      control = unclass(control),
       adaptive_scheme = params$adaptive_scheme,
       refresh_rate = as.numeric(refresh_rate))
     if (is.environment(resolved_preflight)) resolved_preflight <- as.list(resolved_preflight)
@@ -1312,6 +1317,8 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
   JuliaCall::julia_assign("streaming_trace_directory",
     if (identical(trace_storage, "streaming"))
       normalizePath(streaming_trace_directory, mustWork = FALSE) else NULL)
+  JuliaCall::julia_assign("control", unclass(control))
+  JuliaCall::julia_assign("online_summaries", unclass(online_summaries))
   JuliaCall::julia_assign("streaming_trace_buffer_events",
                           streaming_trace_buffer_events)
 
@@ -1345,6 +1352,7 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
       support_boundary_refresh_probe_time = support_boundary_refresh_probe_time,
       support_boundary_min_safe_time = support_boundary_min_safe_time,
       streaming_trace_directory = streaming_trace_directory,
+      control = control, online_summaries = online_summaries,
       streaming_trace_buffer_events = streaming_trace_buffer_events
     );")
   } else {
@@ -1384,6 +1392,7 @@ pdmp_sample_from_stanmodel <- function(path_to_stanmodel, standata,
       support_boundary_refresh_probe_time = support_boundary_refresh_probe_time,
       support_boundary_min_safe_time = support_boundary_min_safe_time,
       streaming_trace_directory = streaming_trace_directory,
+      control = control, online_summaries = online_summaries,
       streaming_trace_buffer_events = streaming_trace_buffer_events
     );")
   }

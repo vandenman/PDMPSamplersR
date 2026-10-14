@@ -53,7 +53,9 @@ pdmp_sample_from_stanmodel(
   streaming_trace_directory = NULL,
   streaming_trace_buffer_events = 4096L,
   online_summaries = NULL,
-  support_boundary = support_boundary_control()
+  support_boundary = support_boundary_control(),
+  control = sampler_control(),
+  compile_options = stan_compile_options()
 )
 }
 \arguments{
@@ -241,6 +243,10 @@ the summaries are read with \code{read_online_summaries()}.}
 
 \item{support_boundary}{A list created by \code{support_boundary_control()} that
 controls support-boundary diagnostics and heuristic event/refresh recovery.}
+
+\item{control}{Additional call-local settings from \code{\link{sampler_control}}.}
+
+\item{compile_options}{Settings from \code{\link{stan_compile_options}}.}
 }
 \value{
 A \code{pdmp_result} object. Use \code{mean}, \code{var},

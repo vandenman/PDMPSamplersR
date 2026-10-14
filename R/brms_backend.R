@@ -96,6 +96,8 @@
 #'   (automatically set to one fifth of the sampling time when omitted).
 #' @param stanvars Optional `stanvar` object for custom Stan code.
 #' @param sample_prior Currently only `"no"` is supported.
+#' @param control Additional call-local settings from \code{\link{sampler_control}}.
+#' @param compile_options Settings from \code{\link{stan_compile_options}}.
 #' @param save_model Optional file path to save the generated Stan code.
 #' @param ... Additional arguments passed to [brms::brm()] for model setup.
 #'
@@ -158,8 +160,11 @@ brm_pdmp <- function(
     kappa = NULL, slab_prior = NULL,
     stanvars = NULL, sample_prior = "no",
     save_model = NULL,
+    control = sampler_control(), compile_options = stan_compile_options(),
     ...
 ) {
+  control <- .validate_sampler_control(control)
+  compile_options <- .validate_compile_options(compile_options)
   require_brm_pdmp_namespace("brms")
   require_brm_pdmp_namespace("rstan")
 
@@ -356,6 +361,11 @@ brm_pdmp <- function(
   if (!is.null(save_model))
     cat(scode, file = save_model)
 
+  compiled_stan_file <- normalizePath(stan_file, mustWork = TRUE)
+  if (any(unlist(compile_options[c("cache", "native", "optimize")]))) {
+    compiled_stan_file <- .pdmpsamplers_julia_call("_compile_model",
+      compiled_stan_file, compile_options = unclass(compile_options))
+  }
   csv_file <- tempfile(fileext = ".csv")
   jl_flow_mean <- if (is.null(flow_mean)) numeric(0) else flow_mean
   jl_flow_cov  <- if (is.null(flow_cov)) matrix(numeric(0), nrow = 0, ncol = 0) else flow_cov
@@ -373,7 +383,7 @@ brm_pdmp <- function(
 
     unc_names <- .pdmpsamplers_julia_call(
       "r_get_param_unc_names",
-      normalizePath(stan_file, mustWork = TRUE),
+      compiled_stan_file,
       normalizePath(data_file, mustWork = TRUE)
     )
     if (!is.null(slab_prior)) {
@@ -421,7 +431,7 @@ brm_pdmp <- function(
   if (subsampled) {
     jl_result <- .pdmpsamplers_julia_call(
       "r_pdmp_brms_subsampling",
-      normalizePath(stan_file, mustWork = TRUE),
+      compiled_stan_file,
       normalizePath(data_file, mustWork = TRUE),
       normalizePath(data_prior_file, mustWork = TRUE),
       as.integer(N), subsample_size,
@@ -432,6 +442,7 @@ brm_pdmp <- function(
       flow, algorithm,
       jl_flow_mean, jl_flow_cov,
       csv_file,
+      control = unclass(control),
       c0 = c0,
       grid_n = as.integer(grid_n),
       grid_t_max = grid_t_max,
@@ -456,11 +467,12 @@ brm_pdmp <- function(
   } else {
     jl_result <- .pdmpsamplers_julia_call(
       "r_pdmp_stan_for_brms",
-      normalizePath(stan_file, mustWork = TRUE),
+      compiled_stan_file,
       normalizePath(data_file, mustWork = TRUE),
       flow, algorithm,
       jl_flow_mean, jl_flow_cov,
       csv_file,
+      control = unclass(control),
       c0 = c0,
       grid_n = as.integer(grid_n),
       grid_t_max = grid_t_max,

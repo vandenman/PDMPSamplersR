@@ -4,7 +4,15 @@
 \alias{quantile.pdmp_result}
 \title{Continuous-time quantile of PDMP trace}
 \usage{
-\method{quantile}{pdmp_result}(x, probs, transforms = NULL, chain = NULL, coordinate = -1L, ...)
+\method{quantile}{pdmp_result}(
+  x,
+  probs,
+  transforms = NULL,
+  chain = NULL,
+  coordinate = -1L,
+  gc_interval = 16L,
+  ...
+)
 }
 \arguments{
 \item{x}{A \code{pdmp_result} object.}
@@ -17,6 +25,9 @@
 all chains (default: \code{NULL}).}
 
 \item{coordinate}{Integer coordinate index, or -1 for all (default: -1).}
+
+\item{gc_interval}{Collect temporary Julia workspaces after this many
+coordinates when computing multiple untransformed quantiles (default 16).}
 
 \item{...}{Ignored.}
 }

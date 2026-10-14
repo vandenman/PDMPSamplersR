@@ -22,7 +22,9 @@ Returns a standard `brmsfit` object with all post-processing
       <ul class="navbar-nav me-auto"><li class="active nav-item"><a class="nav-link" href="../reference/index.html">Reference</a></li>
 <li class="nav-item dropdown">
   <button class="nav-link dropdown-toggle" type="button" id="dropdown-articles" data-bs-toggle="dropdown" aria-expanded="false" aria-haspopup="true">Articles</button>
-  <ul class="dropdown-menu" aria-labelledby="dropdown-articles"><li><a class="dropdown-item" href="../articles/stan-examples.html">Sampling from Stan models with PDMPSamplersR</a></li>
+  <ul class="dropdown-menu" aria-labelledby="dropdown-articles"><li><a class="dropdown-item" href="../articles/omrf-custom-stan-subsampling.html">Subsampling custom-Stan sampling for an ordinal Markov random field</a></li>
+    <li><a class="dropdown-item" href="../articles/riclpm-dependent-slab.html">Dependent slab selection in a small RI-CLPM</a></li>
+    <li><a class="dropdown-item" href="../articles/stan-examples.html">Sampling from Stan models with PDMPSamplersR</a></li>
   </ul></li>
       </ul><ul class="navbar-nav"><li class="nav-item"><form class="form-inline" role="search">
  <input class="form-control" type="search" name="search-input" id="search-input" autocomplete="off" aria-label="Search site" placeholder="Search for" data-search-index="../search.json"></form></li>
@@ -55,9 +57,10 @@ Returns a standard `brmsfit` object with all post-processing
 <span>  family <span class="op">=</span> <span class="fu"><a href="https://rdrr.io/r/stats/family.html" class="external-link">gaussian</a></span><span class="op">(</span><span class="op">)</span>,</span>
 <span>  prior <span class="op">=</span> <span class="cn">NULL</span>,</span>
 <span>  flow <span class="op">=</span> <span class="fu"><a href="https://rdrr.io/r/base/c.html" class="external-link">c</a></span><span class="op">(</span><span class="st">"ZigZag"</span>, <span class="st">"BouncyParticle"</span>, <span class="st">"Boomerang"</span>, <span class="st">"AdaptiveBoomerang"</span>,</span>
-<span>    <span class="st">"PreconditionedZigZag"</span>, <span class="st">"PreconditionedBPS"</span><span class="op">)</span>,</span>
+<span>    <span class="st">"PreconditionedZigZag"</span>, <span class="st">"PreconditionedBPS"</span>, <span class="st">"DensePreconditionedZigZag"</span>,</span>
+<span>    <span class="st">"DensePreconditionedBPS"</span><span class="op">)</span>,</span>
 <span>  algorithm <span class="op">=</span> <span class="fu"><a href="https://rdrr.io/r/base/c.html" class="external-link">c</a></span><span class="op">(</span><span class="st">"GridThinningStrategy"</span>, <span class="st">"ThinningStrategy"</span>, <span class="st">"RootsPoissonStrategy"</span><span class="op">)</span>,</span>
-<span>  adaptive_scheme <span class="op">=</span> <span class="fu"><a href="https://rdrr.io/r/base/c.html" class="external-link">c</a></span><span class="op">(</span><span class="st">"diagonal"</span>, <span class="st">"fullrank"</span><span class="op">)</span>,</span>
+<span>  adaptive_scheme <span class="op">=</span> <span class="fu"><a href="https://rdrr.io/r/base/c.html" class="external-link">c</a></span><span class="op">(</span><span class="st">"diagonal"</span>, <span class="st">"fullrank"</span>, <span class="st">"lowrank"</span><span class="op">)</span>,</span>
 <span>  T <span class="op">=</span> <span class="fl">50000</span>,</span>
 <span>  t0 <span class="op">=</span> <span class="fl">0</span>,</span>
 <span>  t_warmup <span class="op">=</span> <span class="fl">0</span>,</span>
@@ -73,22 +76,21 @@ Returns a standard `brmsfit` object with all post-processing
 <span>  seed <span class="op">=</span> <span class="cn">NULL</span>,</span>
 <span>  compute_lp <span class="op">=</span> <span class="cn">FALSE</span>,</span>
 <span>  subsample_size <span class="op">=</span> <span class="cn">NULL</span>,</span>
-<span>  n_anchor_updates <span class="op">=</span> <span class="fl">10L</span>,</span>
-<span>  resample_dt <span class="op">=</span> <span class="cn">NULL</span>,</span>
-<span>  hvp_mode <span class="op">=</span> <span class="fu"><a href="https://rdrr.io/r/base/c.html" class="external-link">c</a></span><span class="op">(</span><span class="st">"scaled"</span>, <span class="st">"none"</span><span class="op">)</span>,</span>
+<span>  n_anchor_updates <span class="op">=</span> <span class="fl">0L</span>,</span>
 <span>  use_hcv <span class="op">=</span> <span class="cn">FALSE</span>,</span>
 <span>  use_anchor_bank <span class="op">=</span> <span class="cn">FALSE</span>,</span>
 <span>  bank_capacity <span class="op">=</span> <span class="fl">20L</span>,</span>
-<span>  use_fd_hvp <span class="op">=</span> <span class="cn">FALSE</span>,</span>
-<span>  post_warmup_simplify <span class="op">=</span> <span class="cn">FALSE</span>,</span>
-<span>  use_fd_hcv <span class="op">=</span> <span class="cn">FALSE</span>,</span>
+<span>  curvature_backend <span class="op">=</span> <span class="fu"><a href="https://rdrr.io/r/base/c.html" class="external-link">c</a></span><span class="op">(</span><span class="st">"exact"</span>, <span class="st">"finite_difference"</span><span class="op">)</span>,</span>
 <span>  sticky <span class="op">=</span> <span class="cn">FALSE</span>,</span>
 <span>  can_stick <span class="op">=</span> <span class="cn">NULL</span>,</span>
 <span>  model_prior <span class="op">=</span> <span class="cn">NULL</span>,</span>
 <span>  kappa <span class="op">=</span> <span class="cn">NULL</span>,</span>
+<span>  slab_prior <span class="op">=</span> <span class="cn">NULL</span>,</span>
 <span>  stanvars <span class="op">=</span> <span class="cn">NULL</span>,</span>
 <span>  sample_prior <span class="op">=</span> <span class="st">"no"</span>,</span>
 <span>  save_model <span class="op">=</span> <span class="cn">NULL</span>,</span>
+<span>  control <span class="op">=</span> <span class="fu"><a href="sampler_control.html">sampler_control</a></span><span class="op">(</span><span class="op">)</span>,</span>
+<span>  compile_options <span class="op">=</span> <span class="fu"><a href="stan_compile_options.html">stan_compile_options</a></span><span class="op">(</span><span class="op">)</span>,</span>
 <span>  <span class="va">...</span></span>
 <span><span class="op">)</span></span></code></pre></div>
     </div>
@@ -122,7 +124,8 @@ Returns a standard `brmsfit` object with all post-processing
 
 
 <dt id="arg-adaptive-scheme">adaptive_scheme<a class="anchor" aria-label="anchor" href="#arg-adaptive-scheme"></a></dt>
-<dd><p>Character string for preconditioner adaptation.</p></dd>
+<dd><p>Character string for AdaptiveBoomerang covariance
+adaptation: `"diagonal"`, `"fullrank"`, or `"lowrank"`.</p></dd>
 
 
 <dt id="arg-t">T<a class="anchor" aria-label="anchor" href="#arg-t"></a></dt>
@@ -140,7 +143,10 @@ set to 20% of the sampling time.</p></dd>
 
 
 <dt id="arg-flow-mean">flow_mean<a class="anchor" aria-label="anchor" href="#arg-flow-mean"></a></dt>
-<dd><p>Numeric vector for the flow reference mean, or NULL.</p></dd>
+<dd><p>Numeric vector for the flow reference mean, or NULL. For
+observation subsampling this is also the fixed control-variate anchor and
+initial position; supplying a posterior mode or other representative point
+can materially tighten the residual envelope.</p></dd>
 
 
 <dt id="arg-flow-cov">flow_cov<a class="anchor" aria-label="anchor" href="#arg-flow-cov"></a></dt>
@@ -148,7 +154,9 @@ set to 20% of the sampling time.</p></dd>
 
 
 <dt id="arg-c-">c0<a class="anchor" aria-label="anchor" href="#arg-c-"></a></dt>
-<dd><p>Numeric thinning bound constant.</p></dd>
+<dd><p>Numeric thinning bound constant. With `ThinningStrategy` this
+user-configured bound must dominate the deterministic subsampling component;
+violations are detected and stop the sampler.</p></dd>
 
 
 <dt id="arg-grid-n">grid_n<a class="anchor" aria-label="anchor" href="#arg-grid-n"></a></dt>
@@ -190,73 +198,61 @@ for each sample (default: FALSE). Adds overhead but enables
 
 <dt id="arg-subsample-size">subsample_size<a class="anchor" aria-label="anchor" href="#arg-subsample-size"></a></dt>
 <dd><p>Integer number of observations per subsample,
-or NULL (default) for full-data gradients. When non-NULL, a
-BridgeStan control-variate subsampled gradient is used. Must be
-less than `nrow(data)`. Fixed-effects and random-effects models are
-supported for subsampling.</p></dd>
+or NULL (default) for full-data gradients. With `GridThinningStrategy`
+or a representable `ThinningStrategy` envelope,
+subsampling acceleration is selected automatically when affine predictor,
+first-batch likelihood, and trajectory providers are all available for
+the requested dynamics. Ineligible models use exact full gradients.</p></dd>
 
 
 <dt id="arg-n-anchor-updates">n_anchor_updates<a class="anchor" aria-label="anchor" href="#arg-n-anchor-updates"></a></dt>
 <dd><p>Integer number of anchor updates during warmup
-(default: 10). Only used when `subsample_size` is non-NULL.</p></dd>
-
-
-<dt id="arg-resample-dt">resample_dt<a class="anchor" aria-label="anchor" href="#arg-resample-dt"></a></dt>
-<dd><p>Numeric time step for resampling, or NULL (default)
-for no resampling. Only used when `subsample_size` is non-NULL.</p></dd>
-
-
-<dt id="arg-hvp-mode">hvp_mode<a class="anchor" aria-label="anchor" href="#arg-hvp-mode"></a></dt>
-<dd><p>Character string controlling Hessian-vector product
-scaling in subsampled gradients. One of `"scaled"` (default) or
-`"none"`.</p></dd>
+(default: 0). For analytic subsampling sampling, each update prepares a
+coherent anchor state containing the full and deterministic anchor
+gradients, cached likelihood predictors, and residual envelope.</p></dd>
 
 
 <dt id="arg-use-hcv">use_hcv<a class="anchor" aria-label="anchor" href="#arg-use-hcv"></a></dt>
-<dd><p>Logical; enable damped Hessian control variate (HCV)
-correction for subsampled gradients (default: FALSE). Requires
-`subsample_size` to be set. Adds a second-order correction that
-reduces gradient variance near the anchor.</p></dd>
+<dd><p>Logical; enable the certified analytic damped Hessian
+control variate for subsampling affine Bernoulli-logit or binomial-logit
+sampling (default: FALSE). Its likelihood Hessian and Taylor-remainder
+envelope are prepared with each anchor, with Cauchy damping
+`d / (d + ||x - anchor||^2)` in `d` unconstrained dimensions;
+finite-difference HCV is not used.</p></dd>
 
 
 <dt id="arg-use-anchor-bank">use_anchor_bank<a class="anchor" aria-label="anchor" href="#arg-use-anchor-bank"></a></dt>
-<dd><p>Logical; enable anchor bank with LRU eviction
-for subsampled gradients (default: FALSE). Requires `subsample_size`
-to be set. Maintains multiple cached anchor points and selects the
-nearest one at each trajectory step.</p></dd>
+<dd><p>Logical; retain prepared warmup anchors and select
+the nearest one at event boundaries (default: FALSE). Selection is
+chain-local and performs no full-data gradient or envelope rebuild.
+Requires `n_anchor_updates &gt; 0`; use only `n_anchor_updates` for the
+lower-memory single-anchor update mode.</p></dd>
 
 
 <dt id="arg-bank-capacity">bank_capacity<a class="anchor" aria-label="anchor" href="#arg-bank-capacity"></a></dt>
 <dd><p>Integer capacity of the anchor bank (default: 20).
-Only used when `use_anchor_bank` is TRUE.</p></dd>
+Least-recently-used entries are replaced during warmup. Each populated
+entry stores predictor and kernel caches of order `N * K` plus a complete
+residual envelope of order `N * R`; memory therefore grows linearly in
+the populated capacity and can be substantial for large `N` or many
+growth-envelope components. Benchmark representative models before using
+a large capacity. Analytic HCV additionally stores one dense `d * d`
+likelihood Hessian per populated anchor.</p></dd>
 
 
-<dt id="arg-use-fd-hvp">use_fd_hvp<a class="anchor" aria-label="anchor" href="#arg-use-fd-hvp"></a></dt>
-<dd><p>Logical; use finite-difference directional curvature
-instead of BridgeStan's Hessian-vector product (default: FALSE).
-Replaces each HVP call (2-3x gradient cost) with one extra gradient
-call, giving ~30-50% per-grid-point savings.</p></dd>
-
-
-<dt id="arg-post-warmup-simplify">post_warmup_simplify<a class="anchor" aria-label="anchor" href="#arg-post-warmup-simplify"></a></dt>
-<dd><p>Logical; switch to a fast constant-bound
-thinning mode after warmup when the sampler is well-adapted
-(default: FALSE). Activates when the reflection ratio is below 30%
-and at least 10 events have been observed.</p></dd>
-
-
-<dt id="arg-use-fd-hcv">use_fd_hcv<a class="anchor" aria-label="anchor" href="#arg-use-fd-hcv"></a></dt>
-<dd><p>Logical; use finite-difference approximation for the
-HVP inside the HCV correction (default: FALSE). Replaces the exact
-BridgeStan HVP at the anchor with a cheaper gradient-based FD
-approximation. Also disables HVP for grid thinning. Only used when
-`use_hcv` is TRUE.</p></dd>
+<dt id="arg-curvature-backend">curvature_backend<a class="anchor" aria-label="anchor" href="#arg-curvature-backend"></a></dt>
+<dd><p>Directional curvature evaluation: `"exact"`
+(default) uses Hessian-vector products; `"finite_difference"` uses shifted
+gradients and has finite-difference truncation error.</p></dd>
 
 
 <dt id="arg-sticky">sticky<a class="anchor" aria-label="anchor" href="#arg-sticky"></a></dt>
 <dd><p>Logical; enable spike-and-slab variable selection for
 population-level coefficients (default: FALSE). Requires
-`model_prior` to be set.</p></dd>
+`model_prior` to be set. Sticky transitions redraw the complete velocity
+from the exact law on each active coordinate stratum; no pre-freeze
+velocity is restored. This applies to every supported dynamics, including
+dense-preconditioned Zig-Zag.</p></dd>
 
 
 <dt id="arg-can-stick">can_stick<a class="anchor" aria-label="anchor" href="#arg-can-stick"></a></dt>
@@ -267,16 +263,26 @@ non-intercept population-level coefficients are candidates.</p></dd>
 
 
 <dt id="arg-model-prior">model_prior<a class="anchor" aria-label="anchor" href="#arg-model-prior"></a></dt>
-<dd><p>A [bernoulli()] or [betabernoulli()] object
-specifying the prior on model space. Required when `sticky = TRUE`.</p></dd>
+<dd><p>A [bernoulli()] or [betabernoulli()] object specifying
+the prior on model space.</p></dd>
 
 
 <dt id="arg-kappa">kappa<a class="anchor" aria-label="anchor" href="#arg-kappa"></a></dt>
 <dd><p>Optional numeric vector of slab densities at zero for each
-stickable coordinate (κ in the sticky PDMP literature). If omitted,
+stickable coordinate (kappa in the sticky PDMP literature). If omitted,
 derived automatically from the brms prior specification (only
 `normal(0, s)` and `student_t(df, 0, s)` are supported for automatic
 derivation).</p></dd>
+
+
+<dt id="arg-slab-prior">slab_prior<a class="anchor" aria-label="anchor" href="#arg-slab-prior"></a></dt>
+<dd><p>Optional dependent slab prior created by
+[dense_gaussian_slab()], [exchangeable_gaussian_slab()], or
+[loglinear_gaussian_scale_slab()]. Mutually exclusive with `kappa`. Full-data
+dependent slabs use the brms prior-only data as the base prior target;
+subsampled brms dependent slabs are not yet supported. Adaptive Boomerang
+is supported with `GridThinningStrategy` and requires positive warmup
+(automatically set to one fifth of the sampling time when omitted).</p></dd>
 
 
 <dt id="arg-stanvars">stanvars<a class="anchor" aria-label="anchor" href="#arg-stanvars"></a></dt>
@@ -289,6 +295,14 @@ derivation).</p></dd>
 
 <dt id="arg-save-model">save_model<a class="anchor" aria-label="anchor" href="#arg-save-model"></a></dt>
 <dd><p>Optional file path to save the generated Stan code.</p></dd>
+
+
+<dt id="arg-control">control<a class="anchor" aria-label="anchor" href="#arg-control"></a></dt>
+<dd><p>Additional call-local settings from <code><a href="sampler_control.html">sampler_control</a></code>.</p></dd>
+
+
+<dt id="arg-compile-options">compile_options<a class="anchor" aria-label="anchor" href="#arg-compile-options"></a></dt>
+<dd><p>Settings from <code><a href="stan_compile_options.html">stan_compile_options</a></code>.</p></dd>
 
 
 <dt id="arg--">...<a class="anchor" aria-label="anchor" href="#arg--"></a></dt>
@@ -309,10 +323,20 @@ plots, `nuts_params()`) will not produce meaningful output.</p>
 parameters, not from `lp__`.</p>
 <p>With a single chain, `Rhat` will report `NA`. Use `n_chains &gt;= 2`
 for convergence diagnostics.</p>
-<p>When `subsample_size` is specified, the function uses BridgeStan
-data-swapping to compute control-variate subsampled gradients. A
-centering fix is applied to the brms-generated Stan code so that
-predictor centering remains consistent across subsamples.</p>
+<p>Subsampling acceleration is enabled when the model has certified affine predictor,
+likelihood, and dynamics providers. The first provider batch covers weighted
+and subsetted Bernoulli/binomial logit models, categorical/multinomial logit,
+Poisson log models (including `rate()`), and Gaussian location-scale models
+(including known `se()` values and affine sigma predictors). Independent
+affine multivariate Bernoulli responses are also supported. Unknown geometry
+falls back to the exact full-gradient sampler. Priors, Jacobians, and
+unconditional custom target additions remain in an opaque deterministic
+BridgeStan provider.</p>
+<p>PDMPSamplers.jl applies `N / m`, draws a fresh subsampling subset per proposal,
+uses dynamics-specific linear or harmonic trajectory bounds, and reuses the
+accepted stochastic gradient for the event. Observation subsampling supports
+`GridThinningStrategy` generally and `ThinningStrategy` when the residual
+envelope has an affine global roof (or the trajectory is periodic).</p>
     </div>
 
   </main><aside class="col-md-3"><nav id="toc" aria-label="Table of contents"><h2>On this page</h2>

@@ -8,7 +8,7 @@ functions.
 ## Usage
 
 ``` r
-pdmpsamplers_setup(verbose = TRUE)
+pdmpsamplers_setup(verbose = TRUE, project_dir = NULL)
 ```
 
 ## Arguments
@@ -16,6 +16,13 @@ pdmpsamplers_setup(verbose = TRUE)
 - verbose:
 
   Logical, if `TRUE` (default), progress messages are printed.
+
+- project_dir:
+
+  Optional Julia project directory. Sets the R option
+  `pdmpsamplersr_config_julia_project_dir` for this R session; the same
+  option can be set before loading the package. Otherwise the user-cache
+  project is used. Configure each independent worker session separately.
 
 ## Value
 

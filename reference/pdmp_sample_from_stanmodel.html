@@ -20,7 +20,9 @@ using the PDMPSamplers.jl Julia package with BridgeStan integration."></head><bo
       <ul class="navbar-nav me-auto"><li class="active nav-item"><a class="nav-link" href="../reference/index.html">Reference</a></li>
 <li class="nav-item dropdown">
   <button class="nav-link dropdown-toggle" type="button" id="dropdown-articles" data-bs-toggle="dropdown" aria-expanded="false" aria-haspopup="true">Articles</button>
-  <ul class="dropdown-menu" aria-labelledby="dropdown-articles"><li><a class="dropdown-item" href="../articles/stan-examples.html">Sampling from Stan models with PDMPSamplersR</a></li>
+  <ul class="dropdown-menu" aria-labelledby="dropdown-articles"><li><a class="dropdown-item" href="../articles/omrf-custom-stan-subsampling.html">Subsampling custom-Stan sampling for an ordinal Markov random field</a></li>
+    <li><a class="dropdown-item" href="../articles/riclpm-dependent-slab.html">Dependent slab selection in a small RI-CLPM</a></li>
+    <li><a class="dropdown-item" href="../articles/stan-examples.html">Sampling from Stan models with PDMPSamplersR</a></li>
   </ul></li>
       </ul><ul class="navbar-nav"><li class="nav-item"><form class="form-inline" role="search">
  <input class="form-control" type="search" name="search-input" id="search-input" autocomplete="off" aria-label="Search site" placeholder="Search for" data-search-index="../search.json"></form></li>
@@ -49,32 +51,55 @@ using the PDMPSamplers.jl Julia package with BridgeStan integration.</p>
     <div class="sourceCode"><pre class="sourceCode r"><code><span><span class="fu">pdmp_sample_from_stanmodel</span><span class="op">(</span></span>
 <span>  <span class="va">path_to_stanmodel</span>,</span>
 <span>  <span class="va">standata</span>,</span>
+<span>  subsampling <span class="op">=</span> <span class="cn">NULL</span>,</span>
+<span>  subsampling_anchor_updates <span class="op">=</span> <span class="fl">0L</span>,</span>
+<span>  subsampling_use_anchor_bank <span class="op">=</span> <span class="cn">FALSE</span>,</span>
+<span>  subsampling_anchor_bank_capacity <span class="op">=</span> <span class="fl">8L</span>,</span>
+<span>  subsampling_anchor_selection_policy <span class="op">=</span> <span class="fu"><a href="https://rdrr.io/r/base/c.html" class="external-link">c</a></span><span class="op">(</span><span class="st">"adaptive"</span>, <span class="st">"position"</span><span class="op">)</span>,</span>
+<span>  subsampling_position_anchor_bank_spec <span class="op">=</span> <span class="cn">NULL</span>,</span>
+<span>  subsampling_main_anchor_refresh_distance <span class="op">=</span> <span class="cn">Inf</span>,</span>
+<span>  subsampling_require_no_main_full_data <span class="op">=</span> <span class="cn">FALSE</span>,</span>
+<span>  subsampling_diagnostic_window <span class="op">=</span> <span class="fl">0</span>,</span>
 <span>  flow <span class="op">=</span> <span class="fu"><a href="https://rdrr.io/r/base/c.html" class="external-link">c</a></span><span class="op">(</span><span class="st">"ZigZag"</span>, <span class="st">"BouncyParticle"</span>, <span class="st">"Boomerang"</span>, <span class="st">"AdaptiveBoomerang"</span>,</span>
 <span>    <span class="st">"PreconditionedZigZag"</span>, <span class="st">"PreconditionedBPS"</span><span class="op">)</span>,</span>
 <span>  algorithm <span class="op">=</span> <span class="fu"><a href="https://rdrr.io/r/base/c.html" class="external-link">c</a></span><span class="op">(</span><span class="st">"ThinningStrategy"</span>, <span class="st">"GridThinningStrategy"</span>, <span class="st">"RootsPoissonStrategy"</span><span class="op">)</span>,</span>
 <span>  T <span class="op">=</span> <span class="fl">50000</span>,</span>
 <span>  t0 <span class="op">=</span> <span class="fl">0</span>,</span>
 <span>  t_warmup <span class="op">=</span> <span class="fl">0</span>,</span>
+<span>  warmup_adaptation_interval <span class="op">=</span> <span class="cn">NULL</span>,</span>
+<span>  boomerang_variance_floor_fraction <span class="op">=</span> <span class="fl">0</span>,</span>
 <span>  flow_mean <span class="op">=</span> <span class="cn">NULL</span>,</span>
 <span>  flow_cov <span class="op">=</span> <span class="cn">NULL</span>,</span>
 <span>  c0 <span class="op">=</span> <span class="fl">0.01</span>,</span>
+<span>  flow_specification <span class="op">=</span> <span class="fu"><a href="https://rdrr.io/r/base/c.html" class="external-link">c</a></span><span class="op">(</span><span class="st">"auto"</span>, <span class="st">"initial"</span>, <span class="st">"frozen"</span><span class="op">)</span>,</span>
 <span>  x0 <span class="op">=</span> <span class="cn">NULL</span>,</span>
 <span>  theta0 <span class="op">=</span> <span class="cn">NULL</span>,</span>
+<span>  free0 <span class="op">=</span> <span class="cn">NULL</span>,</span>
+<span>  stored_velocity0 <span class="op">=</span> <span class="cn">NULL</span>,</span>
 <span>  sticky <span class="op">=</span> <span class="cn">FALSE</span>,</span>
 <span>  can_stick <span class="op">=</span> <span class="cn">NULL</span>,</span>
 <span>  model_prior <span class="op">=</span> <span class="cn">NULL</span>,</span>
 <span>  parameter_prior <span class="op">=</span> <span class="cn">NULL</span>,</span>
+<span>  slab_prior <span class="op">=</span> <span class="cn">NULL</span>,</span>
 <span>  grid_n <span class="op">=</span> <span class="fl">30</span>,</span>
 <span>  grid_t_max <span class="op">=</span> <span class="fl">2</span>,</span>
-<span>  post_warmup_simplify <span class="op">=</span> <span class="cn">FALSE</span>,</span>
+<span>  curvature_backend <span class="op">=</span> <span class="cn">NULL</span>,</span>
+<span>  grid_bound <span class="op">=</span> <span class="fu"><a href="https://rdrr.io/r/base/c.html" class="external-link">c</a></span><span class="op">(</span><span class="st">"value_quadratic"</span>, <span class="st">"constant"</span><span class="op">)</span>,</span>
+<span>  grid_curvature_bound <span class="op">=</span> <span class="cn">NULL</span>,</span>
 <span>  show_progress <span class="op">=</span> <span class="cn">TRUE</span>,</span>
 <span>  n_chains <span class="op">=</span> <span class="fl">1L</span>,</span>
 <span>  threaded <span class="op">=</span> <span class="cn">FALSE</span>,</span>
 <span>  seed <span class="op">=</span> <span class="cn">NULL</span>,</span>
 <span>  adaptive_scheme <span class="op">=</span> <span class="fu"><a href="https://rdrr.io/r/base/c.html" class="external-link">c</a></span><span class="op">(</span><span class="st">"diagonal"</span>, <span class="st">"fullrank"</span><span class="op">)</span>,</span>
+<span>  refresh_rate <span class="op">=</span> <span class="fl">1</span>,</span>
 <span>  materialize <span class="op">=</span> <span class="cn">TRUE</span>,</span>
+<span>  trace_storage <span class="op">=</span> <span class="fu"><a href="https://rdrr.io/r/base/c.html" class="external-link">c</a></span><span class="op">(</span><span class="st">"dense"</span>, <span class="st">"streaming"</span><span class="op">)</span>,</span>
+<span>  streaming_trace_directory <span class="op">=</span> <span class="cn">NULL</span>,</span>
+<span>  streaming_trace_buffer_events <span class="op">=</span> <span class="fl">4096L</span>,</span>
+<span>  online_summaries <span class="op">=</span> <span class="cn">NULL</span>,</span>
 <span>  support_boundary <span class="op">=</span> <span class="fu"><a href="support_boundary_control.html">support_boundary_control</a></span><span class="op">(</span><span class="op">)</span>,</span>
-<span>  subsample <span class="op">=</span> <span class="cn">NULL</span></span>
+<span>  control <span class="op">=</span> <span class="fu"><a href="sampler_control.html">sampler_control</a></span><span class="op">(</span><span class="op">)</span>,</span>
+<span>  compile_options <span class="op">=</span> <span class="fu"><a href="stan_compile_options.html">stan_compile_options</a></span><span class="op">(</span><span class="op">)</span></span>
 <span><span class="op">)</span></span></code></pre></div>
     </div>
 
@@ -94,15 +119,74 @@ or a named list that will be written to a temporary JSON file via
 [write_stan_json()].</p></dd>
 
 
+<dt id="arg-subsampling">subsampling<a class="anchor" aria-label="anchor" href="#arg-subsampling"></a></dt>
+<dd><p>Optional exact subsampling custom-Stan specification
+created by [stan_subsampling()]. The selected Stan branch must add
+the unscaled sum of the installed observations; Julia applies `N / m`.</p></dd>
+
+
+<dt id="arg-subsampling-anchor-updates">subsampling_anchor_updates<a class="anchor" aria-label="anchor" href="#arg-subsampling-anchor-updates"></a></dt>
+<dd><p>Number of prepared OMRF anchors added from
+continuous-time warmup means.</p></dd>
+
+
+<dt id="arg-subsampling-use-anchor-bank">subsampling_use_anchor_bank<a class="anchor" aria-label="anchor" href="#arg-subsampling-use-anchor-bank"></a></dt>
+<dd><p>Retain prepared OMRF anchors and select
+the nearest entry at event boundaries. If false, updates replace the
+active anchor.</p></dd>
+
+
+<dt id="arg-subsampling-anchor-bank-capacity">subsampling_anchor_bank_capacity<a class="anchor" aria-label="anchor" href="#arg-subsampling-anchor-bank-capacity"></a></dt>
+<dd><p>Maximum prepared OMRF anchors kept
+per chain.</p></dd>
+
+
+<dt id="arg-subsampling-anchor-selection-policy">subsampling_anchor_selection_policy<a class="anchor" aria-label="anchor" href="#arg-subsampling-anchor-selection-policy"></a></dt>
+<dd><p>Research anchor-bank policy.
+`"adaptive"` preserves the existing event-history/envelope policy;
+`"position"` selects one frozen finite bank source by weighted position
+and supports linear Zig–Zag/BPS and harmonic Boomerang flows.</p></dd>
+
+
+<dt id="arg-subsampling-position-anchor-bank-spec">subsampling_position_anchor_bank_spec<a class="anchor" aria-label="anchor" href="#arg-subsampling-position-anchor-bank-spec"></a></dt>
+<dd><p>Optional version-1 mathematical
+position-bank specification saved on a previous result. Restoration
+rebuilds prepared provider quantities from its ordered positions and
+frozen distance scales; it requires zero warmup and matching dataset,
+parameter-order, and envelope/grouping identities.</p></dd>
+
+
+<dt id="arg-subsampling-main-anchor-refresh-distance">subsampling_main_anchor_refresh_distance<a class="anchor" aria-label="anchor" href="#arg-subsampling-main-anchor-refresh-distance"></a></dt>
+<dd><p>Positive Euclidean distance
+from the nearest prepared anchor that triggers a new exact OMRF anchor
+during main sampling. The default `Inf` disables main-phase preparation.</p></dd>
+
+
+<dt id="arg-subsampling-require-no-main-full-data">subsampling_require_no_main_full_data<a class="anchor" aria-label="anchor" href="#arg-subsampling-require-no-main-full-data"></a></dt>
+<dd><p>If `TRUE`, fail the run when
+retained sampling performs any full-gradient evaluation, prepares an
+anchor, or traverses every OMRF person-node conditional in native Julia.
+Setup and warmup work are allowed. This is intended as a hard benchmark
+invariant for frozen-control-variate and direct-clock experiments.</p></dd>
+
+
+<dt id="arg-subsampling-diagnostic-window">subsampling_diagnostic_window<a class="anchor" aria-label="anchor" href="#arg-subsampling-diagnostic-window"></a></dt>
+<dd><p>Width, in sampling time, of the windows
+over which the OMRF anchor manager records retained-phase subsampling
+diagnostics. The default 0 disables them.</p></dd>
+
+
 <dt id="arg-flow">flow<a class="anchor" aria-label="anchor" href="#arg-flow"></a></dt>
 <dd><p>Character string specifying the flow type. One of "ZigZag",
 "BouncyParticle", "Boomerang", "AdaptiveBoomerang", "PreconditionedZigZag",
 or "PreconditionedBPS".
 The `"AdaptiveBoomerang"` flow learns its reference (mean and precision)
-during warmup and requires `"GridThinningStrategy"` as the algorithm.
+during warmup and requires a grid-like algorithm. It is supported with
+dependent slabs when `GridThinningStrategy` is selected; provide positive
+`t_warmup`, or let the sampler choose its 20<!-- % default. -->
 The `"PreconditionedZigZag"` and `"PreconditionedBPS"` flows learn a
 diagonal preconditioner during warmup and also require
-`"GridThinningStrategy"` as the algorithm.</p></dd>
+a grid-like algorithm.</p></dd>
 
 
 <dt id="arg-algorithm">algorithm<a class="anchor" aria-label="anchor" href="#arg-algorithm"></a></dt>
@@ -122,6 +206,21 @@ diagonal preconditioner during warmup and also require
 <dd><p>Numeric, warmup time (default: 0.0). Events during warmup are discarded.</p></dd>
 
 
+<dt id="arg-warmup-adaptation-interval">warmup_adaptation_interval<a class="anchor" aria-label="anchor" href="#arg-warmup-adaptation-interval"></a></dt>
+<dd><p>Nonnegative time between dynamics
+adaptation attempts during warmup. `NULL` uses ten equally spaced warmup
+windows (`t_warmup / 10`); zero attempts adaptation at every event. The
+same interval is used by full-gradient and subsampling runs.</p></dd>
+
+
+<dt id="arg-boomerang-variance-floor-fraction">boomerang_variance_floor_fraction<a class="anchor" aria-label="anchor" href="#arg-boomerang-variance-floor-fraction"></a></dt>
+<dd><p>Nonnegative opt-in research
+safeguard for adaptive diagonal Boomerang flows. At every adaptation
+update, named `global_scale` and `node_scale.*` coordinates retain at
+least this fraction of their preadaptation variance. Zero (the default)
+disables the safeguard.</p></dd>
+
+
 <dt id="arg-flow-mean">flow_mean<a class="anchor" aria-label="anchor" href="#arg-flow-mean"></a></dt>
 <dd><p>Numeric vector of length d, mean vector for the flow (default: zero vector).</p></dd>
 
@@ -134,12 +233,29 @@ diagonal preconditioner during warmup and also require
 <dd><p>Numeric, bound parameter (default: 1e-2).</p></dd>
 
 
+<dt id="arg-flow-specification">flow_specification<a class="anchor" aria-label="anchor" href="#arg-flow-specification"></a></dt>
+<dd><p>Role of an explicitly supplied `flow_mean` or
+`flow_cov`. `"initial"` permits legitimate warmup adaptation and records
+every chain's retained flow. `"frozen"` requires every retained chain to
+match the request and fails closed otherwise. `"auto"` uses `"initial"`
+when `t_warmup &gt; 0` and `"frozen"` otherwise.</p></dd>
+
+
 <dt id="arg-x-">x0<a class="anchor" aria-label="anchor" href="#arg-x-"></a></dt>
 <dd><p>Numeric vector of length d, initial position (default: random normal).</p></dd>
 
 
 <dt id="arg-theta-">theta0<a class="anchor" aria-label="anchor" href="#arg-theta-"></a></dt>
-<dd><p>Numeric vector of length d, initial velocity (default: random based on the flow).</p></dd>
+<dd><p>Optional initial velocity forwarded to both full-gradient and
+custom-Stan subsampling initialization.</p></dd>
+
+
+<dt id="arg-free-stored-velocity-">free0, stored_velocity0<a class="anchor" aria-label="anchor" href="#arg-free-stored-velocity-"></a></dt>
+<dd><p>Optional sticky state to continue a previous
+run: <code>free0</code> is the logical mask of free coordinates and
+<code>stored_velocity0</code> the stored velocities of the frozen ones. Both
+must be supplied together, with length equal to the number of
+parameters, and require <code>sticky = TRUE</code>.</p></dd>
 
 
 <dt id="arg-sticky">sticky<a class="anchor" aria-label="anchor" href="#arg-sticky"></a></dt>
@@ -151,12 +267,21 @@ diagonal preconditioner during warmup and also require
 
 
 <dt id="arg-model-prior">model_prior<a class="anchor" aria-label="anchor" href="#arg-model-prior"></a></dt>
-<dd><p>Prior distribution object for model selection. Should be of class
-'bernoulli' or 'beta-bernoulli' (default: NULL).</p></dd>
+<dd><p>Prior distribution object for model selection:
+<code><a href="bernoulli.html">bernoulli()</a></code> or <code><a href="betabernoulli.html">betabernoulli()</a></code>.</p></dd>
 
 
 <dt id="arg-parameter-prior">parameter_prior<a class="anchor" aria-label="anchor" href="#arg-parameter-prior"></a></dt>
 <dd><p>Numeric vector of length d, prior parameters for sticky sampling (default: NULL).</p></dd>
+
+
+<dt id="arg-slab-prior">slab_prior<a class="anchor" aria-label="anchor" href="#arg-slab-prior"></a></dt>
+<dd><p>Optional dependent slab prior created by
+<code><a href="dependent_slab_priors.html">dense_gaussian_slab()</a></code>, <code><a href="dependent_slab_priors.html">exchangeable_gaussian_slab()</a></code>,
+or <code><a href="dependent_slab_priors.html">loglinear_gaussian_scale_slab()</a></code>. Mutually exclusive with
+<code>parameter_prior</code>. The full target supplied through <code>f</code> must
+contain the complete coherent slab represented by <code>slab_prior</code>; the
+package replaces that slab by its active-face restriction internally.</p></dd>
 
 
 <dt id="arg-grid-n">grid_n<a class="anchor" aria-label="anchor" href="#arg-grid-n"></a></dt>
@@ -167,10 +292,30 @@ diagonal preconditioner during warmup and also require
 <dd><p>Numeric, maximum time for grid in GridThinningStrategy (default: 2.0).</p></dd>
 
 
-<dt id="arg-post-warmup-simplify">post_warmup_simplify<a class="anchor" aria-label="anchor" href="#arg-post-warmup-simplify"></a></dt>
-<dd><p>Logical. If <code>TRUE</code>, the grid-thinning
-strategy may switch to a constant bound after warmup, reducing
-gradient calls during the main sampling phase.</p></dd>
+<dt id="arg-curvature-backend">curvature_backend<a class="anchor" aria-label="anchor" href="#arg-curvature-backend"></a></dt>
+<dd><p>Character string selecting directional curvature:
+`"exact"` or `"finite_difference"`. Custom-Stan subsampling has no
+deterministic exact HVP unless using the analytic dependent OMRF provider.
+Finite differences use
+shifted exact gradients but approximate their directional derivative and
+therefore have step-size and truncation error. `NULL` selects exact
+curvature for full gradients and finite differences for subsampling,
+except that analytic dependent OMRF always uses its exact composed HVP.</p></dd>
+
+
+<dt id="arg-grid-bound">grid_bound<a class="anchor" aria-label="anchor" href="#arg-grid-bound"></a></dt>
+<dd><p>Character string selecting the GridThinning proposal
+envelope. <code>"value_quadratic"</code> (default) bounds each grid cell by
+the larger endpoint rate plus <code>grid_curvature_bound * h^2 / 8</code>;
+without <code>grid_curvature_bound</code> the cells use the ordinary
+GridThinning construction. <code>"constant"</code> always uses the ordinary
+construction.</p></dd>
+
+
+<dt id="arg-grid-curvature-bound">grid_curvature_bound<a class="anchor" aria-label="anchor" href="#arg-grid-curvature-bound"></a></dt>
+<dd><p>Optional nonnegative bound on the curvature of
+the event rate over a grid cell, used by <code>grid_bound =
+"value_quadratic"</code>. Too small a value invalidates the envelope.</p></dd>
 
 
 <dt id="arg-show-progress">show_progress<a class="anchor" aria-label="anchor" href="#arg-show-progress"></a></dt>
@@ -194,7 +339,14 @@ Julia's sampler RNG and any generated default initial position when
 <dt id="arg-adaptive-scheme">adaptive_scheme<a class="anchor" aria-label="anchor" href="#arg-adaptive-scheme"></a></dt>
 <dd><p>Character string, adaptation scheme for AdaptiveBoomerang.
 One of "diagonal" (default, O(d) per update) or "fullrank" (O(d^3) per update,
-better for correlated targets). Ignored for other flow types.</p></dd>
+better for correlated targets). Ignored for other flow types. With sticky
+sampling, "fullrank" releases frozen coordinates with the experimental
+boundary-proposal law; "diagonal" uses the stored-velocity law.</p></dd>
+
+
+<dt id="arg-refresh-rate">refresh_rate<a class="anchor" aria-label="anchor" href="#arg-refresh-rate"></a></dt>
+<dd><p>Refreshment rate of the <code>"BouncyParticle"</code> and
+<code>"PreconditionedBPS"</code> flows (default 1). Ignored by the other flows.</p></dd>
 
 
 <dt id="arg-materialize">materialize<a class="anchor" aria-label="anchor" href="#arg-materialize"></a></dt>
@@ -205,18 +357,41 @@ the extraction and keep only the live Julia reference.
 This can save time and memory if you don't need to save the result or if you plan to call <code><a href="materialize.html">materialize()</a></code> manually later.</p></dd>
 
 
+<dt id="arg-trace-storage">trace_storage<a class="anchor" aria-label="anchor" href="#arg-trace-storage"></a></dt>
+<dd><p><code>"dense"</code> (default) keeps the event trace in
+memory. <code>"streaming"</code> writes it in chunks to
+<code>streaming_trace_directory</code>, so memory use does not grow with the
+number of events; it is required for <code>online_summaries</code>.</p></dd>
+
+
+<dt id="arg-streaming-trace-directory">streaming_trace_directory<a class="anchor" aria-label="anchor" href="#arg-streaming-trace-directory"></a></dt>
+<dd><p>Directory for the streamed trace. Required
+when <code>trace_storage = "streaming"</code>, ignored otherwise.</p></dd>
+
+
+<dt id="arg-streaming-trace-buffer-events">streaming_trace_buffer_events<a class="anchor" aria-label="anchor" href="#arg-streaming-trace-buffer-events"></a></dt>
+<dd><p>Number of events buffered in memory
+before a chunk is written (default 4096). Used only with
+<code>trace_storage = "streaming"</code>.</p></dd>
+
+
+<dt id="arg-online-summaries">online_summaries<a class="anchor" aria-label="anchor" href="#arg-online-summaries"></a></dt>
+<dd><p><code>NULL</code> (default) or options from
+<code><a href="online_summary_options.html">online_summary_options()</a></code>. Requires <code>trace_storage = "streaming"</code>;
+the summaries are read with <code><a href="read_online_summaries.html">read_online_summaries()</a></code>.</p></dd>
+
+
 <dt id="arg-support-boundary">support_boundary<a class="anchor" aria-label="anchor" href="#arg-support-boundary"></a></dt>
 <dd><p>A list created by <code><a href="support_boundary_control.html">support_boundary_control()</a></code> that
 controls support-boundary diagnostics and heuristic event/refresh recovery.</p></dd>
 
 
-<dt id="arg-subsample">subsample<a class="anchor" aria-label="anchor" href="#arg-subsample"></a></dt>
-<dd><p>NULL (default) for full-data sampling, or a named list with
-at least `size` and `prior_standata`. Optional entries include
-`path_to_stanmodel` (the external-C++ subsampled Stan model; defaults to
-`path_to_stanmodel`), `hpp_path`, `n_anchor_updates`, `hvp_mode`,
-`use_hcv`, `use_anchor_bank`, `use_fd_hvp`, `compute_lp`, and
-`resample_dt`.</p></dd>
+<dt id="arg-control">control<a class="anchor" aria-label="anchor" href="#arg-control"></a></dt>
+<dd><p>Additional call-local settings from <code><a href="sampler_control.html">sampler_control</a></code>.</p></dd>
+
+
+<dt id="arg-compile-options">compile_options<a class="anchor" aria-label="anchor" href="#arg-compile-options"></a></dt>
+<dd><p>Settings from <code><a href="stan_compile_options.html">stan_compile_options</a></code>.</p></dd>
 
 </dl></div>
     <div class="section level2">

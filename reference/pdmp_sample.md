@@ -25,16 +25,24 @@ pdmp_sample(
   can_stick = NULL,
   model_prior = NULL,
   parameter_prior = NULL,
+  slab_prior = NULL,
   grid_n = 30,
   grid_t_max = 2,
-  post_warmup_simplify = FALSE,
+  grid_bound = c("value_quadratic", "constant"),
+  grid_curvature_bound = NULL,
   show_progress = TRUE,
   n_chains = 1L,
   threaded = FALSE,
   seed = NULL,
   adaptive_scheme = c("diagonal", "fullrank"),
+  refresh_rate = 1,
   materialize = TRUE,
-  support_boundary = support_boundary_control()
+  trace_storage = c("dense", "streaming"),
+  streaming_trace_directory = NULL,
+  streaming_trace_buffer_events = 4096L,
+  online_summaries = NULL,
+  support_boundary = support_boundary_control(),
+  control = sampler_control()
 )
 ```
 
@@ -55,10 +63,12 @@ pdmp_sample(
   "BouncyParticle", "Boomerang", "AdaptiveBoomerang",
   "PreconditionedZigZag", or "PreconditionedBPS". The
   \`"AdaptiveBoomerang"\` flow learns its reference (mean and precision)
-  during warmup and requires \`"GridThinningStrategy"\` as the
-  algorithm. The \`"PreconditionedZigZag"\` and \`"PreconditionedBPS"\`
-  flows learn a diagonal preconditioner during warmup and also require
-  \`"GridThinningStrategy"\` as the algorithm.
+  during warmup and requires a grid-like algorithm. It is supported with
+  dependent slabs when \`GridThinningStrategy\` is selected; provide
+  positive \`t_warmup\`, or let the sampler choose its 20 The
+  \`"PreconditionedZigZag"\` and \`"PreconditionedBPS"\` flows learn a
+  diagonal preconditioner during warmup and also require a grid-like
+  algorithm.
 
 - algorithm:
 
@@ -118,13 +128,27 @@ pdmp_sample(
 
 - model_prior:
 
-  Prior distribution object for model selection. Should be of class
-  'bernoulli' or 'beta-bernoulli' (default: NULL).
+  Prior distribution object for model selection:
+  [`bernoulli()`](https://vandenman.github.io/PDMPSamplersR/reference/bernoulli.md)
+  or
+  [`betabernoulli()`](https://vandenman.github.io/PDMPSamplersR/reference/betabernoulli.md).
 
 - parameter_prior:
 
   Numeric vector of length d, prior parameters for sticky sampling
   (default: NULL).
+
+- slab_prior:
+
+  Optional dependent slab prior created by
+  [`dense_gaussian_slab()`](https://vandenman.github.io/PDMPSamplersR/reference/dependent_slab_priors.md),
+  [`exchangeable_gaussian_slab()`](https://vandenman.github.io/PDMPSamplersR/reference/dependent_slab_priors.md),
+  or
+  [`loglinear_gaussian_scale_slab()`](https://vandenman.github.io/PDMPSamplersR/reference/dependent_slab_priors.md).
+  Mutually exclusive with `parameter_prior`. The full target supplied
+  through `f` must contain the complete coherent slab represented by
+  `slab_prior`; the package replaces that slab by its active-face
+  restriction internally.
 
 - grid_n:
 
@@ -134,11 +158,19 @@ pdmp_sample(
 
   Numeric, maximum time for grid in GridThinningStrategy (default: 2.0).
 
-- post_warmup_simplify:
+- grid_bound:
 
-  Logical. If `TRUE`, the grid-thinning strategy may switch to a
-  constant bound after warmup, reducing gradient calls during the main
-  sampling phase.
+  Character string selecting the GridThinning proposal envelope.
+  `"value_quadratic"` (default) bounds each grid cell by the larger
+  endpoint rate plus `grid_curvature_bound * h^2 / 8`; without
+  `grid_curvature_bound` the cells use the ordinary GridThinning
+  construction. `"constant"` always uses the ordinary construction.
+
+- grid_curvature_bound:
+
+  Optional nonnegative bound on the curvature of the event rate over a
+  grid cell, used by `grid_bound = "value_quadratic"`. Too small a value
+  invalidates the envelope.
 
 - show_progress:
 
@@ -163,6 +195,14 @@ pdmp_sample(
   Character string, adaptation scheme for AdaptiveBoomerang. One of
   "diagonal" (default, O(d) per update) or "fullrank" (O(d^3) per
   update, better for correlated targets). Ignored for other flow types.
+  With sticky sampling, "fullrank" releases frozen coordinates with the
+  experimental boundary-proposal law; "diagonal" uses the
+  stored-velocity law.
+
+- refresh_rate:
+
+  Refreshment rate of the `"BouncyParticle"` and `"PreconditionedBPS"`
+  flows (default 1). Ignored by the other flows.
 
 - materialize:
 
@@ -176,12 +216,41 @@ pdmp_sample(
   [`materialize()`](https://vandenman.github.io/PDMPSamplersR/reference/materialize.md)
   manually later.
 
+- trace_storage:
+
+  `"dense"` (default) keeps the event trace in memory. `"streaming"`
+  writes it in chunks to `streaming_trace_directory`, so memory use does
+  not grow with the number of events; it is required for
+  `online_summaries`.
+
+- streaming_trace_directory:
+
+  Directory for the streamed trace. Required when
+  `trace_storage = "streaming"`, ignored otherwise.
+
+- streaming_trace_buffer_events:
+
+  Number of events buffered in memory before a chunk is written (default
+  4096). Used only with `trace_storage = "streaming"`.
+
+- online_summaries:
+
+  `NULL` (default) or options from
+  [`online_summary_options()`](https://vandenman.github.io/PDMPSamplersR/reference/online_summary_options.md).
+  Requires `trace_storage = "streaming"`; the summaries are read with
+  [`read_online_summaries()`](https://vandenman.github.io/PDMPSamplersR/reference/read_online_summaries.md).
+
 - support_boundary:
 
   A list created by
   [`support_boundary_control()`](https://vandenman.github.io/PDMPSamplersR/reference/support_boundary_control.md)
   that controls support-boundary diagnostics and heuristic event/refresh
   recovery.
+
+- control:
+
+  Additional call-local settings from
+  [`sampler_control`](https://vandenman.github.io/PDMPSamplersR/reference/sampler_control.md).
 
 ## Value
 

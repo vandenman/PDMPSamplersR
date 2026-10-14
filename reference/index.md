@@ -4,21 +4,36 @@
 
 - [`pdmp_sample()`](https://vandenman.github.io/PDMPSamplersR/reference/pdmp_sample.md)
   : PDMP Sampling
-- [`pdmp_sample_subsampled()`](https://vandenman.github.io/PDMPSamplersR/reference/pdmp_sample_subsampled.md)
-  : PDMP sampling with subsampled gradients
 - [`pdmp_sample_from_stanmodel()`](https://vandenman.github.io/PDMPSamplersR/reference/pdmp_sample_from_stanmodel.md)
   : PDMP Sampling from Stan Model
+- [`sampler_control()`](https://vandenman.github.io/PDMPSamplersR/reference/sampler_control.md)
+  : Additional sampler controls
+- [`stan_compile_options()`](https://vandenman.github.io/PDMPSamplersR/reference/stan_compile_options.md)
+  : Stan compilation options
 - [`support_boundary_control()`](https://vandenman.github.io/PDMPSamplersR/reference/support_boundary_control.md)
   : Support Boundary Control
 - [`write_stan_json()`](https://vandenman.github.io/PDMPSamplersR/reference/write_stan_json.md)
   : Write data to a JSON file readable by Stan
-- [`pdmp_subsample_hpp_path()`](https://vandenman.github.io/PDMPSamplersR/reference/pdmp_subsample_hpp_path.md)
-  : Path to the bundled Stan subsampling header
+- [`pdmp_subsample_hpp_path()`](https://vandenman.github.io/PDMPSamplersR/reference/stan_subsampling.md)
+  [`compile_pdmp_stan_model()`](https://vandenman.github.io/PDMPSamplersR/reference/stan_subsampling.md)
+  [`stan_residual_envelope()`](https://vandenman.github.io/PDMPSamplersR/reference/stan_subsampling.md)
+  [`stan_subsampling()`](https://vandenman.github.io/PDMPSamplersR/reference/stan_subsampling.md)
+  [`omrf_residual_envelope()`](https://vandenman.github.io/PDMPSamplersR/reference/stan_subsampling.md)
+  [`stan_parameter_mapping()`](https://vandenman.github.io/PDMPSamplersR/reference/stan_subsampling.md)
+  : Compile and configure subsampling custom-Stan models
+- [`stan_subsampling_diagnostics()`](https://vandenman.github.io/PDMPSamplersR/reference/stan_subsampling_diagnostics.md)
+  : Diagnose a subsampling custom-Stan gradient and envelope
+- [`position_anchor_bank()`](https://vandenman.github.io/PDMPSamplersR/reference/position_anchor_bank.md)
+  : Frozen position anchor bank from a set of states
+- [`online_summary_options()`](https://vandenman.github.io/PDMPSamplersR/reference/online_summary_options.md)
+  : Online summaries of the retained trajectory
 
 ## Results
 
 - [`materialize()`](https://vandenman.github.io/PDMPSamplersR/reference/materialize.md)
   : Materialise a PDMP result for serialisation
+- [`read_online_summaries()`](https://vandenman.github.io/PDMPSamplersR/reference/read_online_summaries.md)
+  : Read online summaries written by a streaming chain
 - [`mean(`*`<pdmp_result>`*`)`](https://vandenman.github.io/PDMPSamplersR/reference/mean.pdmp_result.md)
   : Continuous-time mean of PDMP trace
 - [`median(`*`<pdmp_result>`*`)`](https://vandenman.github.io/PDMPSamplersR/reference/median.pdmp_result.md)
@@ -65,39 +80,15 @@
   : Create a Bernoulli model prior
 - [`betabernoulli()`](https://vandenman.github.io/PDMPSamplersR/reference/betabernoulli.md)
   : Create a Beta-Bernoulli model prior
+- [`dense_gaussian_slab()`](https://vandenman.github.io/PDMPSamplersR/reference/dependent_slab_priors.md)
+  [`exchangeable_gaussian_slab()`](https://vandenman.github.io/PDMPSamplersR/reference/dependent_slab_priors.md)
+  [`loglinear_gaussian_scale_slab()`](https://vandenman.github.io/PDMPSamplersR/reference/dependent_slab_priors.md)
+  : Dependent slab prior constructors
 
 ## brms interface
 
 - [`brm_pdmp()`](https://vandenman.github.io/PDMPSamplersR/reference/brm_pdmp.md)
   : Fit a brms model using PDMP samplers
-- [`brm_stancode()`](https://vandenman.github.io/PDMPSamplersR/reference/brm_stancode.md)
-  : Show the Stan code used by brm_pdmp
-- [`brm_standata()`](https://vandenman.github.io/PDMPSamplersR/reference/brm_standata.md)
-  : Show the Stan data used by brm_pdmp
-- [`log_lik_subsampled_bernoulli_logit()`](https://vandenman.github.io/PDMPSamplersR/reference/log_lik_subsampled.md)
-  [`log_lik_subsampled_poisson_log()`](https://vandenman.github.io/PDMPSamplersR/reference/log_lik_subsampled.md)
-  [`log_lik_subsampled_gaussian()`](https://vandenman.github.io/PDMPSamplersR/reference/log_lik_subsampled.md)
-  [`log_lik_subsampled_negbinomial_log()`](https://vandenman.github.io/PDMPSamplersR/reference/log_lik_subsampled.md)
-  [`log_lik_subsampled_student()`](https://vandenman.github.io/PDMPSamplersR/reference/log_lik_subsampled.md)
-  [`log_lik_subsampled_gamma()`](https://vandenman.github.io/PDMPSamplersR/reference/log_lik_subsampled.md)
-  [`log_lik_subsampled_beta()`](https://vandenman.github.io/PDMPSamplersR/reference/log_lik_subsampled.md)
-  : Log-likelihood for subsampled custom families
-- [`posterior_epred_subsampled_bernoulli_logit()`](https://vandenman.github.io/PDMPSamplersR/reference/posterior_epred_subsampled.md)
-  [`posterior_epred_subsampled_poisson_log()`](https://vandenman.github.io/PDMPSamplersR/reference/posterior_epred_subsampled.md)
-  [`posterior_epred_subsampled_gaussian()`](https://vandenman.github.io/PDMPSamplersR/reference/posterior_epred_subsampled.md)
-  [`posterior_epred_subsampled_negbinomial_log()`](https://vandenman.github.io/PDMPSamplersR/reference/posterior_epred_subsampled.md)
-  [`posterior_epred_subsampled_student()`](https://vandenman.github.io/PDMPSamplersR/reference/posterior_epred_subsampled.md)
-  [`posterior_epred_subsampled_gamma()`](https://vandenman.github.io/PDMPSamplersR/reference/posterior_epred_subsampled.md)
-  [`posterior_epred_subsampled_beta()`](https://vandenman.github.io/PDMPSamplersR/reference/posterior_epred_subsampled.md)
-  : Posterior expected values for subsampled custom families
-- [`posterior_predict_subsampled_bernoulli_logit()`](https://vandenman.github.io/PDMPSamplersR/reference/posterior_predict_subsampled.md)
-  [`posterior_predict_subsampled_poisson_log()`](https://vandenman.github.io/PDMPSamplersR/reference/posterior_predict_subsampled.md)
-  [`posterior_predict_subsampled_gaussian()`](https://vandenman.github.io/PDMPSamplersR/reference/posterior_predict_subsampled.md)
-  [`posterior_predict_subsampled_negbinomial_log()`](https://vandenman.github.io/PDMPSamplersR/reference/posterior_predict_subsampled.md)
-  [`posterior_predict_subsampled_student()`](https://vandenman.github.io/PDMPSamplersR/reference/posterior_predict_subsampled.md)
-  [`posterior_predict_subsampled_gamma()`](https://vandenman.github.io/PDMPSamplersR/reference/posterior_predict_subsampled.md)
-  [`posterior_predict_subsampled_beta()`](https://vandenman.github.io/PDMPSamplersR/reference/posterior_predict_subsampled.md)
-  : Posterior predictions for subsampled custom families
 
 ## Variable selection
 
@@ -126,3 +117,5 @@
   : Use a local version of PDMPSamplers.jl
 - [`check_for_julia_setup()`](https://vandenman.github.io/PDMPSamplersR/reference/check_for_julia_setup.md)
   : Check if the Julia Project is Setup Properly
+- [`cleanup_worker_state()`](https://vandenman.github.io/PDMPSamplersR/reference/cleanup_worker_state.md)
+  : Release sampling state in a reused worker

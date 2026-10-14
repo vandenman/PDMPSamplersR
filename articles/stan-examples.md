@@ -409,7 +409,7 @@ tibble(
     # A tibble: 2 × 2
       method   bayes_factor
       <chr>           <dbl>
-    1 PDMP             1.30
+    1 PDMP             1.33
     2 Analytic         1.34
 
 ## Saving and loading results
@@ -421,11 +421,11 @@ lives, so naively calling
 later [`readRDS()`](https://rdrr.io/r/base/readRDS.html) leaves that
 pointer dangling and every subsequent estimator call fails.
 
-By default, all sampling functions (`pdmp_sample`,
-`pdmp_sample_from_stanmodel`, `pdmp_sample_subsampled`) immediately copy
-the chain skeleton, i.e., the event times, positions, and velocities,
-from Julia to R. This costs a little bit of extra time and memory but
-does mean that [`saveRDS()`](https://rdrr.io/r/base/readRDS.html) /
+By default, both sampling functions (`pdmp_sample` and
+`pdmp_sample_from_stanmodel`) immediately copy the chain skeleton, i.e.,
+the event times, positions, and velocities, from Julia to R. This costs
+a little bit of extra time and memory but does mean that
+[`saveRDS()`](https://rdrr.io/r/base/readRDS.html) /
 [`readRDS()`](https://rdrr.io/r/base/readRDS.html) work out of the box
 
 If you want to skip the upfront copy, for example when running many

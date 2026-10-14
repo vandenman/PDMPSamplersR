@@ -7,7 +7,15 @@ chains.
 
 ``` r
 # S3 method for class 'pdmp_result'
-quantile(x, probs, transforms = NULL, chain = NULL, coordinate = -1L, ...)
+quantile(
+  x,
+  probs,
+  transforms = NULL,
+  chain = NULL,
+  coordinate = -1L,
+  gc_interval = 16L,
+  ...
+)
 ```
 
 ## Arguments
@@ -32,6 +40,11 @@ quantile(x, probs, transforms = NULL, chain = NULL, coordinate = -1L, ...)
 - coordinate:
 
   Integer coordinate index, or -1 for all (default: -1).
+
+- gc_interval:
+
+  Collect temporary Julia workspaces after this many coordinates when
+  computing multiple untransformed quantiles (default 16).
 
 - ...:
 

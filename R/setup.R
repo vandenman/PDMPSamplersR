@@ -102,9 +102,12 @@ setup_julia_project <- function() {
 
 load_julia_project <- function() {
   project_dir <- get_julia_project_dir()
+  # Activate the project once per session and install whatever its manifest
+  # pins but is not installed yet (a no-op when everything is installed), so a
+  # project shipped with a Manifest.toml works on a fresh machine without
+  # further setup and without changing the pinned versions.
   JuliaCall::julia_command(sprintf(
-  # ensure pkg is imported as a precaution
-  'import Pkg; Base.active_project() == joinpath("%1$s", "Project.toml") || Pkg.activate("%1$s");',
+  'import Pkg; Base.active_project() == joinpath("%1$s", "Project.toml") || (Pkg.activate("%1$s"); Pkg.instantiate());',
   project_dir
   ))
 }

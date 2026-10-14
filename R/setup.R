@@ -1,35 +1,13 @@
 get_config <- function(key) {
-  # naming convention mimiced from renv:
-  # 1. If an R option of the form renv.config.<name> is available, then that option's value will be used;
-  # 2. If an environment variable of the form RENV_CONFIG_<NAME> is available, then that option's value will be used;
-  # 3. Otherwise, the default for that particular configuration value is used.
-
-  # this is quite general and only used for the julia project location for now.
-  # note that this function is only used to extract the config value but does not set the default
-
   lowercasekey <- tolower(key)
-
-  invalid_key <- !startsWith(lowercasekey, "pdmpsamplersr_config_")
-  if (invalid_key) {
-    cli::cli_abort("Invalid config key: {key}. Config keys must start with 'PDMPSAMPLERSR_CONFIG_' or 'pdmpsamplersr_config_'.")
-  }
-
+  if (!startsWith(lowercasekey, "pdmpsamplersr_config_"))
+    cli::cli_abort("Invalid config key: {key}.")
   value <- getOption(lowercasekey, default = NULL)
-  if (is.null(value)) {
-    value <- Sys.getenv(toupper(key), unset = "")
-    if (value == "") {
-      return(NULL)
-    } else {
-      return(value)
-    }
-  } else {
-    if (!is.character(value) || length(value) != 1) {
-      cli::cli_abort("Invalid config value for {key}: must be a single string.")
-    }
-    return(value)
-  }
+  if (!is.null(value) && (!is.character(value) || length(value) != 1L ||
+                         is.na(value) || !nzchar(value)))
+    cli::cli_abort("Invalid config value for {key}: must be a nonempty string.")
+  value
 }
-
 
 get_julia_project_dir <- function() {
   return(get_config("PDMPSAMPLERSR_CONFIG_JULIA_PROJECT_DIR") %||% default_julia_project_dir())
@@ -48,19 +26,6 @@ julia_project_exists <- function() {
 }
 
 ensure_julia_runtime <- function(verbose = FALSE) {
-  # Ensure Julia is started with enough threads for parallel chains.
-  # JULIA_NUM_THREADS is only read on first initialization; setting it
-  # after Julia is already running has no effect.
-  # TODO: this works in theory but causes segfaults for Stan models.
-  # that needs fixes in PDMPSamplers.jl to work.
-  # if (Sys.getenv("JULIA_NUM_THREADS") == "") {
-  #   n_threads <- as.character(
-  #     getOption("PDMPSamplersR.n_threads",
-  #               default = max(2L, parallel::detectCores(logical = FALSE)))
-  #   )
-  #   Sys.setenv("JULIA_NUM_THREADS" = n_threads)
-  # }
-
   if (verbose) {
     JuliaCall::julia_setup(verbose = TRUE)
   } else {
@@ -137,9 +102,12 @@ setup_julia_project <- function() {
 
 load_julia_project <- function() {
   project_dir <- get_julia_project_dir()
+  # Activate the project once per session and install whatever its manifest
+  # pins but is not installed yet (a no-op when everything is installed), so a
+  # project shipped with a Manifest.toml works on a fresh machine without
+  # further setup and without changing the pinned versions.
   JuliaCall::julia_command(sprintf(
-  # ensure pkg is imported as a precaution
-  'import Pkg; Base.active_project() == joinpath("%1$s", "Project.toml") || Pkg.activate("%1$s");',
+  'import Pkg; Base.active_project() == joinpath("%1$s", "Project.toml") || (Pkg.activate("%1$s"); Pkg.instantiate());',
   project_dir
   ))
 }
@@ -212,9 +180,10 @@ pdmpsamplers_status <- function() {
         else
           d = first(entries)
           ver = d.version === nothing ? "unknown" : string(d.version)
-          git_src = isnothing(d.git_source) ? "" : d.git_source
+          package_source = isnothing(d.source) ?
+            (isnothing(d.git_source) ? "" : d.git_source) : d.source
           source_type = d.is_tracking_path ? "local" : (d.is_tracking_repo ? "GitHub" : "registry")
-          join([ver, source_type, git_src], "|||")
+          join([ver, source_type, package_source], "|||")
         end
       end
     '),
@@ -333,8 +302,19 @@ load_required_julia_packages <- function() {
 #'
 #' @returns Invisible \code{TRUE} if the setup succeeds.
 #' @seealso \code{\link{pdmpsamplers_update}} to update Julia dependencies.
+#' @param project_dir Optional Julia project directory. Sets the R option
+#'   \code{pdmpsamplersr_config_julia_project_dir} for this R session; the same option
+#'   can be set before loading the package. Otherwise the user-cache project
+#'   is used. Configure each independent worker session separately.
 #' @export
-pdmpsamplers_setup <- function(verbose = TRUE) {
+pdmpsamplers_setup <- function(verbose = TRUE, project_dir = NULL) {
+  if (!is.null(project_dir)) {
+    validate_type(project_dir, type = "character", n = 1)
+    if (is.na(project_dir) || !nzchar(project_dir))
+      cli::cli_abort("{.arg project_dir} must be a nonempty path.")
+    options(pdmpsamplersr_config_julia_project_dir =
+      normalizePath(path.expand(project_dir), mustWork = FALSE))
+  }
   if (verbose) cli::cli_inform("Setting up Julia")
   ensure_julia_runtime(verbose = verbose)
   if (verbose) cli::cli_inform("Setting up Julia project for PDMPSamplers.jl")

@@ -23,16 +23,24 @@ pdmp_sample(
   can_stick = NULL,
   model_prior = NULL,
   parameter_prior = NULL,
+  slab_prior = NULL,
   grid_n = 30,
   grid_t_max = 2,
-  post_warmup_simplify = FALSE,
+  grid_bound = c("value_quadratic", "constant"),
+  grid_curvature_bound = NULL,
   show_progress = TRUE,
   n_chains = 1L,
   threaded = FALSE,
   seed = NULL,
   adaptive_scheme = c("diagonal", "fullrank"),
+  refresh_rate = 1,
   materialize = TRUE,
-  support_boundary = support_boundary_control()
+  trace_storage = c("dense", "streaming"),
+  streaming_trace_directory = NULL,
+  streaming_trace_buffer_events = 4096L,
+  online_summaries = NULL,
+  support_boundary = support_boundary_control(),
+  control = sampler_control()
 )
 }
 \arguments{
@@ -45,10 +53,12 @@ and return a numeric vector of the same length.}
 "BouncyParticle", "Boomerang", "AdaptiveBoomerang", "PreconditionedZigZag",
 or "PreconditionedBPS".
 The `"AdaptiveBoomerang"` flow learns its reference (mean and precision)
-during warmup and requires `"GridThinningStrategy"` as the algorithm.
+during warmup and requires a grid-like algorithm. It is supported with
+dependent slabs when `GridThinningStrategy` is selected; provide positive
+`t_warmup`, or let the sampler choose its 20% default.
 The `"PreconditionedZigZag"` and `"PreconditionedBPS"` flows learn a
 diagonal preconditioner during warmup and also require
-`"GridThinningStrategy"` as the algorithm.}
+a grid-like algorithm.}
 
 \item{algorithm}{Character string specifying the algorithm. One of
 "ThinningStrategy", "GridThinningStrategy", or "RootsPoissonStrategy".}
@@ -76,18 +86,32 @@ Only used with GridThinningStrategy to compute the Hessian-vector product.}
 
 \item{can_stick}{Logical vector of length d, which coordinates can stick (default: all FALSE).}
 
-\item{model_prior}{Prior distribution object for model selection. Should be of class
-'bernoulli' or 'beta-bernoulli' (default: NULL).}
+\item{model_prior}{Prior distribution object for model selection:
+\code{bernoulli()} or \code{betabernoulli()}.}
 
 \item{parameter_prior}{Numeric vector of length d, prior parameters for sticky sampling (default: NULL).}
+
+\item{slab_prior}{Optional dependent slab prior created by
+\code{dense_gaussian_slab()}, \code{exchangeable_gaussian_slab()},
+or \code{loglinear_gaussian_scale_slab()}. Mutually exclusive with
+\code{parameter_prior}. The full target supplied through \code{f} must
+contain the complete coherent slab represented by \code{slab_prior}; the
+package replaces that slab by its active-face restriction internally.}
 
 \item{grid_n}{Integer, number of grid points for GridThinningStrategy (default: 30).}
 
 \item{grid_t_max}{Numeric, maximum time for grid in GridThinningStrategy (default: 2.0).}
 
-\item{post_warmup_simplify}{Logical. If \code{TRUE}, the grid-thinning
-strategy may switch to a constant bound after warmup, reducing
-gradient calls during the main sampling phase.}
+\item{grid_bound}{Character string selecting the GridThinning proposal
+envelope. \code{"value_quadratic"} (default) bounds each grid cell by
+the larger endpoint rate plus \code{grid_curvature_bound * h^2 / 8};
+without \code{grid_curvature_bound} the cells use the ordinary
+GridThinning construction. \code{"constant"} always uses the ordinary
+construction.}
+
+\item{grid_curvature_bound}{Optional nonnegative bound on the curvature of
+the event rate over a grid cell, used by \code{grid_bound =
+"value_quadratic"}. Too small a value invalidates the envelope.}
 
 \item{show_progress}{Logical, whether to show progress bar (default: TRUE).}
 
@@ -101,7 +125,12 @@ Julia's sampler RNG and any generated default initial position when
 
 \item{adaptive_scheme}{Character string, adaptation scheme for AdaptiveBoomerang.
 One of "diagonal" (default, O(d) per update) or "fullrank" (O(d^3) per update,
-better for correlated targets). Ignored for other flow types.}
+better for correlated targets). Ignored for other flow types. With sticky
+sampling, "fullrank" releases frozen coordinates with the experimental
+boundary-proposal law; "diagonal" uses the stored-velocity law.}
+
+\item{refresh_rate}{Refreshment rate of the \code{"BouncyParticle"} and
+\code{"PreconditionedBPS"} flows (default 1). Ignored by the other flows.}
 
 \item{materialize}{Logical. If \code{TRUE} (default), the chain skeleton is
 immediately extracted from Julia into R so that \code{saveRDS()} /
@@ -109,8 +138,26 @@ immediately extracted from Julia into R so that \code{saveRDS()} /
 the extraction and keep only the live Julia reference.
 This can save time and memory if you don't need to save the result or if you plan to call \code{materialize()} manually later.}
 
+\item{trace_storage}{\code{"dense"} (default) keeps the event trace in
+memory. \code{"streaming"} writes it in chunks to
+\code{streaming_trace_directory}, so memory use does not grow with the
+number of events; it is required for \code{online_summaries}.}
+
+\item{streaming_trace_directory}{Directory for the streamed trace. Required
+when \code{trace_storage = "streaming"}, ignored otherwise.}
+
+\item{streaming_trace_buffer_events}{Number of events buffered in memory
+before a chunk is written (default 4096). Used only with
+\code{trace_storage = "streaming"}.}
+
+\item{online_summaries}{\code{NULL} (default) or options from
+\code{online_summary_options()}. Requires \code{trace_storage = "streaming"};
+the summaries are read with \code{read_online_summaries()}.}
+
 \item{support_boundary}{A list created by \code{support_boundary_control()} that
 controls support-boundary diagnostics and heuristic event/refresh recovery.}
+
+\item{control}{Additional call-local settings from \code{\link{sampler_control}}.}
 }
 \value{
 A \code{pdmp_result} object. Use \code{mean}, \code{var},

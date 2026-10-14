@@ -1,51 +1,217 @@
 module PDMPSamplersRBridge
 
-using PDMPSamplers, LinearAlgebra, BridgeStan, Random, Statistics
+using PDMPSamplers, LinearAlgebra, BridgeStan, Random, SparseArrays, Statistics, Libdl
+using FileWatching
+const LogExpFunctions = PDMPSamplers.LogExpFunctions
+
+# BridgeStan/Stan Math autodiff state is serialized consistently for every
+# Stan-backed provider used by this bridge.
+const _BRIDGESTAN_CALL_LOCK = ReentrantLock()
 
 export build_flow, build_algorithm, wrap_sticky
-export r_discretize, r_mean, r_var, r_std, r_cov, r_cor, r_quantile, r_median, r_cdf, r_ess, r_summary_all
+export build_model_prior_odds, build_slab_provider, wrap_dependent_sticky
+export r_discretize, r_mean, r_var, r_cov, r_cor, r_quantile, r_median, r_cdf, r_ess
 export r_inclusion_probs, extract_stats
-export r_chain_times, r_chain_positions, r_chain_velocities, r_chain_is_boomerang, r_chain_is_mutable_boomerang, r_chain_mu
+export r_chain_times, r_chain_positions, r_chain_velocities, r_chain_free_masks, r_chain_is_boomerang, r_chain_is_mutable_boomerang, r_chain_mu, r_chain_flow_cov
+export r_chain_initial_state, r_chain_retained_initial_state, r_chain_terminal_state
+export r_resolve_flow_spec, r_chain_flow_spec
 export r_from_skeleton
 export r_chain_is_factorized
+export r_chain_is_streaming,
+    r_chain_streaming_directory, r_chain_streaming_chunk_count,
+    r_chain_streaming_output_bytes, r_chain_streaming_flow_cov,
+    r_chain_streaming_physical_events,
+    r_chain_streaming_computational_boundaries,
+    r_chain_streaming_buffer_maximum
 export r_chain_sparse_initial_time, r_chain_sparse_initial_position, r_chain_sparse_initial_velocity
 export r_chain_sparse_event_indices, r_chain_sparse_event_times, r_chain_sparse_event_positions, r_chain_sparse_event_velocities
 export r_from_sparse_skeleton
-export r_pdmp_stan, r_pdmp_custom, r_pdmp_custom_subsampled
+export r_from_streaming_skeleton
+export r_chain_has_live_state_provenance
+export r_pdmp_stan, r_pdmp_custom
+export r_stan_subsampling_diagnostics, prepare_stan_subsampling,
+    r_pdmp_stan_subsampling
 export write_cmdstan_csv, r_constrain_and_write_csv
-export r_pdmp_brms_subsampled, r_pdmp_stan_for_brms
-export r_get_param_unc_names, r_stan_param_unc_num_with_header
+export r_pdmp_brms_subsampling, r_pdmp_stan_for_brms
+export r_get_param_unc_names
 export r_threading_available
+export r_cleanup_worker_state
+
+# Condition-specific objects are assigned in Main by JuliaCall for historical
+# API compatibility.  A Mirai daemon is reused across conditions, so those
+# roots must be cleared explicitly after the checkpoint is written.  Keeping
+# the list here gives the R scheduler a stable cleanup API without duplicating
+# Julia variable knowledge in simulation code.
+const _WORKER_STATE_ROOTS = (
+    :_stan_model, :_pdmp_model, :_prepared_stan_subsampling, :_subsampling,
+    :_path_to_stan_model, :_path_to_stan_data,
+    :_path_to_prior_stan_data_full, :_n_chains, :_curvature_backend,
+    :flow, :algorithm, :x0, :theta0, :free0, :stored_velocity0,
+    :flow_cov, :flow_mean, :c0, :grid_n, :grid_t_max,
+    :grid_bound, :grid_curvature_bound, :t0, :T, :t_warmup, :f, :hessian_f, :hessian, :sticky, :can_stick, :model_prior,
+    :parameter_prior, :slab_prior, :show_progress, :seed, :adaptive_scheme,
+    :control, :online_summaries, :refresh_rate, :unc_names, :_unc_names, :subsampling_anchor_updates,
+    :subsampling_use_anchor_bank,
+    :subsampling_anchor_bank_capacity, :subsampling_main_anchor_refresh_distance,
+    :subsampling_require_no_main_full_data, :subsampling_diagnostic_window,
+    :warmup_adaptation_interval, :subsampling_diagnostic_window,
+    :boomerang_variance_floor_fraction,
+    :support_boundary_mode, :support_boundary_max_bisection_steps,
+    :support_boundary_time_rtol, :support_boundary_time_atol,
+    :support_boundary_clip_fraction, :support_boundary_max_refresh_attempts,
+    :support_boundary_refresh_probe_time, :support_boundary_min_safe_time,
+    :_diagnostic_model, :_diagnostic_full_data, :_diagnostic_prior_data,
+    :_diagnostic_subsampling, :_diagnostic_position, :_diagnostic_subset,
+    :_diagnostic_velocity, :_diagnostic_flow, :_diagnostic_flow_mean,
+    :_diagnostic_flow_cov, :_diagnostic_phase)
+
+function r_cleanup_worker_state()
+    for name in _WORKER_STATE_ROOTS
+        if isdefined(Main, name)
+            Core.eval(Main, Expr(:(=), name, nothing))
+        end
+    end
+    GC.gc(true)
+    return nothing
+end
+
+function _boomerang_logscale_floor_mask(unc_names, d::Integer)
+    names = String.(unc_names)
+    length(names) == d || throw(DimensionMismatch(
+        "parameter-name count $(length(names)) does not match dimension $d"))
+    # The research variance safeguard applies to the hierarchical log-scale
+    # parameters of the OMRF Stan models.
+    return BitVector(name == "global_scale" || startswith(name, "node_scale.")
+        for name in names)
+end
+
+_subsampling_collection_values(values::Union{AbstractVector,Tuple}) = values
+_subsampling_collection_values(values::NamedTuple) = Base.values(values)
+_subsampling_collection_values(values::AbstractDict) = Base.values(values)
+_as_subsampling_predictor_indices(index::Number) = [Int(index)]
+_as_subsampling_predictor_indices(indices) = collect(Int, vec(indices))
+_subsampling_float_vector(value::Number) = [Float64(value)]
+_subsampling_float_vector(values) = collect(Float64, vec(values))
 
 function build_flow(flow_type::String, prec::AbstractMatrix{Float64}, flow_mean::AbstractVector{Float64};
-                    adaptive_scheme::String="diagonal")
+                    adaptive_scheme::String="diagonal", refresh_rate::Float64=1.0, control=nothing)
     if flow_type == "ZigZag"
         return ZigZag(prec, flow_mean)
     elseif flow_type == "BouncyParticle"
-        return BouncyParticle(prec, flow_mean)
+        return BouncyParticle(prec, flow_mean, refresh_rate)
     elseif flow_type == "Boomerang"
         return Boomerang(prec, flow_mean)
     elseif flow_type == "AdaptiveBoomerang"
-        d = length(flow_mean)
-        return AdaptiveBoomerang(d; scheme=Symbol(adaptive_scheme))
+        λref = Float64(_control_value(control, :adaptive_boomerang_refresh_rate, 0.1))
+        # `flow_mean` and `prec` are an initial adaptive specification, not a
+        # promise that warmup leaves the flow unchanged.  Starting from the
+        # supplied values is nevertheless essential for honest provenance and
+        # for reproducible adaptive initialization.
+        return AdaptiveBoomerang(prec, flow_mean; λref=λref)
     elseif flow_type == "PreconditionedZigZag"
-        d = length(flow_mean)
-        return PreconditionedZigZag(prec, flow_mean)
+        scale = prec isa Diagonal ? inv.(sqrt.(prec.diag)) :
+            ones(Float64, length(flow_mean))
+        return PreconditionedZigZag(prec, flow_mean; scale)
     elseif flow_type == "PreconditionedBPS"
-        d = length(flow_mean)
-        return PreconditionedBPS(prec, flow_mean)
+        scale = prec isa Diagonal ? inv.(sqrt.(prec.diag)) :
+            ones(Float64, length(flow_mean))
+        return PreconditionedBPS(prec, flow_mean; refresh_rate, scale)
+    elseif flow_type == "DensePreconditionedZigZag"
+        flow = DensePreconditionedZigZag(prec, flow_mean)
+        set_dense_preconditioner!(flow.metric,
+            cholesky(inv(Symmetric(prec))).L)
+        return flow
+    elseif flow_type == "DensePreconditionedBPS"
+        flow = DensePreconditionedBPS(prec, flow_mean)
+        set_dense_preconditioner!(flow.metric,
+            cholesky(inv(Symmetric(prec))).L)
+        return flow
     else
         throw(ArgumentError("Unknown flow type: $flow_type"))
     end
 end
 
-function build_algorithm(algorithm_type::String; c0::Float64, d::Integer, grid_n::Int, grid_t_max::Float64,
-        use_fd_hvp::Bool=false, post_warmup_simplify::Bool=false)
+# Full-gradient warmup and ordinary full sampling must resolve the same target
+# and sticky event wrapper.  Keep these constructors independent of the
+# retained subsampling representation so the switching-phase path cannot
+# silently acquire a different prior or boundary clock.
+function _build_sticky_target(base_model::PDMPModel, model_prior, slab_prior,
+        can_stick_vec, unc_names_vec)
+    return isnothing(slab_prior) ? base_model :
+        _build_dependent_slab_model(base_model, model_prior, slab_prior,
+            can_stick_vec, unc_names_vec)
+end
+
+function _build_sticky_event_algorithm(alg0, sticky::Bool, model_prior,
+        parameter_prior_vec, slab_prior, can_stick_vec, flow, unc_names_vec)
+    return isnothing(slab_prior) ?
+        wrap_sticky(alg0, sticky, model_prior, parameter_prior_vec,
+            can_stick_vec) :
+        wrap_dependent_sticky(alg0, sticky, model_prior, slab_prior,
+            can_stick_vec, flow, unc_names_vec)
+end
+
+function _resolved_flow_mean(flow)
+    base = PDMPSamplers.underlying_flow(flow)
+    return hasproperty(base, :μ) ? Vector{Float64}(getproperty(base, :μ)) : Float64[]
+end
+
+function _resolved_flow_covariance(flow)
+    d = length(_resolved_flow_mean(flow))
+    if flow isa PDMPSamplers.PreconditionedDynamics
+        metric = flow.metric
+        if metric isa PDMPSamplers.DiagonalPreconditioner
+            return Matrix{Float64}(Diagonal(abs2.(metric.scale)))
+        elseif metric isa PDMPSamplers.DensePreconditioner
+            return Matrix{Float64}(metric.L * transpose(metric.L))
+        elseif metric isa PDMPSamplers.IdentityPreconditioner
+            return Matrix{Float64}(I, d, d)
+        end
+    end
+    base = PDMPSamplers.underlying_flow(flow)
+    if hasproperty(base, :ΣL)
+        factor = getproperty(base, :ΣL)
+        return Matrix{Float64}(factor * transpose(factor))
+    elseif hasproperty(base, :Γ)
+        return Matrix{Float64}(inv(Symmetric(Matrix(getproperty(base, :Γ)))))
+    end
+    return Matrix{Float64}(I, d, d)
+end
+
+function _flow_spec(flow)
+    Dict("flow_type" => string(typeof(flow)),
+         "inner_flow_type" => string(typeof(PDMPSamplers.underlying_flow(flow))),
+         "mean" => _resolved_flow_mean(flow),
+         "covariance" => _resolved_flow_covariance(flow))
+end
+
+function r_resolve_flow_spec(flow_type::String, flow_mean, flow_cov; control=nothing,
+        adaptive_scheme::String="diagonal", refresh_rate::Float64=1.0)
+    d = length(flow_mean)
+    covariance = _as_flow_cov(flow_cov, d)
+    mean = _as_flow_mean(flow_mean, d)
+    flow = build_flow(flow_type, _to_precision(covariance, d), mean; control,
+                      adaptive_scheme, refresh_rate)
+    return _flow_spec(flow)
+end
+
+function build_algorithm(algorithm_type::String; control=nothing, c0::Float64, d::Integer, grid_n::Int, grid_t_max::Float64,
+        curvature_backend::String="auto",
+        grid_bound::String="value_quadratic",
+        grid_curvature_bound::Union{Nothing,Float64}=nothing)
     if algorithm_type == "ThinningStrategy"
-        return ThinningStrategy(GlobalBounds(c0 / d, d))
+        return ThinningStrategy(GlobalBounds(c0, d))
     elseif algorithm_type == "GridThinningStrategy"
+        requested_min = _control_value(control, :grid_n_min, nothing)
+        grid_n_min = isnothing(requested_min) ? min(grid_n, 5) : Int(requested_min)
+        requested_violation = _control_value(control, :grid_bound_violation, nothing)
+        bound_violation = isnothing(requested_violation) ? nothing : Symbol(requested_violation)
         return GridThinningStrategy(; N = grid_n, t_max = grid_t_max,
-            use_fd_hvp = use_fd_hvp, post_warmup_simplify = post_warmup_simplify)
+            N_min = grid_n_min,
+            curvature_backend = Symbol(curvature_backend),
+            bound = Symbol(grid_bound),
+            bound_violation = bound_violation,
+            curvature_bound = grid_curvature_bound)
     elseif algorithm_type == "RootsPoissonStrategy"
         return RootsPoissonTimeStrategy()
     else
@@ -60,15 +226,235 @@ function wrap_sticky(alg::PDMPSamplers.PoissonTimeStrategy, sticky::Bool, model_
         w = model_prior[:prob] ./ (1 .- model_prior[:prob])
         κ = w .* parameter_prior
     else
-        κ = BetaBernoulliKappa(model_prior[:a]::Float64, model_prior[:b]::Float64, parameter_prior)
+        κ = BetaBernoulliKappa(model_prior[:a]::Float64,
+            model_prior[:b]::Float64, parameter_prior, can_stick)
     end
 
     return Sticky(alg, κ, BitVector(can_stick))
 end
 
+function build_warmup_stop(t_warmup::Float64, control=nothing)
+    settings = _control_value(control, :warmup_stop, nothing)
+    isnothing(settings) && return nothing
+    return PDMPSamplers.AdaptiveWarmupCriterion(;
+        min_time=Float64(_control_value(settings, :min_time, 0.25t_warmup)),
+        max_time=Float64(_control_value(settings, :max_time, t_warmup)),
+        stable_time=Float64(_control_value(settings, :stable_time, 0.25t_warmup)),
+        min_events=Int(_control_value(settings, :min_events, 100)),
+        check_every=Int(_control_value(settings, :check_every, 25)))
+end
+
+_haskey(x, key::Symbol) = haskey(x, key) || haskey(x, String(key))
+_rget(x, key::Symbol) = haskey(x, key) ? x[key] : x[String(key)]
+_control_value(control, key, default) = isnothing(control) || isempty(control) || !_haskey(control, key) ? default : _rget(control, key)
+_as_float_vector(x::Number) = [Float64(x)]
+_as_float_vector(x) = Vector{Float64}(x)
+_as_int_vector(x::Number) = [Int(x)]
+_as_int_vector(x) = Vector{Int}(x)
+_as_bool_vector(x::Bool) = Bool[x]
+_as_bool_vector(x::Nothing) = nothing
+_as_bool_vector(x) = Bool.(x)
+_as_string_vector(x::AbstractString) = String[String(x)]
+_as_string_vector(x::Nothing) = String[]
+_as_string_vector(x) = String.(x)
+_as_float_matrix(x::Number) = reshape([Float64(x)], 1, 1)
+_as_float_matrix(x) = Matrix{Float64}(x)
+
+function _as_float_sparse_rows(spec)
+    dims = _as_int_vector(_rget(spec, :dims))
+    length(dims) == 2 || throw(DimensionMismatch("sparse design dims must have length two"))
+    rows = _as_int_vector(_rget(spec, :i))
+    columns = _as_int_vector(_rget(spec, :j))
+    values = _as_float_vector(_rget(spec, :x))
+    length(rows) == length(columns) == length(values) || throw(DimensionMismatch(
+        "sparse design i, j, and x vectors must have equal length"))
+    rowptr = zeros(Int, dims[1] + 1)
+    for row in rows
+        1 <= row <= dims[1] || throw(ArgumentError("sparse design row index is out of bounds"))
+        rowptr[row + 1] += 1
+    end
+    cumsum!(rowptr, rowptr)
+    rowptr .+= 1
+    colidx = Vector{Int}(undef, length(columns))
+    nzval = Vector{Float64}(undef, length(values))
+    nextptr = copy(rowptr)
+    for k in eachindex(rows, columns, values)
+        1 <= columns[k] <= dims[2] || throw(ArgumentError(
+            "sparse design column index is out of bounds"))
+        destination = nextptr[rows[k]]
+        colidx[destination] = columns[k]
+        nzval[destination] = values[k]
+        nextptr[rows[k]] += 1
+    end
+    return dims, rowptr, colidx, nzval
+end
+
+function _slab_type(slab_prior)
+    t = _rget(slab_prior, :type)
+    return String(t)
+end
+
+function _resolve_unc_spec(value, unc_names::AbstractVector{<:AbstractString}, label)
+    values = value isa AbstractString ? [String(value)] : String.(value)
+    names = String.(unc_names)
+    idx = Int[]
+    for requested in values
+        exact = findall(==(requested), names)
+        matches = isempty(exact) ? findall(name ->
+            startswith(name, requested * ".") || startswith(name, requested * "["), names) : exact
+        isempty(matches) && throw(ArgumentError(
+            "$label name or block prefix $requested was not found among unconstrained parameter names"))
+        append!(idx, matches)
+    end
+    allunique(idx) || throw(ArgumentError("resolved $label coordinates contain duplicates"))
+    return idx
+end
+
+function _coef_indices(slab_prior, unc_names::AbstractVector{<:AbstractString},
+        can_stick::AbstractVector{Bool}, d::Integer)
+    coef = _rget(slab_prior, :coef)
+    if isnothing(coef)
+        idx = findall(Bool.(can_stick))
+        isempty(idx) && throw(ArgumentError("slab_prior requires at least one stickable coefficient"))
+        return Int.(idx)
+    end
+    if coef isa AbstractString
+        isempty(unc_names) && throw(ArgumentError("character slab coef requires unconstrained parameter names"))
+        idx = _resolve_unc_spec(coef, unc_names, "slab coef")
+        any(i -> !can_stick[i], idx) && throw(ArgumentError("explicit slab coef must be a subset of can_stick coordinates"))
+        return idx
+    end
+    if coef isa AbstractVector{<:AbstractString}
+        isempty(unc_names) && throw(ArgumentError("character slab coef requires unconstrained parameter names"))
+        idx = _resolve_unc_spec(coef, unc_names, "slab coef")
+        any(i -> !can_stick[i], idx) &&
+            throw(ArgumentError("explicit slab coef must be a subset of can_stick coordinates"))
+        return idx
+    end
+    idx = coef isa Integer ? [Int(coef)] : Int.(coef)
+    any(i -> i < 1 || i > d, idx) && throw(ArgumentError("integer slab coef indices must lie in 1:d"))
+    any(i -> !can_stick[i], idx) &&
+        throw(ArgumentError("explicit slab coef must be a subset of can_stick coordinates"))
+    return idx
+end
+
+function _state_indices(value, unc_names::AbstractVector{<:AbstractString}, d::Integer, label::AbstractString)
+    if value isa AbstractString
+        isempty(unc_names) && throw(ArgumentError("character $label requires unconstrained parameter names"))
+        return _resolve_unc_spec(value, unc_names, label)
+    elseif value isa AbstractVector{<:AbstractString}
+        isempty(unc_names) && throw(ArgumentError("character $label requires unconstrained parameter names"))
+        return _resolve_unc_spec(value, unc_names, label)
+    end
+    idx = value isa Integer ? [Int(value)] : Int.(value)
+    any(i -> i < 1 || i > d, idx) && throw(ArgumentError("$label indices must lie in 1:d"))
+    return idx
+end
+
+function build_model_prior_odds(model_prior, beta_indices::AbstractVector{Int}, d::Integer)
+    m = length(beta_indices)
+    if _haskey(model_prior, :prob)
+        prob = _as_float_vector(_rget(model_prior, :prob))
+        if length(prob) == 1
+            return PDMPSamplers.BernoulliModelPrior(fill(prob[1], m))
+        elseif length(prob) == m
+            return PDMPSamplers.BernoulliModelPrior(prob)
+        elseif length(prob) == d
+            return PDMPSamplers.BernoulliModelPrior(prob[beta_indices])
+        else
+            throw(DimensionMismatch("Bernoulli model prior length must be 1, beta dimension, or full dimension"))
+        end
+    elseif _haskey(model_prior, :a) && _haskey(model_prior, :b)
+        return PDMPSamplers.BetaBernoulliModelPrior(
+            m, Float64(_rget(model_prior, :a)), Float64(_rget(model_prior, :b)))
+    else
+        throw(ArgumentError("unknown model_prior specification"))
+    end
+end
+
+function build_slab_provider(slab_prior, unc_names::AbstractVector{<:AbstractString},
+        can_stick::AbstractVector{Bool}, d::Integer)
+    beta_idx = _coef_indices(slab_prior, unc_names, can_stick, d)
+    t = _slab_type(slab_prior)
+    if t == "dense_gaussian"
+        return DenseGaussianSlab(_as_float_vector(_rget(slab_prior, :mean)),
+            _as_float_matrix(_rget(slab_prior, :cov)), beta_idx)
+    elseif t == "exchangeable_gaussian"
+        mean = Float64(_rget(slab_prior, :mean))
+        return ExchangeableGaussianSlab(beta_idx, mean,
+            Float64(_rget(slab_prior, :u)), Float64(_rget(slab_prior, :v)))
+    elseif t == "loglinear_gaussian_scale"
+        log_base_scales = _as_float_vector(_rget(slab_prior, :log_base_scales))
+        length(log_base_scales) == 1 &&
+            (log_base_scales = fill(log_base_scales[1], length(beta_idx)))
+        logscale_idx = _state_indices(_rget(slab_prior, :logscale), unc_names, d, "logscale")
+        design = _rget(slab_prior, :logscale_design)
+        storage = String(_rget(design, :storage))
+        dims = _as_int_vector(_rget(design, :dims))
+        dims == [length(beta_idx), length(logscale_idx)] ||
+            throw(DimensionMismatch("logscale_design must have size (beta dimension, logscale dimension)"))
+        isempty(intersect(beta_idx, logscale_idx)) || throw(ArgumentError(
+            "loglinear_gaussian_scale_slab logscale coordinates must be disjoint from slab coef coordinates"))
+        any(i -> can_stick[i], logscale_idx) && throw(ArgumentError(
+            "loglinear_gaussian_scale_slab logscale coordinates must be non-stickable"))
+        if storage == "dense"
+            values = _as_float_vector(_rget(design, :x))
+            length(values) == prod(dims) || throw(DimensionMismatch(
+                "dense logscale_design value count does not match its dimensions"))
+            return LogLinearGaussianScaleSlab(beta_idx, logscale_idx,
+                log_base_scales, reshape(values, dims...))
+        elseif storage == "sparse_rows"
+            _, rowptr, colidx, nzval = _as_float_sparse_rows(design)
+            return LogLinearGaussianScaleSlab(beta_idx, logscale_idx,
+                log_base_scales, rowptr, colidx, nzval)
+        end
+        throw(ArgumentError("unknown logscale_design storage $storage"))
+    else
+        throw(ArgumentError("unknown slab_prior type: $t"))
+    end
+end
+
+"""
+Wrap a dependent-slab sampler using the concrete constructed dynamics.
+
+Clock selection is flow-aware: in particular, Boomerang-family dynamics with
+log-linear Gaussian scale slabs use the harmonic clock. Passing an R flow name
+here would discard preconditioning and adaptive-dynamics information.
+"""
+function wrap_dependent_sticky(alg::PDMPSamplers.PoissonTimeStrategy, sticky::Bool,
+        model_prior, slab_prior, can_stick,
+        flow::PDMPSamplers.ContinuousDynamics,
+        unc_names::AbstractVector{<:AbstractString}=String[])
+    sticky || throw(ArgumentError("wrap_dependent_sticky requires sticky=true"))
+    isnothing(slab_prior) && throw(ArgumentError("wrap_dependent_sticky requires slab_prior"))
+    d = length(can_stick)
+    provider = build_slab_provider(slab_prior, unc_names, can_stick, d)
+    odds = build_model_prior_odds(model_prior, PDMPSamplers.beta_indices(provider), d)
+    clock = default_aggregate_unstick_clock(provider, odds, flow)
+    return AggregateSticky(alg, clock, BitVector(can_stick))
+end
+
+function _build_dependent_slab_model(
+        posterior_model::PDMPModel,
+        model_prior,
+        slab_prior,
+        can_stick,
+        unc_names::AbstractVector{<:AbstractString}=String[])
+    d = posterior_model.d
+    provider = build_slab_provider(slab_prior, unc_names, can_stick, d)
+    odds = build_model_prior_odds(model_prior, PDMPSamplers.beta_indices(provider), d)
+    target = DependentSlabTarget(d, posterior_model.grad, provider, odds;
+        posterior_hvp=posterior_model.hvp)
+    return PDMPModel(target; hvp=true)
+end
+
 function _to_precision(flow_cov::AbstractMatrix{Float64}, d::Int)
-    if isdiag(flow_cov) && all(i -> @inbounds(flow_cov[i, i]) ≈ 1.0, 1:d)
-        return Diagonal(ones(d))
+    if isdiag(flow_cov)
+        diagonal = Vector{Float64}(undef, d)
+        @inbounds for i in 1:d
+            diagonal[i] = inv(flow_cov[i, i])
+        end
+        return Diagonal(diagonal)
     end
     return inv(Symmetric(flow_cov))
 end
@@ -89,30 +475,196 @@ function _as_flow_cov(flow_cov, d::Int)
     return Matrix{Float64}(flow_cov)
 end
 
-function _compile_model_with_header(path_to_stan_model::String, hpp_path::String)
+function _compile_cache_checksum(bytes::Vector{UInt8})
+    value = UInt64(0xcbf29ce484222325)
+    @inbounds for byte in bytes
+        value = (value ⊻ UInt64(byte)) * UInt64(0x100000001b3)
+    end
+    return value
+end
+
+# The compiled BridgeStan library is an ABI artifact, not just a function of
+# the Stan source.  Include an explicit schema marker so caches produced by an
+# older BridgeStan/PDMPSamplersR build cannot be loaded after the toolchain or
+# generated-model ABI changes.
+const _BRIDGESTAN_CACHE_SCHEMA = "pdmpsamplersr-bridgestan-cache-v2"
+
+function _cache_build_dir(path_to_stan_model::String,
+        stanc_args::Vector{String}, make_args::Vector{String}; cache_root=nothing)
+    cache_root = isnothing(cache_root) ? joinpath(first(DEPOT_PATH), "pdmpsamplersr", "bridgestan") : String(cache_root)
+    source_bytes = read(path_to_stan_model)
+    option_bytes = Vector{UInt8}(codeunits(join([stanc_args; make_args], '\0')))
+    schema_bytes = Vector{UInt8}(codeunits(_BRIDGESTAN_CACHE_SCHEMA))
+    checksum = _compile_cache_checksum([schema_bytes; source_bytes; option_bytes])
+    return joinpath(cache_root, string(checksum; base=16, pad=16))
+end
+
+function _with_compile_lock(f::Function, lock_path::String)
+    mkpath(dirname(lock_path))
+    # Compilation can take minutes on a cold cache.  Refresh the pidfile while
+    # waiting/compiling, and recover locks left by a killed worker after one
+    # hour.  This lock is shared by independent R/mirai worker processes.
+    FileWatching.Pidfile.mkpidlock(lock_path;
+        stale_age=3600.0, refresh=600.0) do
+        f()
+    end
+end
+
+function _cached_stan_source(path_to_stan_model::String,
+        stanc_args::Vector{String}, make_args::Vector{String},
+        build_dir::String=_cache_build_dir(path_to_stan_model, stanc_args, make_args))
+    mkpath(build_dir)
+    cached_source = joinpath(build_dir, basename(path_to_stan_model))
+    isfile(cached_source) || cp(path_to_stan_model, cached_source)
+    return cached_source
+end
+
+function _compile_model(path_to_stan_model::String; compile_options=nothing)
     !endswith(path_to_stan_model, ".stan") && return path_to_stan_model
-    hpp_path_for_make = replace(normpath(hpp_path), "\\" => "/")
-    BridgeStan.compile_model(path_to_stan_model;
-        stanc_args=["--allow-undefined"],
-        make_args=["USER_HEADER=$(hpp_path_for_make)"])
+    optimize = Bool(_control_value(compile_options, :optimize, false))
+    stanc_flags = optimize ? "--O1" : ""
+    stanc_args = isempty(stanc_flags) ? String[] : [stanc_flags]
+    make_args = String[]
+    Bool(_control_value(compile_options, :native, false)) &&
+        push!(make_args, "CXXFLAGS+=-march=native")
+    if Bool(_control_value(compile_options, :cache, false))
+        build_dir = _cache_build_dir(path_to_stan_model, stanc_args, make_args;
+            cache_root=_control_value(compile_options, :cache_dir, nothing))
+        return _with_compile_lock(joinpath(build_dir, ".compile.lock")) do
+            source = _cached_stan_source(path_to_stan_model, stanc_args, make_args, build_dir)
+            library = replace(source, r"\.stan$" => "_model.$(Libdl.dlext)")
+            isfile(library) && return library
+            BridgeStan.compile_model(source; stanc_args, make_args)
+        end
+    end
+    return _with_compile_lock(string(path_to_stan_model, ".compile.lock")) do
+        library = replace(path_to_stan_model, r"\.stan$" => "_model.$(Libdl.dlext)")
+        isfile(library) && return library
+        BridgeStan.compile_model(path_to_stan_model; stanc_args, make_args)
+    end
 end
 
-function r_stan_param_unc_num_with_header(path_to_stan_model::String,
-                                          path_to_stan_data::String,
-                                          hpp_path::String)
-    lib_path = _compile_model_with_header(path_to_stan_model, hpp_path)
-    sm = BridgeStan.StanModel(lib_path, path_to_stan_data; warn=false)
-    return Int(BridgeStan.param_unc_num(sm))
+function _compile_model_with_header(path_to_stan_model::String, hpp_path::String; compile_options=nothing)
+    !endswith(path_to_stan_model, ".stan") && return path_to_stan_model
+    header = replace(abspath(normpath(hpp_path)), "\\" => "/")
+    stanc_args = ["--allow-undefined"]
+    Bool(_control_value(compile_options, :optimize, false)) &&
+        push!(stanc_args, "--O1")
+    make_args = ["USER_HEADER=$(header)"]
+    Bool(_control_value(compile_options, :native, false)) &&
+        push!(make_args, "CXXFLAGS+=-march=native")
+    if Bool(_control_value(compile_options, :cache, false))
+        build_dir = _cache_build_dir(path_to_stan_model, stanc_args, make_args;
+            cache_root=_control_value(compile_options, :cache_dir, nothing))
+        return _with_compile_lock(joinpath(build_dir, ".compile.lock")) do
+            source = _cached_stan_source(path_to_stan_model, stanc_args, make_args, build_dir)
+            library = replace(source, r"\.stan$" => "_model.$(Libdl.dlext)")
+            isfile(library) && mtime(library) >=
+                max(mtime(source), mtime(hpp_path)) && return library
+            BridgeStan.compile_model(source; stanc_args, make_args)
+        end
+    end
+    return _with_compile_lock(string(path_to_stan_model, ".compile.lock")) do
+        library = replace(path_to_stan_model, r"\.stan$" => "_model.$(Libdl.dlext)")
+        isfile(library) && mtime(library) >=
+            max(mtime(path_to_stan_model), mtime(hpp_path)) && return library
+        BridgeStan.compile_model(path_to_stan_model; stanc_args, make_args)
+    end
 end
 
-function _pack_result(chains::PDMPChains)
+function _flow_provenance(chains::PDMPChains, requested_flow::String,
+        adaptive_scheme::String, initial_refresh_rate::Float64,
+        warmup_adaptation_interval::Union{Nothing,Float64}=nothing,
+        t_warmup::Float64=0.0)
+    trace = chains.traces[1]
+    flow = trace.flow
+    underlying = PDMPSamplers.underlying_flow(flow)
+    preconditioner = flow isa PDMPSamplers.PreconditionedDynamics ?
+        string(typeof(flow.metric)) : "None"
+    adaptation_class = if flow isa PDMPSamplers.PreconditionedDynamics &&
+            flow.metric isa PDMPSamplers.DiagonalPreconditioner
+        "diagonal_preconditioner_warmup"
+    elseif underlying isa PDMPSamplers.MutableBoomerang
+        "adaptive_boomerang_diagonal"
+    else
+        "none"
+    end
+    dynamics_adaptive = adaptation_class != "none"
+    resolved_interval = isnothing(warmup_adaptation_interval) ?
+        (t_warmup > 0 ? t_warmup / 10 : 0.0) : warmup_adaptation_interval
+    return (
+        requested_flow = requested_flow,
+        concrete_flow_type = string(typeof(flow)),
+        underlying_dynamics_type = string(typeof(underlying)),
+        preconditioner_type = preconditioner,
+        adaptive_scheme = adaptation_class == "adaptive_boomerang_diagonal" ?
+            adaptive_scheme : "none",
+        adaptation_class = adaptation_class,
+        resolved_adaptation_interval = resolved_interval,
+        dynamics_adaptive = dynamics_adaptive,
+        initial_refresh_rate = initial_refresh_rate,
+        final_refresh_rate = try Float64(PDMPSamplers.refresh_rate(flow)) catch; NaN end,
+    )
+end
+
+# Online summary settings belong to this call, never to the worker process.
+function _bridge_trace_storage(directory, buffer_events, T, online_summaries=nothing)
+    enabled = !isnothing(online_summaries)
+    batches = enabled ? Int(_rget(online_summaries, :batches)) : 0
+    return PDMPSamplers.StreamingTraceStorage(directory; buffer_events,
+        write_events=enabled ? Bool(_rget(online_summaries, :write_events)) : true,
+        online_batches=batches,
+        online_end_time=batches > 0 ? Float64(T) : NaN,
+        online_grid_spacing=enabled ? Float64(coalesce(_rget(online_summaries, :grid_spacing), NaN)) : NaN,
+        online_warmup_batches=enabled ? Int(_control_value(online_summaries, :warmup_batches, 0)) : 0)
+end
+
+function _pack_result(chains::PDMPChains; requested_flow::String="",
+        adaptive_scheme::String="none", initial_refresh_rate::Float64=NaN,
+        warmup_adaptation_interval::Union{Nothing,Float64}=nothing,
+        t_warmup::Float64=0.0)
     stats = extract_stats(chains)
     d = length(first(chains.traces[1]).position)
+    provenance = _flow_provenance(chains, requested_flow, adaptive_scheme,
+        initial_refresh_rate, warmup_adaptation_interval, t_warmup)
+    n = length(chains.traces)
+    stats["requested_flow"] = fill(provenance.requested_flow, n)
+    stats["concrete_flow_type"] = fill(provenance.concrete_flow_type, n)
+    stats["underlying_dynamics_type"] = fill(provenance.underlying_dynamics_type, n)
+    stats["preconditioner_type"] = fill(provenance.preconditioner_type, n)
+    stats["resolved_adaptive_scheme"] = fill(provenance.adaptive_scheme, n)
+    stats["dynamics_adaptive"] = fill(
+        provenance.dynamics_adaptive ? "true" : "false", n)
+    stats["adaptation_class"] = fill(provenance.adaptation_class, n)
+    stats["resolved_adaptation_interval"] = fill(
+        provenance.resolved_adaptation_interval, n)
+    stats["initial_refresh_rate"] = fill(provenance.initial_refresh_rate, n)
+    stats["final_refresh_rate"] = fill(provenance.final_refresh_rate, n)
+    # `extract_stats` uses a compact R-bridge value union (Float64 vectors,
+    # String vectors, and matrices).  Store integer thread counts as numeric
+    # vectors so provenance cannot make result packing fail after sampling.
+    stats["julia_threads"] = fill(Float64(Threads.nthreads()), n)
+    stats["blas_threads"] = fill(Float64(LinearAlgebra.BLAS.get_num_threads()), n)
+    stats["openmp_threads"] = fill(get(ENV, "OMP_NUM_THREADS", "unset"), n)
+    stats["mkl_threads"] = fill(get(ENV, "MKL_NUM_THREADS", "unset"), n)
+    stats["openblas_threads"] = fill(get(ENV, "OPENBLAS_NUM_THREADS", "unset"), n)
     return Dict{String,Any}(
         "chains"   => chains,
         "stats"    => stats,
         "d"        => d,
-        "n_chains" => PDMPSamplers.n_chains(chains)
+        "n_chains" => PDMPSamplers.n_chains(chains),
+        "flow_provenance" => Dict{String,Any}(
+            "requested_flow" => provenance.requested_flow,
+            "concrete_flow_type" => provenance.concrete_flow_type,
+            "underlying_dynamics_type" => provenance.underlying_dynamics_type,
+            "preconditioner_type" => provenance.preconditioner_type,
+            "adaptive_scheme" => provenance.adaptive_scheme,
+            "dynamics_adaptive" => provenance.dynamics_adaptive,
+            "adaptation_class" => provenance.adaptation_class,
+            "resolved_adaptation_interval" =>
+                provenance.resolved_adaptation_interval,
+            "initial_refresh_rate" => provenance.initial_refresh_rate,
+            "final_refresh_rate" => provenance.final_refresh_rate)
     )
 end
 
@@ -130,12 +682,42 @@ end
 
 r_mean(chains::PDMPChains; chain::Int = 1) = Statistics.mean(chains; chain)
 r_var(chains::PDMPChains; chain::Int = 1)  = Statistics.var(chains; chain)
-r_std(chains::PDMPChains; chain::Int = 1)  = Statistics.std(chains; chain)
 r_cov(chains::PDMPChains; chain::Int = 1)  = Statistics.cov(chains; chain)
 r_cor(chains::PDMPChains; chain::Int = 1)  = Statistics.cor(chains; chain)
 
 function r_quantile(chains::PDMPChains, p::Float64; chain::Int = 1, coordinate::Int = -1)
     Statistics.quantile(chains, p; chain, coordinate)
+end
+
+"""
+    r_quantile(chains, probabilities; chain=1, coordinate=-1)
+
+Compute several quantiles in one position-domain sweep per coordinate.  The
+scalar R bridge historically repeated the complete sweep for every requested
+probability.  On long sticky traces this doubled multi-gigabyte temporary
+allocations for an equal-tail interval.  Reclaim each coordinate's sweep
+workspace before moving to the next coordinate so peak memory is bounded by
+one marginal rather than by the full parameter dimension.
+"""
+function r_quantile(chains::PDMPChains, p::AbstractVector{<:Real};
+        chain::Int = 1, coordinate::Int = -1, gc_interval::Int=16)
+    gc_interval >= 1 || throw(ArgumentError("gc_interval must be positive"))
+    trace = chains.traces[chain]
+    probabilities = collect(Float64, p)
+    if coordinate != -1
+        return Statistics.quantile(trace, probabilities; coordinate)
+    end
+
+    d = length(first(trace).position)
+    result = Matrix{Float64}(undef, length(probabilities), d)
+    for j in 1:d
+        result[:, j] .= Statistics.quantile(trace, probabilities; coordinate=j)
+        # Sweep events can be O(length(trace)) and are not reused by another
+        # coordinate.  An explicit incremental collection prevents them from
+        # accumulating until the enclosing all-coordinate call returns.
+        (j == d || j % gc_interval == 0) && GC.gc(false)
+    end
+    return result
 end
 
 function r_median(chains::PDMPChains; chain::Int = 1, coordinate::Int = -1)
@@ -152,17 +734,6 @@ function r_ess(chains::PDMPChains; chain::Int = 1, n_batches::Int = 0)
     else
         ess(chains; chain)
     end
-end
-
-function r_summary_all(chains::PDMPChains; chain::Int = 1)
-    Dict{String,Any}(
-        "mean"   => Statistics.mean(chains; chain),
-        "var"    => Statistics.var(chains; chain),
-        "std"    => Statistics.std(chains; chain),
-        "cov"    => Statistics.cov(chains; chain),
-        "cor"    => Statistics.cor(chains; chain),
-        "median" => Statistics.median(chains.traces[chain])
-    )
 end
 
 r_inclusion_probs(chains::PDMPChains; chain::Int = 1) = inclusion_probs(chains; chain)
@@ -196,11 +767,6 @@ end
 function r_var(chains::PDMPChains, specs::AbstractVector; chain::Int = 1)
     transforms = _build_transforms(specs)
     Statistics.var(chains.traces[chain], transforms)
-end
-
-function r_std(chains::PDMPChains, specs::AbstractVector; chain::Int = 1)
-    transforms = _build_transforms(specs)
-    Statistics.std(chains.traces[chain], transforms)
 end
 
 function r_quantile(chains::PDMPChains, p::Float64, specs::AbstractVector; chain::Int = 1, coordinate::Int = -1)
@@ -238,6 +804,41 @@ end
 function r_chain_is_factorized(chains::PDMPChains; chain::Int)
     chains.traces[chain] isa PDMPSamplers.FactorizedTrace
 end
+
+function r_chain_is_streaming(chains::PDMPChains; chain::Int)
+    chains.traces[chain] isa PDMPSamplers.StreamingPDMPTrace
+end
+
+r_chain_streaming_directory(chains::PDMPChains; chain::Int) =
+    String(chains.traces[chain].directory)
+r_chain_streaming_chunk_count(chains::PDMPChains; chain::Int) =
+    Float64(length(chains.traces[chain].chunks))
+r_chain_streaming_output_bytes(chains::PDMPChains; chain::Int) =
+    Float64(chains.traces[chain].chunks.total_bytes)
+function r_chain_streaming_flow_cov(chains::PDMPChains; chain::Int)
+    covariance = _resolved_flow_covariance(chains.traces[chain].flow)
+    diagonal = diag(covariance)
+    if all(i == j || iszero(covariance[i, j])
+            for i in axes(covariance, 1), j in axes(covariance, 2))
+        return Vector{Float64}(diagonal)
+    end
+    return Matrix{Float64}(covariance)
+end
+
+r_chain_streaming_physical_events(chains::PDMPChains; chain::Int) =
+    Float64(chains.traces[chain].physical_events)
+r_chain_streaming_computational_boundaries(chains::PDMPChains; chain::Int) =
+    Float64(chains.traces[chain].computational_boundaries)
+r_chain_streaming_buffer_maximum(chains::PDMPChains; chain::Int) =
+    Float64(chains.traces[chain].buffer_maximum)
+
+r_chain_has_live_state_provenance(chains::PDMPChains; chain::Int=1) =
+    length(chains.initial_states) >= chain &&
+    length(chains.retained_initial_states) >= chain &&
+    length(chains.terminal_states) >= chain &&
+    chains.initial_states[chain] !== nothing &&
+    chains.retained_initial_states[chain] !== nothing &&
+    chains.terminal_states[chain] !== nothing
 
 function r_chain_sparse_initial_time(chains::PDMPChains; chain::Int)
     Float64(chains.traces[chain].initial_state.time)
@@ -293,19 +894,76 @@ function r_from_sparse_skeleton(
         )
         push!(traces, _r_factorized_trace(events, flow, initial_state))
     end
-    PDMPChains(traces, PDMPSamplers.StatisticCounter[])
+    PDMPChains(traces, [PDMPSamplers.StatisticCounter() for _ in traces],
+        fill(nothing, n), fill(nothing, n), fill(nothing, n))
+end
+
+function r_from_streaming_skeleton(directory_list::AbstractVector,
+        chunk_count_list::AbstractVector,
+        physical_events_list::AbstractVector,
+        computational_boundaries_list::AbstractVector,
+        buffer_maximum_list::AbstractVector,
+        initial_times_list::AbstractVector,
+        initial_positions_list::AbstractVector,
+        initial_velocities_list::AbstractVector,
+        initial_stored_velocities_list::AbstractVector,
+        initial_free_masks_list::AbstractVector,
+        terminal_times_list::AbstractVector,
+        terminal_positions_list::AbstractVector,
+        terminal_velocities_list::AbstractVector,
+        terminal_stored_velocities_list::AbstractVector,
+        terminal_free_masks_list::AbstractVector,
+        is_boomerang_list::AbstractVector, mu_list::AbstractVector,
+        flow_cov_list::AbstractVector)
+    n = length(initial_times_list)
+    traces = PDMPSamplers.StreamingPDMPTrace[]
+    initial_states = Any[]
+    terminal_states = Any[]
+    sizehint!(traces, n); sizehint!(initial_states, n)
+    sizehint!(terminal_states, n)
+    for i in 1:n
+        position0 = Vector{Float64}(initial_positions_list[i])
+        d = length(position0)
+        raw_covariance = flow_cov_list[i]
+        covariance = raw_covariance isa AbstractVector ?
+            Matrix(Diagonal(Vector{Float64}(raw_covariance))) :
+            Matrix{Float64}(raw_covariance)
+        precision = inv(Symmetric(covariance))
+        mu = Vector{Float64}(mu_list[i])
+        flow = Bool(is_boomerang_list[i]) ? Boomerang(precision, mu) :
+            ZigZag(I(d), zeros(d))
+        initial = PDMPSamplers.PDMPTerminalState(
+            Float64(initial_times_list[i]), position0,
+            Vector{Float64}(initial_velocities_list[i]),
+            Vector{Float64}(initial_stored_velocities_list[i]),
+            BitVector(initial_free_masks_list[i]), flow)
+        terminal = PDMPSamplers.PDMPTerminalState(
+            Float64(terminal_times_list[i]),
+            Vector{Float64}(terminal_positions_list[i]),
+            Vector{Float64}(terminal_velocities_list[i]),
+            Vector{Float64}(terminal_stored_velocities_list[i]),
+            BitVector(terminal_free_masks_list[i]), flow)
+        directory = String(directory_list[i])
+        chunk_count = Int(chunk_count_list[i])
+        trace = PDMPSamplers.restore_streaming_trace(directory, chunk_count,
+            flow, initial, terminal;
+            physical_events=Int(physical_events_list[i]),
+            computational_boundaries=Int(computational_boundaries_list[i]),
+            buffer_maximum=Int(buffer_maximum_list[i]))
+        push!(traces, trace); push!(initial_states, initial)
+        push!(terminal_states, terminal)
+    end
+    return PDMPChains(traces, [PDMPSamplers.StatisticCounter() for _ in traces], initial_states,
+        copy(initial_states), terminal_states)
 end
 
 function _r_factorized_trace(events, flow, initial_state)
     bounds_cache = Dict{Int, Tuple{Float64, Float64}}()
-    if applicable(PDMPSamplers.FactorizedTrace,
-                  events, flow, initial_state, initial_state, false, bounds_cache)
-        return PDMPSamplers.FactorizedTrace(
-            events, flow, initial_state, initial_state, false, bounds_cache
-        )
-    else
-        return PDMPSamplers.FactorizedTrace(events, flow, initial_state)
-    end
+    # The cached state is invalid until the events are first replayed.
+    return PDMPSamplers.FactorizedTrace(
+        events, flow, initial_state, deepcopy(initial_state), 0.0, false,
+        bounds_cache, Ref(length(events))
+    )
 end
 
 function r_chain_times(chains::PDMPChains; chain::Int)
@@ -320,22 +978,57 @@ function r_chain_velocities(chains::PDMPChains; chain::Int)
     Matrix{Float64}(_dense_compact(chains, chain).velocities)
 end
 
+function r_chain_free_masks(chains::PDMPChains; chain::Int)
+    masks = _dense_compact(chains, chain).free_masks
+    masks === nothing && return falses(0, 0)
+    return Matrix{Bool}(masks)
+end
+
 function r_chain_is_boomerang(chains::PDMPChains; chain::Int)
-    PDMPSamplers._underlying_flow(chains.traces[chain].flow) isa AnyBoomerang
+    PDMPSamplers.underlying_flow(chains.traces[chain].flow) isa AnyBoomerang
 end
 
 function r_chain_is_mutable_boomerang(chains::PDMPChains; chain::Int)
-    PDMPSamplers._underlying_flow(chains.traces[chain].flow) isa MutableBoomerang
+    PDMPSamplers.underlying_flow(chains.traces[chain].flow) isa MutableBoomerang
 end
 
 function r_chain_mu(chains::PDMPChains; chain::Int)
-    base = PDMPSamplers._underlying_flow(chains.traces[chain].flow)
-    base isa AnyBoomerang ? Vector{Float64}(base.μ) : Float64[]
+    Vector{Float64}(_resolved_flow_mean(chains.traces[chain].flow))
+end
+
+function r_chain_flow_cov(chains::PDMPChains; chain::Int)
+    Matrix{Float64}(_resolved_flow_covariance(chains.traces[chain].flow))
+end
+
+function _state_spec(state)
+    Dict(
+        "time" => Float64(state.t),
+        "position" => Vector{Float64}(state.position),
+        "physical_velocity" => Vector{Float64}(state.physical_velocity),
+        "stored_frozen_velocity" => Vector{Float64}(state.stored_frozen_velocity),
+        "free_mask" => Vector{Bool}(state.free),
+        "flow" => _flow_spec(state.flow))
+end
+
+r_chain_initial_state(chains::PDMPChains; chain::Int) =
+    _state_spec(PDMPSamplers.initial_state(chains, chain))
+r_chain_retained_initial_state(chains::PDMPChains; chain::Int) =
+    _state_spec(PDMPSamplers.retained_initial_state(chains, chain))
+r_chain_terminal_state(chains::PDMPChains; chain::Int) =
+    _state_spec(PDMPSamplers.terminal_state(chains, chain))
+
+r_chain_flow_spec(chains::PDMPChains; chain::Int) =
+    _flow_spec(chains.traces[chain].flow)
+
+function _final_lambda_ref(chains::PDMPChains, chain::Int)
+    base = PDMPSamplers.underlying_flow(chains.traces[chain].flow)
+    return base isa AnyBoomerang ? Float64(base.λref) : NaN
 end
 
 function r_from_skeleton(times_list::AbstractVector, positions_list::AbstractVector,
                           velocities_list::AbstractVector, is_boomerang_list::AbstractVector,
-                          mu_list::AbstractVector, is_mutable_boomerang_list::AbstractVector)
+                          mu_list::AbstractVector, is_mutable_boomerang_list::AbstractVector,
+                          flow_cov_list::AbstractVector, free_masks_list::AbstractVector)
     n = length(times_list)
     traces = PDMPTrace[]
     sizehint!(traces, n)
@@ -347,19 +1040,29 @@ function r_from_skeleton(times_list::AbstractVector, positions_list::AbstractVec
         is_boom    = Bool(is_boomerang_list[i])
         is_mutable = Bool(is_mutable_boomerang_list[i])
         mu         = Vector{Float64}(mu_list[i])
+        covariance = Matrix{Float64}(flow_cov_list[i])
+        precision = inv(Symmetric(covariance))
         flow = if is_mutable
-            MutableBoomerang(I(d), mu)
+            MutableBoomerang(precision, mu)
         elseif is_boom
-            Boomerang(I(d), mu)
+            Boomerang(precision, mu)
         else
             ZigZag(I(d), zeros(d))
         end
-        push!(traces, PDMPTrace(times, positions, velocities, flow))
+        masks = if isempty(free_masks_list[i])
+            nothing
+        else
+            Matrix{Bool}(free_masks_list[i])
+        end
+        masks === nothing || size(masks) == size(positions) ||
+            throw(DimensionMismatch("free-mask dimensions must match positions"))
+        push!(traces, PDMPTrace(times, positions, velocities, flow, masks))
     end
-    PDMPChains(traces, PDMPSamplers.StatisticCounter[])
+    PDMPChains(traces, [PDMPSamplers.StatisticCounter() for _ in traces],
+        fill(nothing, n), fill(nothing, n), fill(nothing, n))
 end
 
-const StatsValue = Union{Vector{Float64}, Matrix{Float64}}
+const StatsValue = Union{Vector{Float64}, Matrix{Float64}, Vector{String}}
 
 function _ct_ess_matrix(chains::PDMPChains)
     n_chains = length(chains.traces)
@@ -386,6 +1089,14 @@ function _counter_float(counter, name::Symbol)
     end
 end
 
+function _counter_string(counter, name::Symbol)
+    try
+        return string(getproperty(counter, name))
+    catch
+        return "unavailable"
+    end
+end
+
 function extract_stats(chains::PDMPChains)
     all = chains.stats
     ct_ess = try
@@ -394,16 +1105,26 @@ function extract_stats(chains::PDMPChains)
         zeros(0, 0)
     end
     vals(name::Symbol) = Float64[_counter_float(s, name) for s in all]
+    textvals(name::Symbol) = String[_counter_string(s, name) for s in all]
+    ct_ess_batches = Float64[max(50, isqrt(length(trace))) for trace in chains.traces]
     return Dict{String, StatsValue}(
+        "final_lambda_ref"      => Float64[_final_lambda_ref(chains, i) for i in eachindex(chains.traces)],
         "reflections_events"    => vals(:reflections_events),
         "reflections_accepted"  => vals(:reflections_accepted),
         "refreshment_events"    => vals(:refreshment_events),
         "sticky_events"         => vals(:sticky_events),
+        "sticky_freezes"        => vals(:sticky_freezes),
+        "sticky_unfreezes"      => vals(:sticky_unfreezes),
+        "sticky_unfreeze_rejections" => vals(:sticky_unfreeze_rejections),
         "support_boundary_events" => vals(:support_boundary_events),
         "support_boundary_refresh_attempts" => vals(:support_boundary_refresh_attempts),
         "support_boundary_refresh_failures" => vals(:support_boundary_refresh_failures),
         "gradient_calls"        => vals(:∇f_calls),
         "hessian_calls"         => vals(:∇²f_calls),
+        "full_gradient_calls" => vals(:full_gradient_calls),
+        "prior_gradient_calls" => vals(:prior_gradient_calls),
+        "residual_oracle_calls" => vals(:residual_oracle_calls),
+        "fd_curvature_gradient_calls" => vals(:fd_curvature_gradient_calls),
         "elapsed_time"          => vals(:elapsed_time),
         "grid_builds"           => vals(:grid_builds),
         "grid_shrinks"          => vals(:grid_shrinks),
@@ -412,21 +1133,134 @@ function extract_stats(chains::PDMPChains)
         "grid_points_evaluated" => vals(:grid_points_evaluated),
         "grid_points_skipped"   => vals(:grid_points_skipped),
         "grid_N_current"        => vals(:grid_N_current),
-        "lazy_fallback_low_tightness" => vals(:lazy_fallback_low_tightness),
-        "lazy_fallback_bound_violation" => vals(:lazy_fallback_bound_violation),
-        "lazy_proposal_attempts" => vals(:lazy_proposal_attempts),
-        "lazy_proposal_rejections" => vals(:lazy_proposal_rejections),
+        "grid_schedule_samples" => vals(:grid_schedule_samples),
+        "grid_N_sum"            => vals(:grid_N_sum),
+        "grid_tmax_sum"         => vals(:grid_tmax_sum),
+        "grid_h_sum"            => vals(:grid_h_sum),
+        "grid_initial_N"        => vals(:grid_initial_N),
+        "grid_final_N"          => vals(:grid_final_N),
+        "grid_initial_tmax"     => vals(:grid_initial_tmax),
+        "grid_final_tmax"       => vals(:grid_final_tmax),
+        "grid_initial_h"        => vals(:grid_initial_h),
+        "grid_final_h"          => vals(:grid_final_h),
+        "grid_warmup_objective_events" => vals(:grid_warmup_objective_events),
+        "grid_warmup_objective_endpoint_gradients" => vals(:grid_warmup_objective_endpoint_gradients),
+        "grid_warmup_objective_acceptance_gradients" => vals(:grid_warmup_objective_acceptance_gradients),
+        "grid_warmup_objective_gradients_per_event" => vals(:grid_warmup_objective_gradients_per_event),
+        "grid_warmup_objective_horizon_hits" => vals(:grid_warmup_objective_horizon_hits),
+        "grid_warmup_objective_horizon_rate" => vals(:grid_warmup_objective_horizon_rate),
+        "grid_warmup_objective_rejections" => vals(:grid_warmup_objective_rejections),
+        "grid_warmup_objective_rejection_rate" => vals(:grid_warmup_objective_rejection_rate),
+        "grid_schedule_frozen" => vals(:grid_schedule_frozen),
+        "curvature_backend" => textvals(:curvature_backend),
         "grid_resets_from_dynamics_adaptation" => vals(:grid_resets_from_dynamics_adaptation),
         "grid_endpoint_evaluations" => vals(:grid_endpoint_evaluations),
+        "grid_endpoint_gradient_calls" => vals(:grid_endpoint_gradient_calls),
         "grid_cached_endpoint_reuses" => vals(:grid_cached_endpoint_reuses),
         "grid_acceptance_tests" => vals(:grid_acceptance_tests),
         "grid_acceptance_gradient_calls" => vals(:grid_acceptance_gradient_calls),
+        "subsampling_cell_roof_proposals" => vals(:subsampling_cell_roof_proposals),
+        "subsampling_aggregate_accepts" => vals(:subsampling_aggregate_accepts),
+        "subsampling_subset_evaluations" => vals(:subsampling_subset_evaluations),
+        "subsampling_final_reflections" => vals(:subsampling_final_reflections),
+        # Exact research pipeline counters. The cumulative values are retained
+        # for compatibility; the phase-local values are recorded by the Julia
+        # sampler at the warmup/main boundary and are the authoritative
+        # retained-phase values.
+        "clock_candidates" => vals(:clock_candidates),
+        "grid_bound_evaluations" => vals(:grid_bound_evaluations),
+        "pointwise_screen_evaluations" => vals(:pointwise_screen_evaluations),
+        "pointwise_screen_passes" => vals(:pointwise_screen_passes),
+        "subset_draws" => vals(:subset_draws),
+        "selected_subset_bound_evaluations" => vals(:selected_subset_bound_evaluations),
+        "selected_subset_bound_passes" => vals(:selected_subset_bound_passes),
+        "residual_oracle_evaluations" => vals(:residual_oracle_evaluations),
+        "final_thinning_acceptances" => vals(:final_thinning_acceptances),
+        "reflection_events" => vals(:reflection_events),
+        "warmup_clock_candidates" => vals(:warmup_clock_candidates),
+        "main_clock_candidates" => vals(:main_clock_candidates),
+        "warmup_grid_bound_evaluations" => vals(:warmup_grid_bound_evaluations),
+        "main_grid_bound_evaluations" => vals(:main_grid_bound_evaluations),
+        "warmup_pointwise_screen_evaluations" => vals(:warmup_pointwise_screen_evaluations),
+        "main_pointwise_screen_evaluations" => vals(:main_pointwise_screen_evaluations),
+        "warmup_pointwise_screen_passes" => vals(:warmup_pointwise_screen_passes),
+        "main_pointwise_screen_passes" => vals(:main_pointwise_screen_passes),
+        "warmup_subset_draws" => vals(:warmup_subset_draws),
+        "main_subset_draws" => vals(:main_subset_draws),
+        "warmup_selected_subset_bound_evaluations" => vals(:warmup_selected_subset_bound_evaluations),
+        "main_selected_subset_bound_evaluations" => vals(:main_selected_subset_bound_evaluations),
+        "warmup_selected_subset_bound_passes" => vals(:warmup_selected_subset_bound_passes),
+        "main_selected_subset_bound_passes" => vals(:main_selected_subset_bound_passes),
+        "warmup_residual_oracle_evaluations" => vals(:warmup_residual_oracle_evaluations),
+        "main_residual_oracle_evaluations" => vals(:main_residual_oracle_evaluations),
+        "warmup_final_thinning_acceptances" => vals(:warmup_final_thinning_acceptances),
+        "main_final_thinning_acceptances" => vals(:main_final_thinning_acceptances),
+        "warmup_reflection_events" => vals(:warmup_reflection_events),
+        "main_reflection_events" => vals(:main_reflection_events),
+        "warmup_sticky_events" => vals(:warmup_sticky_events),
+        "main_sticky_events" => vals(:main_sticky_events),
+        "warmup_grid_schedule_builds" => vals(:warmup_grid_schedule_builds),
+        "main_grid_schedule_builds" => vals(:main_grid_schedule_builds),
+        "warmup_grid_schedule_searches" => vals(:warmup_grid_schedule_searches),
+        "main_grid_schedule_searches" => vals(:main_grid_schedule_searches),
+        "warmup_poisson_time_generations" => vals(:warmup_poisson_time_generations),
+        "main_poisson_time_generations" => vals(:main_poisson_time_generations),
+        "warmup_candidate_state_copies" => vals(:warmup_candidate_state_copies),
+        "main_candidate_state_copies" => vals(:main_candidate_state_copies),
+        "warmup_candidate_move_forwards" => vals(:warmup_candidate_move_forwards),
+        "main_candidate_move_forwards" => vals(:main_candidate_move_forwards),
+        "warmup_candidate_loop_iterations" => vals(:warmup_candidate_loop_iterations),
+        "main_candidate_loop_iterations" => vals(:main_candidate_loop_iterations),
+        "warmup_statistic_recordings" => vals(:warmup_statistic_recordings),
+        "main_statistic_recordings" => vals(:main_statistic_recordings),
+        "warmup_grid_bound_seconds" => vals(:warmup_grid_bound_seconds),
+        "main_grid_bound_seconds" => vals(:main_grid_bound_seconds),
+        "warmup_pointwise_screen_seconds" => vals(:warmup_pointwise_screen_seconds),
+        "main_pointwise_screen_seconds" => vals(:main_pointwise_screen_seconds),
+        "warmup_subset_draw_seconds" => vals(:warmup_subset_draw_seconds),
+        "main_subset_draw_seconds" => vals(:main_subset_draw_seconds),
+        "warmup_selected_subset_refinement_seconds" => vals(:warmup_selected_subset_refinement_seconds),
+        "main_selected_subset_refinement_seconds" => vals(:main_selected_subset_refinement_seconds),
+        "warmup_residual_oracle_seconds" => vals(:warmup_residual_oracle_seconds),
+        "main_residual_oracle_seconds" => vals(:main_residual_oracle_seconds),
+        "warmup_final_thinning_seconds" => vals(:warmup_final_thinning_seconds),
+        "main_final_thinning_seconds" => vals(:main_final_thinning_seconds),
+        "warmup_reflection_update_seconds" => vals(:warmup_reflection_update_seconds),
+        "main_reflection_update_seconds" => vals(:main_reflection_update_seconds),
+        "warmup_reflection_gradient_seconds" => vals(:warmup_reflection_gradient_seconds),
+        "main_reflection_gradient_seconds" => vals(:main_reflection_gradient_seconds),
+        "warmup_reflection_covariance_seconds" => vals(:warmup_reflection_covariance_seconds),
+        "main_reflection_covariance_seconds" => vals(:main_reflection_covariance_seconds),
+        "warmup_reflection_sticky_schedule_seconds" => vals(:warmup_reflection_sticky_schedule_seconds),
+        "main_reflection_sticky_schedule_seconds" => vals(:main_reflection_sticky_schedule_seconds),
+        "warmup_reflection_state_validation_seconds" => vals(:warmup_reflection_state_validation_seconds),
+        "main_reflection_state_validation_seconds" => vals(:main_reflection_state_validation_seconds),
+        "warmup_sticky_update_seconds" => vals(:warmup_sticky_update_seconds),
+        "main_sticky_update_seconds" => vals(:main_sticky_update_seconds),
+        "warmup_grid_schedule_build_seconds" => vals(:warmup_grid_schedule_build_seconds),
+        "main_grid_schedule_build_seconds" => vals(:main_grid_schedule_build_seconds),
+        "warmup_grid_schedule_search_seconds" => vals(:warmup_grid_schedule_search_seconds),
+        "main_grid_schedule_search_seconds" => vals(:main_grid_schedule_search_seconds),
+        "warmup_poisson_time_generation_seconds" => vals(:warmup_poisson_time_generation_seconds),
+        "main_poisson_time_generation_seconds" => vals(:main_poisson_time_generation_seconds),
+        "warmup_candidate_state_copy_seconds" => vals(:warmup_candidate_state_copy_seconds),
+        "main_candidate_state_copy_seconds" => vals(:main_candidate_state_copy_seconds),
+        "warmup_candidate_move_forward_seconds" => vals(:warmup_candidate_move_forward_seconds),
+        "main_candidate_move_forward_seconds" => vals(:main_candidate_move_forward_seconds),
+        "warmup_candidate_loop_overhead_seconds" => vals(:warmup_candidate_loop_overhead_seconds),
+        "main_candidate_loop_overhead_seconds" => vals(:main_candidate_loop_overhead_seconds),
+        "warmup_statistic_recording_seconds" => vals(:warmup_statistic_recording_seconds),
+        "main_statistic_recording_seconds" => vals(:main_statistic_recording_seconds),
+        "warmup_phase_elapsed_seconds" => vals(:warmup_phase_elapsed_time),
+        "main_phase_elapsed_seconds" => vals(:main_phase_elapsed_time),
+        "main_phase_allocated_bytes" => vals(:main_phase_allocated_bytes),
+        "initialization_allocated_bytes" => vals(:initialization_allocated_bytes),
+        "main_sampler_initialization_allocated_bytes" =>
+            vals(:main_sampler_initialization_allocated_bytes),
+        "other_main_loop_seconds" => vals(:other_main_loop_seconds),
         "grid_horizon_hits" => vals(:grid_horizon_hits),
-        "constant_bound_attempts" => vals(:constant_bound_attempts),
-        "constant_bound_accepts" => vals(:constant_bound_accepts),
-        "constant_bound_rejections" => vals(:constant_bound_rejections),
-        "constant_bound_violations" => vals(:constant_bound_violations),
-        "constant_bound_safety_fallbacks" => vals(:constant_bound_safety_fallbacks),
+        "grid_budget_tail_restarts" => vals(:grid_budget_tail_restarts),
+        "grid_bound_violations" => vals(:grid_bound_violations),
         "sticky_inner_searches" => vals(:sticky_inner_searches),
         "sticky_inner_wins" => vals(:sticky_inner_wins),
         "sticky_inner_wasted_by_sticky" => vals(:sticky_inner_wasted_by_sticky),
@@ -434,54 +1268,128 @@ function extract_stats(chains::PDMPChains)
         "sticky_all_frozen_events" => vals(:sticky_all_frozen_events),
         "warmup_events" => vals(:warmup_events),
         "main_events" => vals(:main_events),
+        "final_metric_scale_min" => vals(:final_metric_scale_min),
+        "final_metric_scale_max" => vals(:final_metric_scale_max),
+        "adaptation_updates" => vals(:adaptation_updates),
+        "preconditioner_updates" => vals(:preconditioner_updates),
+        "boomerang_updates" => vals(:boomerang_updates),
+        "adaptation_free_time_min" => vals(:adaptation_free_time_min),
+        "adaptation_free_time_max" => vals(:adaptation_free_time_max),
         "warmup_gradient_calls" => vals(:warmup_gradient_calls),
         "main_gradient_calls" => vals(:main_gradient_calls),
         "warmup_hessian_calls" => vals(:warmup_hessian_calls),
         "main_hessian_calls" => vals(:main_hessian_calls),
+        "warmup_full_gradient_calls" => vals(:warmup_full_gradient_calls),
+        "main_full_gradient_calls" => vals(:main_full_gradient_calls),
+        "warmup_potential_calls" => vals(:warmup_potential_calls),
+        "main_potential_calls" => vals(:main_potential_calls),
+        "warmup_prior_gradient_calls" => vals(:warmup_prior_gradient_calls),
+        "main_prior_gradient_calls" => vals(:main_prior_gradient_calls),
+        "warmup_fd_curvature_gradient_calls" => vals(:warmup_fd_curvature_gradient_calls),
+        "main_fd_curvature_gradient_calls" => vals(:main_fd_curvature_gradient_calls),
+        "warmup_exact_curvature_calls" => vals(:warmup_exact_curvature_calls),
+        "main_exact_curvature_calls" => vals(:main_exact_curvature_calls),
+        "warmup_grid_endpoint_evaluations" => vals(:warmup_grid_endpoint_evaluations),
+        "main_grid_endpoint_evaluations" => vals(:main_grid_endpoint_evaluations),
+        "warmup_grid_endpoint_gradient_calls" => vals(:warmup_grid_endpoint_gradient_calls),
+        "main_grid_endpoint_gradient_calls" => vals(:main_grid_endpoint_gradient_calls),
+        "warmup_grid_endpoint_hessian_calls" => vals(:warmup_grid_endpoint_hessian_calls),
+        "main_grid_endpoint_hessian_calls" => vals(:main_grid_endpoint_hessian_calls),
+        "warmup_grid_endpoint_derivative_calls" => vals(:warmup_grid_endpoint_derivative_calls),
+        "main_grid_endpoint_derivative_calls" => vals(:main_grid_endpoint_derivative_calls),
+        "warmup_grid_acceptance_gradient_calls" => vals(:warmup_grid_acceptance_gradient_calls),
+        "main_grid_acceptance_gradient_calls" => vals(:main_grid_acceptance_gradient_calls),
+        "warmup_grid_acceptance_tests" => vals(:warmup_grid_acceptance_tests),
+        "main_grid_acceptance_tests" => vals(:main_grid_acceptance_tests),
+        "warmup_grid_cached_endpoint_reuses" => vals(:warmup_grid_cached_endpoint_reuses),
+        "main_grid_cached_endpoint_reuses" => vals(:main_grid_cached_endpoint_reuses),
+        "warmup_grid_points_evaluated" => vals(:warmup_grid_points_evaluated),
+        "main_grid_points_evaluated" => vals(:main_grid_points_evaluated),
+        "warmup_grid_endpoint_derivative_points_loaded" => vals(:warmup_grid_endpoint_derivative_points_loaded),
+        "main_grid_endpoint_derivative_points_loaded" => vals(:main_grid_endpoint_derivative_points_loaded),
+        "warmup_subsampling_cell_roof_proposals" =>
+            vals(:warmup_subsampling_cell_roof_proposals),
+        "main_subsampling_cell_roof_proposals" =>
+            vals(:main_subsampling_cell_roof_proposals),
+        "warmup_subsampling_aggregate_accepts" =>
+            vals(:warmup_subsampling_aggregate_accepts),
+        "main_subsampling_aggregate_accepts" =>
+            vals(:main_subsampling_aggregate_accepts),
+        "warmup_subsampling_subset_evaluations" =>
+            vals(:warmup_subsampling_subset_evaluations),
+        "main_subsampling_subset_evaluations" =>
+            vals(:main_subsampling_subset_evaluations),
+        "warmup_subsampling_final_reflections" =>
+            vals(:warmup_subsampling_final_reflections),
+        "main_subsampling_final_reflections" =>
+            vals(:main_subsampling_final_reflections),
         "warmup_elapsed_time" => vals(:warmup_elapsed_time),
         "main_elapsed_time" => vals(:main_elapsed_time),
+        "initialization_elapsed_time" => vals(:initialization_elapsed_time),
+        "warmup_phase_elapsed_time" => vals(:warmup_phase_elapsed_time),
+        "main_phase_elapsed_time" => vals(:main_phase_elapsed_time),
+        "transition_elapsed_time" => vals(:transition_elapsed_time),
+        "warmup_adapter_finish_elapsed_time" =>
+            vals(:warmup_adapter_finish_elapsed_time),
+        "main_sampler_initialization_elapsed_time" =>
+            vals(:main_sampler_initialization_elapsed_time),
+        "algorithm_warmup_finish_elapsed_time" =>
+            vals(:algorithm_warmup_finish_elapsed_time),
+        "finalization_elapsed_time" => vals(:finalization_elapsed_time),
         "ct_ess"                => ct_ess,
+        "ct_ess_batches"        => ct_ess_batches,
     )
 end
 
 function r_pdmp_stan(
         path_to_stan_model::String,
         path_to_stan_data::String,
-        x0::AbstractVector{Float64},
+        x0,
         flow_type::String,
         algorithm_type::String,
-        flow_mean::AbstractVector{Float64},
-        flow_cov::AbstractMatrix{Float64};
+        flow_mean,
+        flow_cov;
         kwargs...
     )
 
-    model = PDMPModel(path_to_stan_model, path_to_stan_data)
+    model = PDMPModel(path_to_stan_model, path_to_stan_data;
+        hvp=get(kwargs, :curvature_backend, "auto") != "finite_difference")
     return r_pdmp_stan(model, x0, flow_type, algorithm_type, flow_mean, flow_cov; kwargs...)
 end
 
 function r_pdmp_stan(
         model::PDMPModel,
-        x0::AbstractVector{Float64},
+        x0,
         flow_type::String,
         algorithm_type::String,
-        flow_mean::AbstractVector{Float64},
-        flow_cov::AbstractMatrix{Float64};
+        flow_mean,
+        flow_cov; control=nothing,
+        theta0 = nothing,
+        free0 = nothing,
+        stored_velocity0 = nothing,
         c0::Float64 = 1e-2,
         grid_n::Int = 30,
         grid_t_max::Float64 = 2.0,
-        post_warmup_simplify::Bool = true,
+        curvature_backend::String = "auto",
+        grid_bound::String = "value_quadratic",
+        grid_curvature_bound::Union{Nothing,Float64} = nothing,
         t0::Float64 = 0.0,
         T::Float64 = 10000.0,
         t_warmup::Float64 = 0.0,
+        warmup_adaptation_interval::Union{Nothing,Float64} = nothing,
+        boomerang_variance_floor_fraction::Float64 = 0.0,
         sticky::Bool = false,
-        can_stick::Union{AbstractVector{Bool}, Nothing} = nothing,
+        can_stick = nothing,
         model_prior = nothing,
-        parameter_prior::Union{AbstractVector{Float64}, Nothing} = nothing,
+        parameter_prior = nothing,
+        slab_prior = nothing,
+        unc_names = String[],
         show_progress::Bool = true,
         n_chains::Int = 1,
         threaded::Bool = false,
         seed::Union{Integer, Nothing} = nothing,
         adaptive_scheme::String = "diagonal",
+        refresh_rate::Float64 = 1.0,
         support_boundary_mode::String = "error",
         support_boundary_max_bisection_steps::Int = 60,
         support_boundary_time_rtol::Float64 = 1e-8,
@@ -489,15 +1397,36 @@ function r_pdmp_stan(
         support_boundary_clip_fraction::Float64 = 1 - 1e-10,
         support_boundary_max_refresh_attempts::Int = 20,
         support_boundary_refresh_probe_time::Float64 = 1e-4,
-        support_boundary_min_safe_time::Float64 = 1e-12
+        support_boundary_min_safe_time::Float64 = 1e-12,
+        streaming_trace_directory::Union{Nothing,String}=nothing,
+        online_summaries=nothing,
+        streaming_trace_buffer_events::Int=4096
     )
 
+    bridge_profile_start_ns = time_ns()
     d = model.d
+    x0_vec = _as_float_vector(x0)
+    flow_mean_vec = _as_flow_mean(flow_mean, d)
+    flow_cov_mat = _as_flow_cov(flow_cov, d)
+    can_stick_vec = _as_bool_vector(can_stick)
+    parameter_prior_vec = isnothing(parameter_prior) ? nothing : _as_float_vector(parameter_prior)
+    unc_names_vec = _as_string_vector(unc_names)
+    sampling_model = _build_sticky_target(model, model_prior, slab_prior,
+        can_stick_vec, unc_names_vec)
 
-    prec = _to_precision(flow_cov, d)
-    flow = build_flow(flow_type, prec, flow_mean; adaptive_scheme)
-    alg0 = build_algorithm(algorithm_type; c0, d, grid_n, grid_t_max, post_warmup_simplify)
-    alg = wrap_sticky(alg0, sticky, model_prior, parameter_prior, can_stick)
+    prec = _to_precision(flow_cov_mat, d)
+    flow = build_flow(flow_type, prec, flow_mean_vec; control, adaptive_scheme, refresh_rate)
+    isfinite(boomerang_variance_floor_fraction) &&
+        boomerang_variance_floor_fraction >= 0 || throw(ArgumentError(
+            "boomerang_variance_floor_fraction must be finite and nonnegative"))
+    boom_options = PDMPSamplers.BoomerangAdaptationOptions(
+        initial_variance_floor_fraction=boomerang_variance_floor_fraction)
+    boom_floor_mask = _boomerang_logscale_floor_mask(unc_names_vec, d)
+    initial_refresh_rate = try Float64(PDMPSamplers.refresh_rate(flow)) catch; NaN end
+    alg0 = build_algorithm(algorithm_type; control, c0, d, grid_n, grid_t_max, curvature_backend,
+        grid_bound, grid_curvature_bound)
+    alg = _build_sticky_event_algorithm(alg0, sticky, model_prior,
+        parameter_prior_vec, slab_prior, can_stick_vec, flow, unc_names_vec)
 
     sbopts = SupportBoundaryOptions(;
         detect_boundaries = support_boundary_mode != "error",
@@ -511,38 +1440,86 @@ function r_pdmp_stan(
         min_safe_time = support_boundary_min_safe_time,
     )
 
-    chains = pdmp_sample(x0, flow, model, alg, t0, T, t_warmup;
+    initial = if isnothing(theta0)
+        # Preserve the package's seeded, flow-specific velocity law. Sticky
+        # coordinates initialized exactly on their face start inactive; all
+        # other coordinates retain the generated invariant velocity.
+        velocity = PDMPSamplers.initialize_velocity(
+            PDMPSamplers.make_initial_rng(seed, n_chains), flow, d)
+        if sticky
+            @inbounds for i in eachindex(velocity, x0_vec, can_stick_vec)
+                can_stick_vec[i] && iszero(x0_vec[i]) && (velocity[i] = 0.0)
+            end
+        end
+        SkeletonPoint(x0_vec, velocity)
+    else
+        SkeletonPoint(x0_vec, _as_float_vector(theta0))
+    end
+    adapter = PDMPSamplers.default_warmup_adapter(
+        flow, sampling_model.grad, t_warmup, t0;
+        warmup_adaptation_interval,
+        can_stick=sticky ? can_stick_vec : nothing,
+        boomerang_options=boom_options,
+        boomerang_variance_floor_mask=boom_floor_mask)
+    bridge_profile_before_sample_ns = time_ns()
+    chains = pdmp_sample(initial, flow, sampling_model, alg, t0, T, t_warmup;
                          progress = show_progress, n_chains = n_chains, threaded = threaded,
                          seed = seed,
-                         support_boundary_options = sbopts)
-    return _pack_result(chains)
+                         adapter = adapter,
+                         warmup_stop = build_warmup_stop(t_warmup, control),
+                         support_boundary_options = sbopts,
+                         statistic_counter = PDMPSamplers.DevelStatisticCounter,
+                         initial_free=isnothing(free0) ? nothing : _as_bool_vector(free0),
+                         initial_stored_velocity=isnothing(stored_velocity0) ? nothing :
+                            _as_float_vector(stored_velocity0),
+                         trace_storage=isnothing(streaming_trace_directory) ?
+                            nothing : _bridge_trace_storage(streaming_trace_directory,
+                                streaming_trace_buffer_events, T, online_summaries))
+    bridge_profile_after_sample_ns = time_ns()
+    packed = _pack_result(chains; requested_flow=flow_type,
+        adaptive_scheme, initial_refresh_rate,
+        warmup_adaptation_interval, t_warmup)
+    if Bool(_control_value(control, :profile, false))
+        packed["bridge_profile"] = Dict(
+            "julia_construction_seconds" =>
+                (bridge_profile_before_sample_ns - bridge_profile_start_ns) / 1e9,
+            "julia_sample_seconds" =>
+                (bridge_profile_after_sample_ns - bridge_profile_before_sample_ns) / 1e9,
+            "julia_pack_and_counters_seconds" =>
+                (time_ns() - bridge_profile_after_sample_ns) / 1e9)
+    end
+    return packed
 end
 
 function r_pdmp_custom(
         grad!,
         d::Integer,
-        x0::AbstractVector{Float64},
+        x0,
         flow_type::String,
         algorithm_type::String,
-        flow_mean::AbstractVector{Float64},
-        flow_cov::AbstractMatrix{Float64};
+        flow_mean,
+        flow_cov; control=nothing,
         c0::Float64 = 1e-2,
         grid_n::Int = 30,
         grid_t_max::Float64 = 2.0,
-        post_warmup_simplify::Bool = true,
+        grid_bound::String = "value_quadratic",
+        grid_curvature_bound::Union{Nothing,Float64} = nothing,
         t0::Float64 = 0.0,
         T::Float64 = 10000.0,
         t_warmup::Float64 = 0.0,
         hessian = nothing,
+        theta0 = nothing,
         sticky::Bool = false,
-        can_stick::Union{AbstractVector{Bool}, Nothing} = nothing,
+        can_stick = nothing,
         model_prior = nothing,
-        parameter_prior::Union{AbstractVector{Float64}, Nothing} = nothing,
+        parameter_prior = nothing,
+        slab_prior = nothing,
         show_progress::Bool = true,
         n_chains::Int = 1,
         threaded::Bool = false,
         seed::Union{Integer, Nothing} = nothing,
         adaptive_scheme::String = "diagonal",
+        refresh_rate::Float64 = 1.0,
         support_boundary_mode::String = "error",
         support_boundary_max_bisection_steps::Int = 60,
         support_boundary_time_rtol::Float64 = 1e-8,
@@ -550,8 +1527,17 @@ function r_pdmp_custom(
         support_boundary_clip_fraction::Float64 = 1 - 1e-10,
         support_boundary_max_refresh_attempts::Int = 20,
         support_boundary_refresh_probe_time::Float64 = 1e-4,
-        support_boundary_min_safe_time::Float64 = 1e-12
+        support_boundary_min_safe_time::Float64 = 1e-12,
+        streaming_trace_directory::Union{Nothing,String}=nothing,
+        online_summaries=nothing,
+        streaming_trace_buffer_events::Int=4096
     )
+
+    x0_vec = _as_float_vector(x0)
+    flow_mean_vec = _as_flow_mean(flow_mean, d)
+    flow_cov_mat = _as_flow_cov(flow_cov, d)
+    can_stick_vec = _as_bool_vector(can_stick)
+    parameter_prior_vec = isnothing(parameter_prior) ? nothing : _as_float_vector(parameter_prior)
 
     hvp = if !isnothing(hessian)
         (out, x, v) -> begin
@@ -570,12 +1556,24 @@ function r_pdmp_custom(
             end
         end
     end
-    model = PDMPModel(d, FullGradient(grad!), hvp)
+    model = if isnothing(slab_prior)
+        PDMPModel(d, FullGradient(grad!), hvp)
+    else
+        provider = build_slab_provider(slab_prior, String[], can_stick_vec, d)
+        odds = build_model_prior_odds(model_prior, PDMPSamplers.beta_indices(provider), d)
+        target = DependentSlabTarget(d, grad!, provider, odds;
+            posterior_hvp=PDMPSamplers.InplaceHVP(hvp, zeros(d)))
+        PDMPModel(target; hvp=true)
+    end
 
-    prec = _to_precision(flow_cov, d)
-    flow = build_flow(flow_type, prec, flow_mean; adaptive_scheme)
-    alg0 = build_algorithm(algorithm_type; c0, d, grid_n, grid_t_max, post_warmup_simplify)
-    alg = wrap_sticky(alg0, sticky, model_prior, parameter_prior, can_stick)
+    prec = _to_precision(flow_cov_mat, d)
+    flow = build_flow(flow_type, prec, flow_mean_vec; control, adaptive_scheme, refresh_rate)
+    initial_refresh_rate = try Float64(PDMPSamplers.refresh_rate(flow)) catch; NaN end
+    alg0 = build_algorithm(algorithm_type; control, c0, d, grid_n, grid_t_max,
+        grid_bound, grid_curvature_bound)
+    alg = isnothing(slab_prior) ?
+        wrap_sticky(alg0, sticky, model_prior, parameter_prior_vec, can_stick_vec) :
+        wrap_dependent_sticky(alg0, sticky, model_prior, slab_prior, can_stick_vec, flow)
 
     sbopts = SupportBoundaryOptions(;
         detect_boundaries = support_boundary_mode != "error",
@@ -589,94 +1587,18 @@ function r_pdmp_custom(
         min_safe_time = support_boundary_min_safe_time,
     )
 
-    chains = pdmp_sample(x0, flow, model, alg, t0, T, t_warmup;
+    initial = isnothing(theta0) ? x0_vec :
+        SkeletonPoint(x0_vec, _as_float_vector(theta0))
+    chains = pdmp_sample(initial, flow, model, alg, t0, T, t_warmup;
                          progress = show_progress, n_chains = n_chains, threaded = threaded,
                          seed = seed,
-                         support_boundary_options = sbopts)
-    return _pack_result(chains)
-end
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Subsampled gradient bridge (R callbacks)
-# ──────────────────────────────────────────────────────────────────────────────
-
-function r_pdmp_custom_subsampled(
-        grad_sub_r,
-        d::Integer,
-        n_obs::Integer,
-        subsample_size::Integer,
-        x0::AbstractVector{Float64},
-        flow_type::String,
-        algorithm_type::String,
-        flow_mean::AbstractVector{Float64},
-        flow_cov::AbstractMatrix{Float64};
-        hvp_sub_r = nothing,
-        grad_full_r = nothing,
-        use_full_gradient_for_reflections::Bool = false,
-        c0::Float64 = 1e-2,
-        grid_n::Int = 30,
-        grid_t_max::Float64 = 2.0,
-        post_warmup_simplify::Bool = true,
-        t0::Float64 = 0.0,
-        T::Float64 = 10000.0,
-        t_warmup::Float64 = 0.0,
-        show_progress::Bool = true,
-        n_chains::Int = 1,
-        threaded::Bool = false,
-        seed::Union{Integer, Nothing} = nothing,
-        adaptive_scheme::String = "diagonal"
-    )
-
-    indices = Vector{Int}(undef, subsample_size)
-    _perm = Vector{Int}(undef, n_obs)
-
-    function resample!(nsub)
-        Random.randperm!(_perm)
-        for i in 1:subsample_size
-            indices[i] = _perm[i]
-        end
-    end
-
-    function subsampled_grad!(out, x)
-        out .= grad_sub_r(x, indices)
-    end
-
-    full_grad! = if isnothing(grad_full_r)
-        (out, x) -> error("No full gradient provided but it was requested")
-    else
-        (out, x) -> (out .= grad_full_r(x))
-    end
-
-    grad = SubsampledGradient(
-        subsampled_grad!, resample!, (trace) -> nothing,
-        FullGradient(full_grad!),
-        subsample_size, 0, use_full_gradient_for_reflections, 0.0
-    )
-
-    hvp = if isnothing(hvp_sub_r)
-        let ε = 1e-5, _buf1 = zeros(d), _buf2 = zeros(d)
-            (out, x, v) -> begin
-                @. _buf2 = x - ε * v
-                subsampled_grad!(_buf1, _buf2)
-                @. _buf2 = x + ε * v
-                subsampled_grad!(out, _buf2)
-                @. out = (out - _buf1) / (2ε)
-            end
-        end
-    else
-        (out, x, v) -> (out .= hvp_sub_r(x, v, indices))
-    end
-
-    model = PDMPModel(d, grad, hvp)
-
-    prec = isempty(flow_cov) ? Diagonal(ones(d)) : _to_precision(flow_cov, d)
-    fmean = isempty(flow_mean) ? zeros(d) : flow_mean
-    flow = build_flow(flow_type, prec, fmean; adaptive_scheme)
-    alg = build_algorithm(algorithm_type; c0, d, grid_n, grid_t_max, post_warmup_simplify)
-
-    chains = pdmp_sample(x0, flow, model, alg, t0, T, t_warmup;
-                         progress = show_progress, n_chains, threaded, seed)
-    return _pack_result(chains)
+                         support_boundary_options = sbopts,
+                         trace_storage=isnothing(streaming_trace_directory) ?
+                            nothing : _bridge_trace_storage(streaming_trace_directory,
+                                streaming_trace_buffer_events, T, online_summaries))
+    return _pack_result(chains; requested_flow=flow_type,
+        adaptive_scheme, initial_refresh_rate,
+        warmup_adaptation_interval=nothing, t_warmup)
 end
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -731,14 +1653,12 @@ end
 
 function _draws_for_csv(chains::PDMPChains, chain_idx::Int, discretize_dt::Float64)
     trace = chains.traces[chain_idx]
-    try
-        if discretize_dt > 0
-            return Matrix(PDMPDiscretize(trace, discretize_dt))
-        else
-            return adaptive_discretize(chains; chain=chain_idx)[1]
-        end
-    catch
+    if first_event_time(trace) == last_event_time(trace)
         return reshape(Vector{Float64}(first(trace).position), 1, :)
+    elseif discretize_dt > 0
+        return Matrix(PDMPDiscretize(trace, discretize_dt))
+    else
+        return adaptive_discretize(chains; chain=chain_idx)[1]
     end
 end
 
@@ -775,461 +1695,157 @@ function r_constrain_and_write_csv(sm::BridgeStan.StanModel, draws_unc::Matrix{F
     return output_csv
 end
 
-# ──────────────────────────────────────────────────────────────────────────────
-# BridgeStan subsampling for brms models (external C++ index swapping)
-# ──────────────────────────────────────────────────────────────────────────────
-
-mutable struct BridgeStanSubsamplingContext
-    sm_full::BridgeStan.StanModel
-    sm_sub::BridgeStan.StanModel
-    sm_prior::BridgeStan.StanModel
-    set_fn::Ptr{Nothing}
-    idx_buf::Vector{Int32}
-    correction::Vector{Float64}
-    N::Int
-    m::Int
-    perm::Vector{Int}
-    grad_buf1::Vector{Float64}
-    grad_buf2::Vector{Float64}
-    g_full_buf::Vector{Float64}
-    hvp_buf::Vector{Float64}
-    anchor::Vector{Float64}
-    H_full_anchor::Matrix{Float64}
+function _write_brms_chain_csvs(chains::PDMPChains, models, output_csv::String,
+        discretize_dt::Float64; compute_lp::Bool=false)
+    n_ch = length(chains.traces)
+    all_draws = [_draws_for_csv(chains, i, discretize_dt) for i in 1:n_ch]
+    min_rows = minimum(size(draws, 1) for draws in all_draws)
+    csv_paths = String[]
+    for chain_idx in 1:n_ch
+        draws_unc = all_draws[chain_idx][1:min_rows, :]
+        csv_path = n_ch == 1 ? output_csv : replace(output_csv, r"\.csv$" => "_chain$(chain_idx).csv")
+        r_constrain_and_write_csv(models[chain_idx], draws_unc, csv_path;
+            chain_id=chain_idx, compute_lp)
+        push!(csv_paths, csv_path)
+    end
+    return csv_paths
 end
 
-function _partial_shuffle!(perm::Vector{Int}, m::Int)
-    n = length(perm)
-    @inbounds for i in 1:m
-        j = rand(i:n)
-        perm[i], perm[j] = perm[j], perm[i]
-    end
-end
+include(joinpath(@__DIR__, "family_subsampling_provider.jl"))
+include(joinpath(@__DIR__, "stan_subsampling_provider.jl"))
 
-function _ccall_set_indices!(ctx::BridgeStanSubsamplingContext)
-    @inbounds for i in 1:ctx.m
-        ctx.idx_buf[i] = Int32(ctx.perm[i] - 1)
-    end
-    ccall(ctx.set_fn, Cvoid, (Ptr{Int32}, Int32), ctx.idx_buf, Int32(ctx.m))
-end
+function _run_subsampling_brms_subsampled(lib_path_std::String,
+        data_full_file::String, data_prior_file::String,
+        N::Int, m::Int, family::Symbol,
+        predictor_designs::Vector{Matrix{Float64}},
+        predictor_indices::Vector{Vector{Int}}, d::Int,
+        offsets::Matrix{Float64}, response::Matrix{Float64}, known_se::Vector{Float64},
+        observation_multipliers::Vector{Float64},
+        flow_type::String, algorithm_type::String, flow_mean, flow_cov,
+        output_csv::String; control=nothing, c0::Float64, grid_n::Int, grid_t_max::Float64,
+        grid_bound::String, grid_curvature_bound::Union{Nothing,Float64},
+        t0::Float64, T::Float64, t_warmup::Float64,
+        adaptive_scheme::String, discretize_dt::Float64,
+        show_progress::Bool, n_chains::Int, threaded::Bool,
+        seed::Union{Integer,Nothing}, compute_lp::Bool,
+        curvature_backend::String, sticky::Bool, can_stick, model_prior, parameter_prior,
+        n_anchor_updates::Int, use_anchor_bank::Bool, bank_capacity::Int,
+        use_hcv::Bool)
 
-function _build_bss_model(ctx::BridgeStanSubsamplingContext, n_anchor_updates::Int;
-                          resample_dt::Float64=0.0, hvp_mode::String="scaled")
-    s = ctx.N / ctx.m
-    d = Int(BridgeStan.param_unc_num(ctx.sm_full))
-    anchor_set = Ref(false)
+    algorithm_type in ("GridThinningStrategy", "ThinningStrategy") ||
+        throw(ArgumentError(
+            "subsampling BridgeStan subsampling requires GridThinningStrategy or ThinningStrategy"))
+    all(size(design, 1) == N for design in predictor_designs) ||
+        throw(DimensionMismatch("predictor designs must have N rows"))
+    length(observation_multipliers) == N || throw(DimensionMismatch(
+        "observation multiplier vector must have length N"))
 
-    function neg_grad_cv!(out::Vector{Float64}, θ::Vector{Float64})
-        BridgeStan.log_density_gradient!(ctx.sm_sub, θ, ctx.grad_buf1)
-        BridgeStan.log_density_gradient!(ctx.sm_prior, θ, ctx.grad_buf2)
-        @. out = -((1 - s) * ctx.grad_buf2 + s * ctx.grad_buf1 + ctx.correction)
-        return out
-    end
-
-    function _recompute_correction!()
-        BridgeStan.log_density_gradient!(ctx.sm_sub, ctx.anchor, ctx.grad_buf1)
-        BridgeStan.log_density_gradient!(ctx.sm_prior, ctx.anchor, ctx.grad_buf2)
-        @. ctx.correction = (s - 1) * ctx.grad_buf2 - s * ctx.grad_buf1 + ctx.g_full_buf
-    end
-
-    function resample!(nsub)
-        _partial_shuffle!(ctx.perm, ctx.m)
-        _ccall_set_indices!(ctx)
-        if anchor_set[]
-            _recompute_correction!()
+    fmean = _as_flow_mean(flow_mean, d)
+    anchor = copy(fmean)
+    contexts = SubsamplingBridgeStanContext[]
+    models = PDMPModel[]
+    anchor_adapters = Any[]
+    anchor_managers = Union{Nothing,SubsamplingBridgeAnchorManager}[]
+    anchor_capacity = use_anchor_bank ? bank_capacity :
+        (n_anchor_updates > 0 ? 1 : 0)
+    for _ in 1:n_chains
+        ctx = _new_subsampling_bss_context(lib_path_std,
+            data_full_file, data_prior_file, family, predictor_designs,
+            predictor_indices, d, offsets, response, known_se,
+            observation_multipliers, N, m, anchor; use_hcv)
+        push!(contexts, ctx)
+        built = _build_subsampling_bss_model(ctx; curvature_backend, anchor_capacity)
+        if anchor_capacity > 0
+            model, adapter, manager = built
+            adapter.update_dt = n_anchor_updates > 0 ?
+                t_warmup / n_anchor_updates : Inf
+            adapter.last_update = t0
+            push!(models, model)
+            push!(anchor_adapters, adapter)
+            push!(anchor_managers, manager)
+        else
+            push!(models, built)
+            push!(anchor_managers, nothing)
         end
     end
 
-    function update_anchor!(trace)
-        Statistics.mean!(ctx.anchor, trace)
-        BridgeStan.log_density_gradient!(ctx.sm_full, ctx.anchor, ctx.g_full_buf)
-        _recompute_correction!()
-        anchor_set[] = true
-    end
-
-    function neg_grad_full!(out::Vector{Float64}, θ::Vector{Float64})
-        BridgeStan.log_density_gradient!(ctx.sm_full, θ, out)
-        out .= .-out
-        return out
-    end
-
-    function neg_hvp_cv!(out::Vector{Float64}, θ::Vector{Float64}, v::Vector{Float64})
-        BridgeStan.log_density_hessian_vector_product!(ctx.sm_sub, θ, v, out)
-        BridgeStan.log_density_hessian_vector_product!(ctx.sm_prior, θ, v, ctx.hvp_buf)
-        @. out = -s * out - (1 - s) * ctx.hvp_buf
-        return out
-    end
-
-    grad = SubsampledGradient(
-        neg_grad_cv!, resample!, update_anchor!,
-        neg_grad_full!,
-        ctx.m, n_anchor_updates, true;
-        resample_dt
-    )
-    hvp = if hvp_mode == "scaled"
-        neg_hvp_cv!
-    elseif hvp_mode == "none"
-        nothing
+    prec = inv(Symmetric(_as_flow_cov(flow_cov, d)))
+    flow = build_flow(flow_type, prec, fmean; control, adaptive_scheme)
+    initial_refresh_rate = try Float64(PDMPSamplers.refresh_rate(flow)) catch; NaN end
+    alg = build_algorithm(algorithm_type; control, c0, d, grid_n, grid_t_max,
+        curvature_backend, grid_bound, grid_curvature_bound)
+    alg = wrap_sticky(alg, sticky, model_prior, parameter_prior, can_stick)
+    if anchor_capacity == 0
+        chains = pdmp_sample(anchor, flow, models, alg, t0, T, t_warmup;
+            progress=show_progress, threaded, seed,
+            statistic_counter=PDMPSamplers.DevelStatisticCounter)
     else
-        error("Unknown hvp_mode: $hvp_mode. Use \"scaled\" or \"none\".")
+        run_chain = function(i)
+            seed_i = isnothing(seed) ? nothing : seed + i - 1
+            flow_i = deepcopy(flow)
+            dynamics_adapter = PDMPSamplers.default_warmup_adapter(
+                flow_i, models[i].grad, t_warmup, t0;
+                can_stick=sticky ? can_stick : nothing)
+            adapter_i = dynamics_adapter isa PDMPSamplers.NoAdaptation ?
+                anchor_adapters[i] : PDMPSamplers.SequenceAdapter(
+                    (dynamics_adapter, anchor_adapters[i]))
+            chain = pdmp_sample(anchor, flow_i, [models[i]], alg,
+                t0, T, t_warmup; progress=show_progress && i == 1,
+                adapter=adapter_i, seed=seed_i,
+                statistic_counter=PDMPSamplers.DevelStatisticCounter)
+            return chain.traces[1], chain.stats[1], chain.initial_states[1],
+                chain.retained_initial_states[1], chain.terminal_states[1]
+        end
+        chain_results = if threaded && n_chains > 1
+            fetch.([Threads.@spawn run_chain(i) for i in 1:n_chains])
+        else
+            [run_chain(i) for i in 1:n_chains]
+        end
+        chains = PDMPChains(getindex.(chain_results, 1), getindex.(chain_results, 2),
+            getindex.(chain_results, 3), getindex.(chain_results, 4),
+            getindex.(chain_results, 5))
     end
-    return PDMPModel(d, grad, hvp), d
+
+    csv_paths = _write_brms_chain_csvs(chains, [ctx.sm_full for ctx in contexts],
+        output_csv, discretize_dt; compute_lp)
+
+    result = _pack_result(chains; requested_flow=flow_type,
+        adaptive_scheme, initial_refresh_rate,
+        t_warmup)
+    result["csv_paths"] = csv_paths
+    result["bridge_call_counts"] = [_subsampling_call_counts(ctx, manager)
+        for (ctx, manager) in zip(contexts, anchor_managers)]
+    result["subsampling"] = true
+    return result
 end
 
-function _build_bss_model_hcv(ctx::BridgeStanSubsamplingContext, n_anchor_updates::Int;
-                              resample_dt::Float64=0.0, hvp_mode::String="scaled",
-                              use_fd_hcv::Bool=false)
-    s = ctx.N / ctx.m
-    d = Int(BridgeStan.param_unc_num(ctx.sm_full))
-    anchor_set = Ref(false)
-    hcv = HCVState(d)
-    hvp_buf_hcv = zeros(d)
-    hess_buf = zeros(d * d)
-    hess_grad_buf = zeros(d)
-    hess_buf_prior = zeros(d * d)
-    grad_sub_anchor = zeros(d)
-    fd_buf = zeros(d)
-    h_fd = 1e-5
-
-    function hvp_at_anchor_fd!(hvp_out::Vector{Float64}, v::Vector{Float64})
-        vnorm = norm(v)
-        iszero(vnorm) && (hvp_out .= 0.0; return)
-        h_scaled = h_fd * max(1.0, vnorm)
-        @. fd_buf = ctx.anchor + (h_scaled / vnorm) * v
-        BridgeStan.log_density_gradient!(ctx.sm_sub, fd_buf, hvp_out)
-        @. hvp_out = (hvp_out - grad_sub_anchor) * (vnorm / h_scaled)
-    end
-
-    function hvp_at_anchor_exact!(hvp_out::Vector{Float64}, v::Vector{Float64})
-        BridgeStan.log_density_hessian_vector_product!(ctx.sm_sub, ctx.anchor, v, hvp_out)
-    end
-
-    function neg_grad_cv!(out::Vector{Float64}, θ::Vector{Float64})
-        BridgeStan.log_density_gradient!(ctx.sm_sub, θ, ctx.grad_buf1)
-        BridgeStan.log_density_gradient!(ctx.sm_prior, θ, ctx.grad_buf2)
-        @. out = -((1 - s) * ctx.grad_buf2 + s * ctx.grad_buf1 + ctx.correction)
-
-        if hcv.enabled
-            if use_fd_hcv
-                apply_hcv_correction!(out, hcv, θ, ctx.anchor, hvp_at_anchor_fd!, s, hvp_buf_hcv)
-            else
-                apply_hcv_correction!(out, hcv, θ, ctx.anchor, hvp_at_anchor_exact!, s, hvp_buf_hcv)
-            end
-        end
-        return out
-    end
-
-    function _recompute_correction!()
-        BridgeStan.log_density_gradient!(ctx.sm_sub, ctx.anchor, ctx.grad_buf1)
-        copyto!(grad_sub_anchor, ctx.grad_buf1)
-        BridgeStan.log_density_gradient!(ctx.sm_prior, ctx.anchor, ctx.grad_buf2)
-        @. ctx.correction = (s - 1) * ctx.grad_buf2 - s * ctx.grad_buf1 + ctx.g_full_buf
-    end
-
-    function resample!(nsub)
-        _partial_shuffle!(ctx.perm, ctx.m)
-        _ccall_set_indices!(ctx)
-        if anchor_set[]
-            _recompute_correction!()
-        end
-    end
-
-    function update_anchor!(trace)
-        Statistics.mean!(ctx.anchor, trace)
-        BridgeStan.log_density_hessian!(ctx.sm_full, ctx.anchor, ctx.g_full_buf, hess_buf)
-        _recompute_correction!()
-        anchor_set[] = true
-
-        BridgeStan.log_density_hessian!(ctx.sm_prior, ctx.anchor, hess_grad_buf, hess_buf_prior)
-        update_hcv!(hcv, hess_buf, hess_buf_prior, s, d)
-    end
-
-    function neg_grad_full!(out::Vector{Float64}, θ::Vector{Float64})
-        BridgeStan.log_density_gradient!(ctx.sm_full, θ, out)
-        out .= .-out
-        return out
-    end
-
-    function neg_hvp_cv!(out::Vector{Float64}, θ::Vector{Float64}, v::Vector{Float64})
-        BridgeStan.log_density_hessian_vector_product!(ctx.sm_sub, θ, v, out)
-        BridgeStan.log_density_hessian_vector_product!(ctx.sm_prior, θ, v, ctx.hvp_buf)
-        @. out = -s * out - (1 - s) * ctx.hvp_buf
-        return out
-    end
-
-    grad = SubsampledGradient(
-        neg_grad_cv!, resample!, update_anchor!,
-        neg_grad_full!,
-        ctx.m, n_anchor_updates, true;
-        resample_dt
-    )
-    hvp = if use_fd_hcv
-        nothing
-    elseif hvp_mode == "scaled"
-        neg_hvp_cv!
-    elseif hvp_mode == "none"
-        nothing
-    else
-        error("Unknown hvp_mode: $hvp_mode. Use \"scaled\" or \"none\".")
-    end
-    return PDMPModel(d, grad, hvp), d
-end
-
-function _build_bss_model_bank(ctx::BridgeStanSubsamplingContext, n_anchor_updates::Int;
-                               resample_dt::Float64=0.0, hvp_mode::String="scaled",
-                               bank_capacity::Int=20)
-    s = ctx.N / ctx.m
-    d = Int(BridgeStan.param_unc_num(ctx.sm_full))
-    bank = AnchorBank(d; capacity=bank_capacity)
-
-    function neg_grad_cv!(out::Vector{Float64}, θ::Vector{Float64})
-        BridgeStan.log_density_gradient!(ctx.sm_sub, θ, ctx.grad_buf1)
-        BridgeStan.log_density_gradient!(ctx.sm_prior, θ, ctx.grad_buf2)
-        @. out = -((1 - s) * ctx.grad_buf2 + s * ctx.grad_buf1 + ctx.correction)
-        return out
-    end
-
-    function _recompute_correction_from_active!()
-        entry = active_entry(bank)
-        copyto!(ctx.anchor, entry.position)
-        copyto!(ctx.g_full_buf, entry.full_gradient)
-        BridgeStan.log_density_gradient!(ctx.sm_sub, ctx.anchor, ctx.grad_buf1)
-        BridgeStan.log_density_gradient!(ctx.sm_prior, ctx.anchor, ctx.grad_buf2)
-        @. ctx.correction = (s - 1) * ctx.grad_buf2 - s * ctx.grad_buf1 + ctx.g_full_buf
-    end
-
-    function resample!(nsub)
-        _partial_shuffle!(ctx.perm, ctx.m)
-        _ccall_set_indices!(ctx)
-        if has_active_anchor(bank)
-            _recompute_correction_from_active!()
-        end
-    end
-
-    function update_anchor!(trace)
-        Statistics.mean!(ctx.anchor, trace)
-        BridgeStan.log_density_gradient!(ctx.sm_full, ctx.anchor, ctx.g_full_buf)
-
-        BridgeStan.log_density_gradient!(ctx.sm_sub, ctx.anchor, ctx.grad_buf1)
-        BridgeStan.log_density_gradient!(ctx.sm_prior, ctx.anchor, ctx.grad_buf2)
-        correction = (s - 1) .* ctx.grad_buf2 .- s .* ctx.grad_buf1 .+ ctx.g_full_buf
-
-        add_anchor!(bank;
-            position=copy(ctx.anchor),
-            full_gradient=copy(ctx.g_full_buf))
-
-        copyto!(ctx.correction, correction)
-    end
-
-    function select_fn!(x)
-        has_active_anchor(bank) || return
-        prev_idx = bank.active_idx
-        select_nearest!(bank, x)
-        if bank.active_idx != prev_idx
-            _recompute_correction_from_active!()
-        end
-    end
-
-    function neg_grad_full!(out::Vector{Float64}, θ::Vector{Float64})
-        BridgeStan.log_density_gradient!(ctx.sm_full, θ, out)
-        out .= .-out
-        return out
-    end
-
-    function neg_hvp_cv!(out::Vector{Float64}, θ::Vector{Float64}, v::Vector{Float64})
-        BridgeStan.log_density_hessian_vector_product!(ctx.sm_sub, θ, v, out)
-        BridgeStan.log_density_hessian_vector_product!(ctx.sm_prior, θ, v, ctx.hvp_buf)
-        @. out = -s * out - (1 - s) * ctx.hvp_buf
-        return out
-    end
-
-    grad = SubsampledGradient(
-        neg_grad_cv!, resample!, update_anchor!,
-        neg_grad_full!,
-        ctx.m, n_anchor_updates, true;
-        resample_dt
-    )
-    hvp = if hvp_mode == "scaled"
-        neg_hvp_cv!
-    elseif hvp_mode == "none"
-        nothing
-    else
-        error("Unknown hvp_mode: $hvp_mode. Use \"scaled\" or \"none\".")
-    end
-
-    adapter = AnchorBankAdapter(select_fn!, update_anchor!, 0.0, 0.0, true)
-    return PDMPModel(d, grad, hvp), d, adapter, bank
-end
-
-function _build_bss_model_bank_hcv(ctx::BridgeStanSubsamplingContext, n_anchor_updates::Int;
-                                   resample_dt::Float64=0.0, hvp_mode::String="scaled",
-                                   bank_capacity::Int=20, use_fd_hcv::Bool=false)
-    s = ctx.N / ctx.m
-    d = Int(BridgeStan.param_unc_num(ctx.sm_full))
-    bank = AnchorBank(d; capacity=bank_capacity, use_hcv=true)
-    hvp_buf_hcv = zeros(d)
-    hess_buf = zeros(d * d)
-    hess_grad_buf = zeros(d)
-    hess_buf_prior = zeros(d * d)
-    grad_sub_anchor = zeros(d)
-    fd_buf = zeros(d)
-    h_fd = 1e-5
-
-    function hvp_at_anchor_fd!(hvp_out::Vector{Float64}, v::Vector{Float64})
-        vnorm = norm(v)
-        iszero(vnorm) && (hvp_out .= 0.0; return)
-        h_scaled = h_fd * max(1.0, vnorm)
-        @. fd_buf = ctx.anchor + (h_scaled / vnorm) * v
-        BridgeStan.log_density_gradient!(ctx.sm_sub, fd_buf, hvp_out)
-        @. hvp_out = (hvp_out - grad_sub_anchor) * (vnorm / h_scaled)
-    end
-
-    function hvp_at_anchor_exact!(hvp_out::Vector{Float64}, v::Vector{Float64})
-        BridgeStan.log_density_hessian_vector_product!(ctx.sm_sub, ctx.anchor, v, hvp_out)
-    end
-
-    function neg_grad_cv!(out::Vector{Float64}, θ::Vector{Float64})
-        BridgeStan.log_density_gradient!(ctx.sm_sub, θ, ctx.grad_buf1)
-        BridgeStan.log_density_gradient!(ctx.sm_prior, θ, ctx.grad_buf2)
-        @. out = -((1 - s) * ctx.grad_buf2 + s * ctx.grad_buf1 + ctx.correction)
-
-        if has_active_anchor(bank)
-            entry = active_entry(bank)
-            hcv = entry.hcv
-            if hcv !== nothing && hcv.enabled
-                if use_fd_hcv
-                    apply_hcv_correction!(out, hcv, θ, ctx.anchor, hvp_at_anchor_fd!, s, hvp_buf_hcv)
-                else
-                    apply_hcv_correction!(out, hcv, θ, ctx.anchor, hvp_at_anchor_exact!, s, hvp_buf_hcv)
-                end
-            end
-        end
-        return out
-    end
-
-    function _recompute_correction_from_active!()
-        entry = active_entry(bank)
-        copyto!(ctx.anchor, entry.position)
-        copyto!(ctx.g_full_buf, entry.full_gradient)
-        BridgeStan.log_density_gradient!(ctx.sm_sub, ctx.anchor, ctx.grad_buf1)
-        copyto!(grad_sub_anchor, ctx.grad_buf1)
-        BridgeStan.log_density_gradient!(ctx.sm_prior, ctx.anchor, ctx.grad_buf2)
-        @. ctx.correction = (s - 1) * ctx.grad_buf2 - s * ctx.grad_buf1 + ctx.g_full_buf
-    end
-
-    function resample!(nsub)
-        _partial_shuffle!(ctx.perm, ctx.m)
-        _ccall_set_indices!(ctx)
-        if has_active_anchor(bank)
-            _recompute_correction_from_active!()
-        end
-    end
-
-    function update_anchor!(trace)
-        Statistics.mean!(ctx.anchor, trace)
-        BridgeStan.log_density_hessian!(ctx.sm_full, ctx.anchor, ctx.g_full_buf, hess_buf)
-        BridgeStan.log_density_gradient!(ctx.sm_sub, ctx.anchor, ctx.grad_buf1)
-        copyto!(grad_sub_anchor, ctx.grad_buf1)
-        BridgeStan.log_density_gradient!(ctx.sm_prior, ctx.anchor, ctx.grad_buf2)
-        correction = (s - 1) .* ctx.grad_buf2 .- s .* ctx.grad_buf1 .+ ctx.g_full_buf
-
-        idx = add_anchor!(bank;
-            position=copy(ctx.anchor),
-            full_gradient=copy(ctx.g_full_buf))
-
-        copyto!(ctx.correction, correction)
-
-        entry = bank.entries[idx]
-        if entry.hcv !== nothing
-            BridgeStan.log_density_hessian!(ctx.sm_prior, ctx.anchor, hess_grad_buf, hess_buf_prior)
-            update_hcv!(entry.hcv, hess_buf, hess_buf_prior, s, d)
-        end
-    end
-
-    function select_fn!(x)
-        has_active_anchor(bank) || return
-        prev_idx = bank.active_idx
-        select_nearest!(bank, x)
-        if bank.active_idx != prev_idx
-            _recompute_correction_from_active!()
-        end
-    end
-
-    function neg_grad_full!(out::Vector{Float64}, θ::Vector{Float64})
-        BridgeStan.log_density_gradient!(ctx.sm_full, θ, out)
-        out .= .-out
-        return out
-    end
-
-    function neg_hvp_cv!(out::Vector{Float64}, θ::Vector{Float64}, v::Vector{Float64})
-        BridgeStan.log_density_hessian_vector_product!(ctx.sm_sub, θ, v, out)
-        BridgeStan.log_density_hessian_vector_product!(ctx.sm_prior, θ, v, ctx.hvp_buf)
-        @. out = -s * out - (1 - s) * ctx.hvp_buf
-        return out
-    end
-
-    grad = SubsampledGradient(
-        neg_grad_cv!, resample!, update_anchor!,
-        neg_grad_full!,
-        ctx.m, n_anchor_updates, true;
-        resample_dt
-    )
-    hvp = if use_fd_hcv
-        nothing
-    elseif hvp_mode == "scaled"
-        neg_hvp_cv!
-    elseif hvp_mode == "none"
-        nothing
-    else
-        error("Unknown hvp_mode: $hvp_mode. Use \"scaled\" or \"none\".")
-    end
-
-    adapter = AnchorBankAdapter(select_fn!, update_anchor!, 0.0, 0.0, true)
-    return PDMPModel(d, grad, hvp), d, adapter, bank
-end
-
-function _resolve_set_fn(lib_path::String)
-    lib = Libc.Libdl.dlopen(lib_path, Libc.Libdl.RTLD_NOLOAD | Libc.Libdl.RTLD_GLOBAL)
-    Libc.Libdl.dlsym(lib, :pdmp_set_subsample_indices)
-end
-
-function _new_bss_context(lib_path_std::String, lib_path_ext::String, set_fn::Ptr{Nothing},
-                          data_full_file::String, data_prior_file::String,
-                          N::Int, m::Int, d::Int)
-    sm_full = BridgeStan.StanModel(lib_path_std, data_full_file; warn=false)
-    sm_prior = BridgeStan.StanModel(lib_path_std, data_prior_file; warn=false)
-    sm_sub = BridgeStan.StanModel(lib_path_ext, data_full_file; warn=false)
-    perm = collect(1:N)
-    _partial_shuffle!(perm, m)
-    idx_buf = Vector{Int32}(undef, m)
-    ctx = BridgeStanSubsamplingContext(
-        sm_full, sm_sub, sm_prior, set_fn, idx_buf,
-        zeros(d), N, m, perm, zeros(d), zeros(d), zeros(d), zeros(d),
-        zeros(d), zeros(d, d)
-    )
-    _ccall_set_indices!(ctx)
-    ctx
-end
-
-function r_pdmp_brms_subsampled(
+function r_pdmp_brms_subsampling(
         stan_file::String,
-        stan_file_ext::String,
-        hpp_path::String,
         data_full_file::String,
         data_prior_file::String,
         N::Integer,
         subsample_size::Integer,
+        family_name::String,
+        predictor_designs,
+        predictor_indices,
+        predictor_dimension::Integer,
+        offsets,
+        response,
+        known_se,
+        observation_multipliers,
         flow_type::String,
         algorithm_type::String,
         flow_mean,
         flow_cov,
-        output_csv::String;
+        output_csv::String; control=nothing, compile_options=nothing,
         c0::Float64 = 1e-2,
         grid_n::Int = 30,
         grid_t_max::Float64 = 2.0,
+        grid_bound::String = "value_quadratic",
+        grid_curvature_bound::Union{Nothing,Float64} = nothing,
         t0::Float64 = 0.0,
         T::Float64 = 10000.0,
         t_warmup::Float64 = 0.0,
-        n_anchor_updates::Int = 10,
         adaptive_scheme::String = "diagonal",
         discretize_dt::Float64 = 0.0,
         show_progress::Bool = true,
@@ -1237,143 +1853,37 @@ function r_pdmp_brms_subsampled(
         threaded::Bool = false,
         seed::Union{Integer, Nothing} = nothing,
         compute_lp::Bool = false,
-        resample_dt::Float64 = 0.0,
-        hvp_mode::String = "scaled",
-        use_hcv::Bool = false,
-        use_anchor_bank::Bool = false,
-        bank_capacity::Int = 20,
-        use_fd_hvp::Bool = false,
-        post_warmup_simplify::Bool = false,
-        use_fd_hcv::Bool = false,
+        curvature_backend::String = "exact",
         sticky::Bool = false,
         can_stick::Union{AbstractVector{Bool}, Nothing} = nothing,
         model_prior = nothing,
-        parameter_prior::Union{AbstractVector{Float64}, Nothing} = nothing
+        parameter_prior::Union{AbstractVector{Float64}, Nothing} = nothing,
+        n_anchor_updates::Int = 0,
+        use_anchor_bank::Bool = false,
+        bank_capacity::Int = 20,
+        use_hcv::Bool = false
     )
-    lib_path_std = _compile_model_with_header(stan_file, hpp_path)
-    lib_path_ext = _compile_model_with_header(stan_file_ext, hpp_path)
+    lib_path_std = _compile_model(stan_file; compile_options)
 
     N_int = Int(N)
     m = Int(subsample_size)
+    designs = Matrix{Float64}[Matrix{Float64}(design)
+        for design in _subsampling_collection_values(predictor_designs)]
+    indices = Vector{Int}[_as_subsampling_predictor_indices(active)
+        for active in _subsampling_collection_values(predictor_indices)]
+    d = Int(predictor_dimension)
 
-    sm_full = BridgeStan.StanModel(lib_path_std, data_full_file; warn=false)
-    sm_prior = BridgeStan.StanModel(lib_path_std, data_prior_file; warn=false)
-    sm_sub = BridgeStan.StanModel(lib_path_ext, data_full_file; warn=false)
-    d = Int(BridgeStan.param_unc_num(sm_full))
-
-    set_fn = _resolve_set_fn(lib_path_ext)
-
-    perm = collect(1:N_int)
-    _partial_shuffle!(perm, m)
-    idx_buf = Vector{Int32}(undef, m)
-
-    ctx = BridgeStanSubsamplingContext(
-        sm_full, sm_sub, sm_prior, set_fn, idx_buf,
-        zeros(d), N_int, m, perm, zeros(d), zeros(d), zeros(d), zeros(d),
-        zeros(d), zeros(d, d)
-    )
-    _ccall_set_indices!(ctx)
-
-    bank_adapter = nothing
-    bank = nothing
-    if use_anchor_bank && use_hcv
-        model, _, bank_adapter, bank = _build_bss_model_bank_hcv(ctx, n_anchor_updates;
-            resample_dt, hvp_mode, bank_capacity, use_fd_hcv)
-    elseif use_anchor_bank
-        model, _, bank_adapter, bank = _build_bss_model_bank(ctx, n_anchor_updates;
-            resample_dt, hvp_mode, bank_capacity)
-    elseif use_hcv
-        model, _ = _build_bss_model_hcv(ctx, n_anchor_updates; resample_dt, hvp_mode, use_fd_hcv)
-    else
-        model, _ = _build_bss_model(ctx, n_anchor_updates; resample_dt, hvp_mode)
-    end
-
-    fmean = _as_flow_mean(flow_mean, d)
-    prec = inv(Symmetric(_as_flow_cov(flow_cov, d)))
-    flow = build_flow(flow_type, prec, fmean; adaptive_scheme)
-    alg0 = build_algorithm(algorithm_type; c0, d, grid_n, grid_t_max, use_fd_hvp, post_warmup_simplify)
-    alg = wrap_sticky(alg0, sticky, model_prior, parameter_prior, can_stick)
-
-    adapter = if bank_adapter !== nothing
-        PDMPSamplers.default_adapter(flow, model.grad, bank_adapter, t_warmup / 10, t_warmup, t0)
-    else
-        nothing
-    end
-
-    function _build_chain_model(ctx_i)
-        if use_anchor_bank && use_hcv
-            return _build_bss_model_bank_hcv(ctx_i, n_anchor_updates;
-                resample_dt, hvp_mode, bank_capacity, use_fd_hcv)
-        elseif use_anchor_bank
-            return _build_bss_model_bank(ctx_i, n_anchor_updates;
-                resample_dt, hvp_mode, bank_capacity)
-        elseif use_hcv
-            m_i, d_i = _build_bss_model_hcv(ctx_i, n_anchor_updates; resample_dt, hvp_mode, use_fd_hcv)
-            return m_i, d_i, nothing, nothing
-        else
-            m_i, d_i = _build_bss_model(ctx_i, n_anchor_updates; resample_dt, hvp_mode)
-            return m_i, d_i, nothing, nothing
-        end
-    end
-
-    if !use_anchor_bank
-        models = typeof(model)[model]
-        for i in 2:n_chains
-            ctx_i = _new_bss_context(lib_path_std, lib_path_ext, set_fn,
-                                     data_full_file, data_prior_file,
-                                     N_int, m, d)
-            model_i, _ = _build_chain_model(ctx_i)
-            push!(models, model_i)
-        end
-        chains = pdmp_sample(d, flow, models, alg, t0, T, t_warmup;
-                             progress=show_progress, threaded, seed)
-    elseif n_chains == 1
-        chains = pdmp_sample(d, flow, [model], alg, t0, T, t_warmup;
-                             progress=show_progress, adapter, seed)
-    else
-        all_traces = []
-        all_stats = []
-        for i in 1:n_chains
-            if i == 1
-                m_i, a_i = model, adapter
-            else
-                ctx_i = _new_bss_context(lib_path_std, lib_path_ext, set_fn,
-                                         data_full_file, data_prior_file,
-                                         N_int, m, d)
-                m_i, _, ba_i, _ = _build_chain_model(ctx_i)
-                a_i = PDMPSamplers.default_adapter(flow, m_i.grad, ba_i, t_warmup / 10, t_warmup, t0)
-            end
-            ch_i = pdmp_sample(d, deepcopy(flow), [m_i], alg, t0, T, t_warmup;
-                               progress=(i == 1 && show_progress), adapter=a_i, seed=isnothing(seed) ? nothing : seed + i - 1)
-            push!(all_traces, ch_i.traces[1])
-            push!(all_stats, ch_i.stats[1])
-        end
-        chains = PDMPChains(all_traces, all_stats)
-    end
-
-    stats = extract_stats(chains)
-    sm_constrain = sm_full
-    n_ch = length(chains.traces)
-    csv_paths = String[]
-    all_draws = [_draws_for_csv(chains, i, discretize_dt) for i in 1:n_ch]
-    min_rows = minimum(size(m, 1) for m in all_draws)
-    for chain_idx in 1:n_ch
-        draws_unc = all_draws[chain_idx][1:min_rows, :]
-        csv_path = n_ch == 1 ? output_csv : replace(output_csv, r"\.csv$" => "_chain$(chain_idx).csv")
-        r_constrain_and_write_csv(sm_constrain, draws_unc, csv_path; chain_id=chain_idx, compute_lp)
-        push!(csv_paths, csv_path)
-    end
-
-    result = _pack_result(chains)
-    result["csv_paths"] = csv_paths
-    if sticky
-        incl = Dict{Int,Vector{Float64}}()
-        for i in 1:n_ch
-            incl[i] = inclusion_probs(chains; chain=i)
-        end
-        result["inclusion_probs"] = incl
-    end
-    return result
+    return _run_subsampling_brms_subsampled(
+        lib_path_std, data_full_file, data_prior_file, N_int, m,
+        Symbol(family_name), designs, indices, d,
+        Matrix{Float64}(offsets), Matrix{Float64}(response), Vector{Float64}(known_se),
+        Vector{Float64}(observation_multipliers),
+        flow_type, algorithm_type,
+        flow_mean, flow_cov, output_csv; control,
+        c0, grid_n, grid_t_max, grid_bound, grid_curvature_bound, t0, T, t_warmup,
+        adaptive_scheme, discretize_dt, show_progress, n_chains, threaded,
+        seed, compute_lp, curvature_backend, sticky, can_stick, model_prior, parameter_prior,
+        n_anchor_updates, use_anchor_bank, bank_capacity, use_hcv)
 end
 
 function r_pdmp_stan_for_brms(
@@ -1381,12 +1891,14 @@ function r_pdmp_stan_for_brms(
         path_to_stan_data::String,
         flow_type::String,
         algorithm_type::String,
-        flow_mean::AbstractVector{Float64},
-        flow_cov::AbstractMatrix{Float64},
-        output_csv::String;
+        flow_mean,
+        flow_cov,
+        output_csv::String; control=nothing,
         c0::Float64 = 1e-2,
         grid_n::Int = 30,
         grid_t_max::Float64 = 2.0,
+        grid_bound::String = "value_quadratic",
+        grid_curvature_bound::Union{Nothing,Float64} = nothing,
         t0::Float64 = 0.0,
         T::Float64 = 10000.0,
         t_warmup::Float64 = 0.0,
@@ -1397,40 +1909,50 @@ function r_pdmp_stan_for_brms(
         threaded::Bool = false,
         seed::Union{Integer, Nothing} = nothing,
         compute_lp::Bool = false,
-        use_fd_hvp::Bool = false,
-        post_warmup_simplify::Bool = false,
+        curvature_backend::String = "exact",
         sticky::Bool = false,
-        can_stick::Union{AbstractVector{Bool}, Nothing} = nothing,
+        can_stick = nothing,
         model_prior = nothing,
-        parameter_prior::Union{AbstractVector{Float64}, Nothing} = nothing
+        parameter_prior = nothing,
+        slab_prior = nothing,
+        unc_names = String[]
     )
     sm = BridgeStan.StanModel(path_to_stan_model, path_to_stan_data; warn=false)
-    model = PDMPModel(sm; hvp = !use_fd_hvp)
+    posterior_model = PDMPModel(sm; hvp = isnothing(slab_prior) && curvature_backend != "finite_difference")
+    can_stick_vec = _as_bool_vector(can_stick)
+    parameter_prior_vec = isnothing(parameter_prior) ? nothing : _as_float_vector(parameter_prior)
+    unc_names_vec = _as_string_vector(unc_names)
+    model = if isnothing(slab_prior)
+        posterior_model
+    else
+        _build_dependent_slab_model(posterior_model, model_prior, slab_prior,
+            can_stick_vec, unc_names_vec)
+    end
     d = model.d
 
-    fmean = isempty(flow_mean) ? zeros(d) : flow_mean
-    prec = isempty(flow_cov) ? Diagonal(ones(d)) : _to_precision(flow_cov, d)
+    fmean = _as_flow_mean(flow_mean, d)
+    flow_cov_mat = _as_flow_cov(flow_cov, d)
+    prec = _to_precision(flow_cov_mat, d)
 
-    flow = build_flow(flow_type, prec, fmean; adaptive_scheme)
-    alg0 = build_algorithm(algorithm_type; c0, d, grid_n, grid_t_max, use_fd_hvp, post_warmup_simplify)
-    alg = wrap_sticky(alg0, sticky, model_prior, parameter_prior, can_stick)
+    flow = build_flow(flow_type, prec, fmean; control, adaptive_scheme)
+    initial_refresh_rate = try Float64(PDMPSamplers.refresh_rate(flow)) catch; NaN end
+    alg0 = build_algorithm(algorithm_type; control, c0, d, grid_n, grid_t_max,
+        curvature_backend, grid_bound, grid_curvature_bound)
+    alg = isnothing(slab_prior) ?
+        wrap_sticky(alg0, sticky, model_prior, parameter_prior_vec, can_stick_vec) :
+        wrap_dependent_sticky(alg0, sticky, model_prior, slab_prior, can_stick_vec, flow, unc_names_vec)
 
     chains = pdmp_sample(d, flow, model, alg, t0, T, t_warmup;
-                         progress = show_progress, n_chains, threaded, seed)
+                         progress = show_progress, n_chains, threaded, seed,
+                         statistic_counter=PDMPSamplers.DevelStatisticCounter)
 
-    stats = extract_stats(chains)
     n_ch = length(chains.traces)
-    csv_paths = String[]
-    all_draws = [_draws_for_csv(chains, i, discretize_dt) for i in 1:n_ch]
-    min_rows = minimum(size(m, 1) for m in all_draws)
-    for chain_idx in 1:n_ch
-        draws_unc = all_draws[chain_idx][1:min_rows, :]
-        csv_path = n_ch == 1 ? output_csv : replace(output_csv, r"\.csv$" => "_chain$(chain_idx).csv")
-        r_constrain_and_write_csv(sm, draws_unc, csv_path; chain_id = chain_idx, compute_lp)
-        push!(csv_paths, csv_path)
-    end
+    csv_paths = _write_brms_chain_csvs(chains, fill(sm, n_ch),
+        output_csv, discretize_dt; compute_lp)
 
-    result = _pack_result(chains)
+    result = _pack_result(chains; requested_flow=flow_type,
+        adaptive_scheme, initial_refresh_rate,
+        t_warmup)
     result["csv_paths"] = csv_paths
     if sticky
         incl = Dict{Int,Vector{Float64}}()

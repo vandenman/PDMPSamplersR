@@ -45,3 +45,7 @@ betabernoulli <- function(a = 1, b = 1) {
 is.betabernoulli <- function(x) {
   inherits(x, "beta-bernoulli")
 }
+
+is.model_prior <- function(x) {
+  is.bernoulli(x) || is.betabernoulli(x)
+}

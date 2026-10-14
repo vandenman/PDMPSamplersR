@@ -27,14 +27,24 @@ reference:
   - title: Sampling
     contents:
       - pdmp_sample
-      - pdmp_sample_subsampled
       - pdmp_sample_from_stanmodel
+      - sampler_control
+      - stan_compile_options
       - support_boundary_control
       - write_stan_json
+      - stan_subsampling
+      - stan_subsampling_diagnostics
+      - stan_residual_envelope
+      - omrf_residual_envelope
+      - position_anchor_bank
+      - online_summary_options
+      - compile_pdmp_stan_model
       - pdmp_subsample_hpp_path
+      - stan_parameter_mapping
   - title: Results
     contents:
       - materialize
+      - read_online_summaries
       - mean.pdmp_result
       - median.pdmp_result
       - var.pdmp_result
@@ -59,14 +69,10 @@ reference:
     contents:
       - bernoulli
       - betabernoulli
+      - dense_gaussian_slab
   - title: brms interface
     contents:
       - brm_pdmp
-      - brm_stancode
-      - brm_standata
-      - log_lik_subsampled
-      - posterior_epred_subsampled
-      - posterior_predict_subsampled
   - title: Variable selection
     contents:
       - model_averaged_mean
@@ -82,3 +88,4 @@ reference:
       - pdmpsamplers_status
       - use_local_pdmpsamplers
       - check_for_julia_setup
+      - cleanup_worker_state

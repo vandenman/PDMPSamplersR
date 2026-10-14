@@ -357,3 +357,19 @@ test_that("brm_pdmp subsampled: multi-chain Rhat", {
     expect_true(is.finite(rh))
   }
 })
+
+test_that("brms full-data and subsampled runs package their results", {
+  skip_on_cran()
+  skip_if_no_brms_setup()
+  data <- data.frame(x = seq(-1, 1, length.out = 20),
+                     y = rep(c(0L, 1L), 10))
+  for (subset in list(NULL, 5L)) {
+    fit <- brm_pdmp(y ~ x, data = data, family = brms::bernoulli(),
+      flow = "ZigZag", T = 2, t_warmup = 0.4, seed = 44L,
+      subsample_size = subset, show_progress = FALSE)
+    expect_s3_class(fit, "brmsfit")
+    expect_identical(attr(fit, "subsampling"), !is.null(subset))
+    expect_true(is.list(attr(fit, "pdmp_stats")))
+    expect_true(all(is.finite(posterior::as_draws_matrix(fit))))
+  }
+})

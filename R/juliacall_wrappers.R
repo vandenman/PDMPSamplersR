@@ -34,5 +34,14 @@ rethrow_pdmp_julia_error <- function(err) {
   # on MacOS CI, testthat testthat::local_mocked_bindings
   # segfaults when directly mocking JuliaCall::julia_call
   # this allows us to mock this wrapper instead.
-  JuliaCall::julia_call(...)
+  args <- list(...)
+  if (length(args) >= 1L && is.character(args[[1L]]) && length(args[[1L]]) == 1L) {
+    if (grepl("^[A-Za-z_][A-Za-z0-9_]*$", args[[1L]])) {
+      args[[1L]] <- paste0("PDMPSamplersRBridge.", args[[1L]])
+    }
+  }
+  tryCatch(
+    do.call(JuliaCall::julia_call, args),
+    error = rethrow_pdmp_julia_error
+  )
 }

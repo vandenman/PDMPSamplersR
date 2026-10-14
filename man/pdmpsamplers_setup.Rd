@@ -4,11 +4,16 @@
 \alias{pdmpsamplers_setup}
 \title{Set up the Julia environment for PDMPSamplers.jl}
 \usage{
-pdmpsamplers_setup(verbose = TRUE)
+pdmpsamplers_setup(verbose = TRUE, project_dir = NULL)
 }
 \arguments{
 \item{verbose}{Logical, if \code{TRUE} (default), progress messages are
 printed.}
+
+\item{project_dir}{Optional Julia project directory. Sets the R option
+\code{pdmpsamplersr_config_julia_project_dir} for this R session; the same option
+can be set before loading the package. Otherwise the user-cache project
+is used. Configure each independent worker session separately.}
 }
 \value{
 Invisible \code{TRUE} if the setup succeeds.

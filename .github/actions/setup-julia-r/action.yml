@@ -32,6 +32,18 @@ runs:
         cat(sprintf("JULIA_PROJECT=%s\n", project_dir),
             file = env_file, append = TRUE)
 
+    - name: Configure the package's R project option
+      shell: Rscript {0}
+      run: |
+        project_dir <- Sys.getenv("PDMPSAMPLERSR_CONFIG_JULIA_PROJECT_DIR")
+        previous <- Sys.getenv("R_PROFILE_USER")
+        startup <- if (nzchar(previous) && file.exists(previous)) readLines(previous) else character()
+        profile <- file.path(Sys.getenv("RUNNER_TEMP"), "pdmpsamplersr-profile.R")
+        writeLines(c(startup, sprintf("options(pdmpsamplersr_config_julia_project_dir = %s)",
+                                     deparse(project_dir))), profile)
+        cat(sprintf("R_PROFILE_USER=%s\n", profile),
+            file = Sys.getenv("GITHUB_ENV"), append = TRUE)
+
     - name: Cache PDMPSamplersR artifacts
       uses: actions/cache@v5
       with:

@@ -10,7 +10,30 @@
         "i" = "Call {.fn materialize} before {.fn saveRDS} to enable reload.")
     )
   check_for_julia_setup()
-  if (isTRUE(x$skeleton[[1L]]$sparse)) {
+  if (isTRUE(x$skeleton[[1L]]$streaming)) {
+    if (is.null(x$retained_initial_states) || is.null(x$terminal_states))
+      cli::cli_abort("Streaming skeleton is missing endpoint provenance.")
+    .pdmpsamplers_julia_call("r_from_streaming_skeleton",
+      lapply(x$skeleton, `[[`, "directory"),
+      lapply(x$skeleton, `[[`, "chunk_count"),
+      lapply(x$skeleton, `[[`, "physical_events"),
+      lapply(x$skeleton, `[[`, "computational_boundaries"),
+      lapply(x$skeleton, `[[`, "buffer_maximum"),
+      lapply(x$retained_initial_states, `[[`, "time"),
+      lapply(x$retained_initial_states, `[[`, "position"),
+      lapply(x$retained_initial_states, `[[`, "physical_velocity"),
+      lapply(x$retained_initial_states, `[[`, "stored_frozen_velocity"),
+      lapply(x$retained_initial_states, `[[`, "free_mask"),
+      lapply(x$terminal_states, `[[`, "time"),
+      lapply(x$terminal_states, `[[`, "position"),
+      lapply(x$terminal_states, `[[`, "physical_velocity"),
+      lapply(x$terminal_states, `[[`, "stored_frozen_velocity"),
+      lapply(x$terminal_states, `[[`, "free_mask"),
+      lapply(x$skeleton, `[[`, "is_boomerang"),
+      lapply(x$skeleton, `[[`, "mu"),
+      lapply(x$skeleton, `[[`, "flow_cov")
+    )
+  } else if (isTRUE(x$skeleton[[1L]]$sparse)) {
     .pdmpsamplers_julia_call("r_from_sparse_skeleton",
       lapply(x$skeleton, `[[`, "initial_time"),
       lapply(x$skeleton, `[[`, "initial_position"),
@@ -29,7 +52,9 @@
       lapply(x$skeleton, `[[`, "velocities"),
       lapply(x$skeleton, `[[`, "is_boomerang"),
       lapply(x$skeleton, `[[`, "mu"),
-      lapply(x$skeleton, `[[`, "is_mutable")
+      lapply(x$skeleton, `[[`, "is_mutable"),
+      lapply(x$skeleton, `[[`, "flow_cov"),
+      lapply(x$skeleton, `[[`, "free_masks")
     )
   }
 }
@@ -226,9 +251,14 @@ cor.pdmp_result <- function(x, chain = 1L, ...) {
 #'
 #' @returns Numeric matrix (\code{length(probs)} x d) when \code{coordinate = -1},
 #'   or a numeric vector of length \code{length(probs)} for a single coordinate.
+#' @param gc_interval Collect temporary Julia workspaces after this many
+#'   coordinates when computing multiple untransformed quantiles (default 16).
 #' @importFrom stats quantile
 #' @export
-quantile.pdmp_result <- function(x, probs, transforms = NULL, chain = NULL, coordinate = -1L, ...) {
+quantile.pdmp_result <- function(x, probs, transforms = NULL, chain = NULL, coordinate = -1L, gc_interval = 16L, ...) {
+  if (!rlang::is_integerish(gc_interval, n = 1L, finite = TRUE) || gc_interval < 1L)
+    cli::cli_abort("{.arg gc_interval} must be a positive integer.")
+  gc_interval <- as.integer(gc_interval)
   .check_pdmp(x)
   chains <- .ensure_chains(x)
   specs  <- .transform_specs(transforms)
@@ -238,7 +268,7 @@ quantile.pdmp_result <- function(x, probs, transforms = NULL, chain = NULL, coor
     n <- length(chains)
     result_list <- lapply(seq_len(n), function(ch) {
       quantile.pdmp_result(x, probs = probs, transforms = transforms,
-                           chain = as.integer(ch), coordinate = coordinate)
+                           chain = as.integer(ch), coordinate = coordinate, gc_interval = gc_interval)
     })
     pooled <- Reduce(`+`, result_list) / n
     if (is.matrix(pooled)) rownames(pooled) <- NULL
@@ -247,13 +277,23 @@ quantile.pdmp_result <- function(x, probs, transforms = NULL, chain = NULL, coor
 
   chain <- as.integer(chain)
 
-  # Julia r_quantile only accepts scalar probs; loop for vectors
+  # Untransformed quantiles use one joint Julia sweep for all probabilities.
+  # Besides avoiding duplicate sorting, the Julia bridge releases each
+  # coordinate's O(number-of-events) workspace before proceeding.
   if (length(probs) > 1L) {
+    if (is.null(specs)) {
+      return(.pdmpsamplers_julia_call(
+        "r_quantile", chains, as.numeric(probs), gc_interval = gc_interval,
+        chain = chain, coordinate = coordinate
+      ))
+    }
+
+    # Transformed vector quantiles retain the scalar compatibility path.
     result_list <- lapply(probs, function(p) {
-      if (is.null(specs))
-        .pdmpsamplers_julia_call("r_quantile", chains, p, chain = chain, coordinate = coordinate)
-      else
-        .pdmpsamplers_julia_call("r_quantile", chains, p, specs, chain = chain, coordinate = coordinate)
+      .pdmpsamplers_julia_call(
+        "r_quantile", chains, p, specs,
+        chain = chain, coordinate = coordinate
+      )
     })
     result <- do.call(rbind, result_list)
     rownames(result) <- NULL

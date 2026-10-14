@@ -7,32 +7,55 @@
 pdmp_sample_from_stanmodel(
   path_to_stanmodel,
   standata,
+  subsampling = NULL,
+  subsampling_anchor_updates = 0L,
+  subsampling_use_anchor_bank = FALSE,
+  subsampling_anchor_bank_capacity = 8L,
+  subsampling_anchor_selection_policy = c("adaptive", "position"),
+  subsampling_position_anchor_bank_spec = NULL,
+  subsampling_main_anchor_refresh_distance = Inf,
+  subsampling_require_no_main_full_data = FALSE,
+  subsampling_diagnostic_window = 0,
   flow = c("ZigZag", "BouncyParticle", "Boomerang", "AdaptiveBoomerang",
     "PreconditionedZigZag", "PreconditionedBPS"),
   algorithm = c("ThinningStrategy", "GridThinningStrategy", "RootsPoissonStrategy"),
   T = 50000,
   t0 = 0,
   t_warmup = 0,
+  warmup_adaptation_interval = NULL,
+  boomerang_variance_floor_fraction = 0,
   flow_mean = NULL,
   flow_cov = NULL,
   c0 = 0.01,
+  flow_specification = c("auto", "initial", "frozen"),
   x0 = NULL,
   theta0 = NULL,
+  free0 = NULL,
+  stored_velocity0 = NULL,
   sticky = FALSE,
   can_stick = NULL,
   model_prior = NULL,
   parameter_prior = NULL,
+  slab_prior = NULL,
   grid_n = 30,
   grid_t_max = 2,
-  post_warmup_simplify = FALSE,
+  curvature_backend = NULL,
+  grid_bound = c("value_quadratic", "constant"),
+  grid_curvature_bound = NULL,
   show_progress = TRUE,
   n_chains = 1L,
   threaded = FALSE,
   seed = NULL,
   adaptive_scheme = c("diagonal", "fullrank"),
+  refresh_rate = 1,
   materialize = TRUE,
+  trace_storage = c("dense", "streaming"),
+  streaming_trace_directory = NULL,
+  streaming_trace_buffer_events = 4096L,
+  online_summaries = NULL,
   support_boundary = support_boundary_control(),
-  subsample = NULL
+  control = sampler_control(),
+  compile_options = stan_compile_options()
 )
 }
 \arguments{
@@ -44,14 +67,55 @@ BridgeStan will compile it automatically.}
 or a named list that will be written to a temporary JSON file via
 [write_stan_json()].}
 
+\item{subsampling}{Optional exact subsampling custom-Stan specification
+created by [stan_subsampling()]. The selected Stan branch must add
+the unscaled sum of the installed observations; Julia applies `N / m`.}
+
+\item{subsampling_anchor_updates}{Number of prepared OMRF anchors added from
+continuous-time warmup means.}
+
+\item{subsampling_use_anchor_bank}{Retain prepared OMRF anchors and select
+the nearest entry at event boundaries. If false, updates replace the
+active anchor.}
+
+\item{subsampling_anchor_bank_capacity}{Maximum prepared OMRF anchors kept
+per chain.}
+
+\item{subsampling_anchor_selection_policy}{Research anchor-bank policy.
+`"adaptive"` preserves the existing event-history/envelope policy;
+`"position"` selects one frozen finite bank source by weighted position
+and supports linear Zig--Zag/BPS and harmonic Boomerang flows.}
+
+\item{subsampling_position_anchor_bank_spec}{Optional version-1 mathematical
+position-bank specification saved on a previous result. Restoration
+rebuilds prepared provider quantities from its ordered positions and
+frozen distance scales; it requires zero warmup and matching dataset,
+parameter-order, and envelope/grouping identities.}
+
+\item{subsampling_main_anchor_refresh_distance}{Positive Euclidean distance
+from the nearest prepared anchor that triggers a new exact OMRF anchor
+during main sampling. The default `Inf` disables main-phase preparation.}
+
+\item{subsampling_require_no_main_full_data}{If `TRUE`, fail the run when
+retained sampling performs any full-gradient evaluation, prepares an
+anchor, or traverses every OMRF person-node conditional in native Julia.
+Setup and warmup work are allowed. This is intended as a hard benchmark
+invariant for frozen-control-variate and direct-clock experiments.}
+
+\item{subsampling_diagnostic_window}{Width, in sampling time, of the windows
+over which the OMRF anchor manager records retained-phase subsampling
+diagnostics. The default 0 disables them.}
+
 \item{flow}{Character string specifying the flow type. One of "ZigZag",
 "BouncyParticle", "Boomerang", "AdaptiveBoomerang", "PreconditionedZigZag",
 or "PreconditionedBPS".
 The `"AdaptiveBoomerang"` flow learns its reference (mean and precision)
-during warmup and requires `"GridThinningStrategy"` as the algorithm.
+during warmup and requires a grid-like algorithm. It is supported with
+dependent slabs when `GridThinningStrategy` is selected; provide positive
+`t_warmup`, or let the sampler choose its 20% default.
 The `"PreconditionedZigZag"` and `"PreconditionedBPS"` flows learn a
 diagonal preconditioner during warmup and also require
-`"GridThinningStrategy"` as the algorithm.}
+a grid-like algorithm.}
 
 \item{algorithm}{Character string specifying the algorithm. One of
 "ThinningStrategy", "GridThinningStrategy", or "RootsPoissonStrategy".}
@@ -62,32 +126,79 @@ diagonal preconditioner during warmup and also require
 
 \item{t_warmup}{Numeric, warmup time (default: 0.0). Events during warmup are discarded.}
 
+\item{warmup_adaptation_interval}{Nonnegative time between dynamics
+adaptation attempts during warmup. `NULL` uses ten equally spaced warmup
+windows (`t_warmup / 10`); zero attempts adaptation at every event. The
+same interval is used by full-gradient and subsampling runs.}
+
+\item{boomerang_variance_floor_fraction}{Nonnegative opt-in research
+safeguard for adaptive diagonal Boomerang flows. At every adaptation
+update, named `global_scale` and `node_scale.*` coordinates retain at
+least this fraction of their preadaptation variance. Zero (the default)
+disables the safeguard.}
+
 \item{flow_mean}{Numeric vector of length d, mean vector for the flow (default: zero vector).}
 
 \item{flow_cov}{Numeric matrix of size d x d, covariance matrix for the flow (default: identity matrix).}
 
 \item{c0}{Numeric, bound parameter (default: 1e-2).}
 
+\item{flow_specification}{Role of an explicitly supplied `flow_mean` or
+`flow_cov`. `"initial"` permits legitimate warmup adaptation and records
+every chain's retained flow. `"frozen"` requires every retained chain to
+match the request and fails closed otherwise. `"auto"` uses `"initial"`
+when `t_warmup > 0` and `"frozen"` otherwise.}
+
 \item{x0}{Numeric vector of length d, initial position (default: random normal).}
 
-\item{theta0}{Numeric vector of length d, initial velocity (default: random based on the flow).}
+\item{theta0}{Optional initial velocity forwarded to both full-gradient and
+custom-Stan subsampling initialization.}
+
+\item{free0, stored_velocity0}{Optional sticky state to continue a previous
+run: \code{free0} is the logical mask of free coordinates and
+\code{stored_velocity0} the stored velocities of the frozen ones. Both
+must be supplied together, with length equal to the number of
+parameters, and require \code{sticky = TRUE}.}
 
 \item{sticky}{Logical, whether to use sticky sampling (default: FALSE).}
 
 \item{can_stick}{Logical vector of length d, which coordinates can stick (default: all FALSE).}
 
-\item{model_prior}{Prior distribution object for model selection. Should be of class
-'bernoulli' or 'beta-bernoulli' (default: NULL).}
+\item{model_prior}{Prior distribution object for model selection:
+\code{bernoulli()} or \code{betabernoulli()}.}
 
 \item{parameter_prior}{Numeric vector of length d, prior parameters for sticky sampling (default: NULL).}
+
+\item{slab_prior}{Optional dependent slab prior created by
+\code{dense_gaussian_slab()}, \code{exchangeable_gaussian_slab()},
+or \code{loglinear_gaussian_scale_slab()}. Mutually exclusive with
+\code{parameter_prior}. The full target supplied through \code{f} must
+contain the complete coherent slab represented by \code{slab_prior}; the
+package replaces that slab by its active-face restriction internally.}
 
 \item{grid_n}{Integer, number of grid points for GridThinningStrategy (default: 30).}
 
 \item{grid_t_max}{Numeric, maximum time for grid in GridThinningStrategy (default: 2.0).}
 
-\item{post_warmup_simplify}{Logical. If \code{TRUE}, the grid-thinning
-strategy may switch to a constant bound after warmup, reducing
-gradient calls during the main sampling phase.}
+\item{curvature_backend}{Character string selecting directional curvature:
+`"exact"` or `"finite_difference"`. Custom-Stan subsampling has no
+deterministic exact HVP unless using the analytic dependent OMRF provider.
+Finite differences use
+shifted exact gradients but approximate their directional derivative and
+therefore have step-size and truncation error. `NULL` selects exact
+curvature for full gradients and finite differences for subsampling,
+except that analytic dependent OMRF always uses its exact composed HVP.}
+
+\item{grid_bound}{Character string selecting the GridThinning proposal
+envelope. \code{"value_quadratic"} (default) bounds each grid cell by
+the larger endpoint rate plus \code{grid_curvature_bound * h^2 / 8};
+without \code{grid_curvature_bound} the cells use the ordinary
+GridThinning construction. \code{"constant"} always uses the ordinary
+construction.}
+
+\item{grid_curvature_bound}{Optional nonnegative bound on the curvature of
+the event rate over a grid cell, used by \code{grid_bound =
+"value_quadratic"}. Too small a value invalidates the envelope.}
 
 \item{show_progress}{Logical, whether to show progress bar (default: TRUE).}
 
@@ -101,7 +212,12 @@ Julia's sampler RNG and any generated default initial position when
 
 \item{adaptive_scheme}{Character string, adaptation scheme for AdaptiveBoomerang.
 One of "diagonal" (default, O(d) per update) or "fullrank" (O(d^3) per update,
-better for correlated targets). Ignored for other flow types.}
+better for correlated targets). Ignored for other flow types. With sticky
+sampling, "fullrank" releases frozen coordinates with the experimental
+boundary-proposal law; "diagonal" uses the stored-velocity law.}
+
+\item{refresh_rate}{Refreshment rate of the \code{"BouncyParticle"} and
+\code{"PreconditionedBPS"} flows (default 1). Ignored by the other flows.}
 
 \item{materialize}{Logical. If \code{TRUE} (default), the chain skeleton is
 immediately extracted from Julia into R so that \code{saveRDS()} /
@@ -109,15 +225,28 @@ immediately extracted from Julia into R so that \code{saveRDS()} /
 the extraction and keep only the live Julia reference.
 This can save time and memory if you don't need to save the result or if you plan to call \code{materialize()} manually later.}
 
+\item{trace_storage}{\code{"dense"} (default) keeps the event trace in
+memory. \code{"streaming"} writes it in chunks to
+\code{streaming_trace_directory}, so memory use does not grow with the
+number of events; it is required for \code{online_summaries}.}
+
+\item{streaming_trace_directory}{Directory for the streamed trace. Required
+when \code{trace_storage = "streaming"}, ignored otherwise.}
+
+\item{streaming_trace_buffer_events}{Number of events buffered in memory
+before a chunk is written (default 4096). Used only with
+\code{trace_storage = "streaming"}.}
+
+\item{online_summaries}{\code{NULL} (default) or options from
+\code{online_summary_options()}. Requires \code{trace_storage = "streaming"};
+the summaries are read with \code{read_online_summaries()}.}
+
 \item{support_boundary}{A list created by \code{support_boundary_control()} that
 controls support-boundary diagnostics and heuristic event/refresh recovery.}
 
-\item{subsample}{NULL (default) for full-data sampling, or a named list with
-at least `size` and `prior_standata`. Optional entries include
-`path_to_stanmodel` (the external-C++ subsampled Stan model; defaults to
-`path_to_stanmodel`), `hpp_path`, `n_anchor_updates`, `hvp_mode`,
-`use_hcv`, `use_anchor_bank`, `use_fd_hvp`, `compute_lp`, and
-`resample_dt`.}
+\item{control}{Additional call-local settings from \code{\link{sampler_control}}.}
+
+\item{compile_options}{Settings from \code{\link{stan_compile_options}}.}
 }
 \value{
 A \code{pdmp_result} object. Use \code{mean}, \code{var},
